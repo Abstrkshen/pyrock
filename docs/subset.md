@@ -5,8 +5,8 @@
 These constructs become plain Rust with no Python objects involved:
 
 * Top-level functions, including direct and mutual recursion. Parameters may be positional-only
-  (`/`), positional-or-keyword or keyword-only (`*`), with literal defaults (numbers, strings,
-  `None`, booleans, tuples of those). Calls may pass keyword arguments; arguments are still
+  (`/`), positional-or-keyword or keyword-only (`*`), with defaults (any expression, evaluated
+  once where the `def` runs, so a mutable default is shared as in CPython). Calls may pass keyword arguments; arguments are still
   evaluated in source order.
 * `T | None`: a value that is `None` on some paths and a `T` on others is a native
   `Option<T>` (no boxing, also in native-only mode). Using it where a `T` is needed checks it
@@ -178,7 +178,7 @@ in `explain`. Calling one gives P150. A struct handle passed to CPython is P231.
 | Code | Meaning |
 |---|---|
 | P001 | Syntax error (from CPython's parser) |
-| P100/P101 | Unsupported statement, expression, decorator or parameter form |
+| P100 | Unsupported statement, expression, decorator or parameter form |
 | P110 | Integer literal outside i64 |
 | P002 | The frontend could not run (`python3` missing, AST protocol mismatch) |
 | P003 | A `.rs` file that does not parse |
@@ -200,17 +200,18 @@ in `explain`. Calling one gives P150. A struct handle passed to CPython is P231.
 | P308 | Warning: an attribute that no code ever assigns is read (`AttributeError` at runtime) |
 | P310/P311 | Specialization limit (16 per function; hybrid mode shares one `object` specialization instead) or inference did not converge |
 
-Not yet supported in either mode (P100/P101; in an imported `.py`, hybrid mode imports the
+Not yet supported in either mode (P100; in an imported `.py`, hybrid mode imports the
 whole module through CPython instead, P220):
 
 * classes with a CPython base class, multiple inheritance, metaclasses and class keywords,
   class decorators other than `@dataclass`, `@dataclass(...)` options, adding class
   attributes after the class statement;
-* non-literal defaults of top-level functions; `f(*xs)` where `xs` is a list (not a tuple of
-  known length) filling fixed parameters, and `*`/`**` arguments to Rust/C functions;
+* `f(*xs)` where `xs` is a list (not a tuple of known length) filling fixed parameters, and
+  `*`/`**` arguments to Rust/C functions;
 * `for ... else` / `while ... else`, `match`, `del` of a plain name, `except*`, `**` inside a
   dict literal, complex numbers;
-* relative imports, `from x import *`, imports inside functions;
+* relative imports, `from x import *`, a natively compiled module (`.py`/`.rs`/`.c` next to
+  the file) imported inside a function or block (CPython imports there are fine);
 * `globals()`, `locals()`, `vars()`/`dir()` without arguments, `eval`/`exec` without an
   explicit namespace (compiled code has no Python frame for them; `eval(src, ns)` works);
 * arbitrary-precision integers (results beyond i64 raise `OverflowError`).

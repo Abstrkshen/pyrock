@@ -327,6 +327,11 @@ struct Lowerer<'l> {
     ret_ann: Option<Ty>,
     /// Import slots referenced by lowered code (unused `typing` imports are dropped).
     used_slots: HashSet<usize>,
+    /// Non-literal defaults of top-level functions and methods: a hidden
+    /// global per default, assigned where the `def` runs (CPython evaluates
+    /// defaults once, at definition time).
+    pending_defaults: HashMap<FuncId, Vec<(String, Value)>>,
+    hidden_globals: HashSet<String>,
     diags: Vec<Diagnostic>,
 }
 
@@ -527,6 +532,25 @@ fn global_decls(body: &[Value], out: &mut HashSet<String>) {
 /// Collect names bound by assignment-like statements, in first-binding order.
 /// Does not descend into nested function definitions.
 fn collect_bindings(body: &[Value], out: &mut Vec<String>, top: bool) {
+    collect_bindings_in(body, out, top, false)
+}
+
+/// The names an `import` statement binds (`import a.b` binds `a`).
+fn import_names(st: &Value) -> Vec<String> {
+    arr(st, "names")
+        .iter()
+        .map(|a| match a["asname"].as_str() {
+            Some(n) => n.to_string(),
+            None if ty(st) == "Import" => sstr(a, "name").split('.').next().unwrap_or("").to_string(),
+            None => sstr(a, "name").to_string(),
+        })
+        .filter(|n| n != "*")
+        .collect()
+}
+
+/// `nested`: inside a block or function. A module's top-level imports bind
+/// module-wide names (slots); nested ones assign a variable.
+fn collect_bindings_in(body: &[Value], out: &mut Vec<String>, top: bool, nested: bool) {
     fn push(n: &str, out: &mut Vec<String>) {
         if !out.iter().any(|x| x == n) {
             out.push(n.to_string());
@@ -555,31 +579,36 @@ fn collect_bindings(body: &[Value], out: &mut Vec<String>, top: bool) {
             }
             "For" => {
                 target(&st["target"], out);
-                collect_bindings(arr(st, "body"), out, top);
-                collect_bindings(arr(st, "orelse"), out, top);
+                collect_bindings_in(arr(st, "body"), out, top, true);
+                collect_bindings_in(arr(st, "orelse"), out, top, true);
             }
             "If" | "While" => {
-                collect_bindings(arr(st, "body"), out, top);
-                collect_bindings(arr(st, "orelse"), out, top);
+                collect_bindings_in(arr(st, "body"), out, top, true);
+                collect_bindings_in(arr(st, "orelse"), out, top, true);
             }
             "Try" => {
-                collect_bindings(arr(st, "body"), out, top);
+                collect_bindings_in(arr(st, "body"), out, top, true);
                 for h in arr(st, "handlers") {
                     if let Some(n) = h["name"].as_str() {
                         push(n, out);
                     }
-                    collect_bindings(arr(h, "body"), out, top);
+                    collect_bindings_in(arr(h, "body"), out, top, true);
                 }
-                collect_bindings(arr(st, "orelse"), out, top);
-                collect_bindings(arr(st, "finalbody"), out, top);
+                collect_bindings_in(arr(st, "orelse"), out, top, true);
+                collect_bindings_in(arr(st, "finalbody"), out, top, true);
             }
             "With" => {
                 for item in arr(st, "items") {
                     target(&item["optional_vars"], out);
                 }
-                collect_bindings(arr(st, "body"), out, top);
+                collect_bindings_in(arr(st, "body"), out, top, true);
             }
-            "FunctionDef" if !top => push(sstr(st, "name"), out),
+            "FunctionDef" | "AsyncFunctionDef" if nested || !top => push(sstr(st, "name"), out),
+            "Import" | "ImportFrom" if nested || !top => {
+                for n in import_names(st) {
+                    push(&n, out);
+                }
+            }
             _ => {}
         }
     }
@@ -612,6 +641,8 @@ impl<'l> Lowerer<'l> {
             in_module: true,
             ret_ann: None,
             used_slots: HashSet::new(),
+            pending_defaults: HashMap::new(),
+            hidden_globals: HashSet::new(),
             diags: vec![],
         }
     }
@@ -655,6 +686,7 @@ impl<'l> Lowerer<'l> {
                 anns.extend(sig.vararg.iter().chain(&sig.kwarg).map(|_| None));
                 self.ld.func_anns.insert(id, (anns, parse_ann(&st["returns"])));
                 self.ld.func_sigs.insert(id, call_sig(&sig, self.unit));
+                self.hoist_defaults(id, &name, &sig, sp);
                 self.func_ids.insert(name.clone(), (id, sp));
                 if arr(st, "decorator_list").is_empty() {
                     self.bindings.insert(name.clone(), Binding::Func(id));
@@ -671,11 +703,12 @@ impl<'l> Lowerer<'l> {
                 self.declare_class(st);
             }
         }
-        // Pass 1b: resolve imports (they are visible inside functions).
+        // Pass 1b: resolve top-level imports (they are visible inside
+        // functions). Imports in blocks and functions are lowered in place
+        // (`lower_nested_import`).
         for st in body {
-            match ty(st) {
-                "Import" | "ImportFrom" => self.resolve_import(st),
-                _ => self.reject_nested_imports(st),
+            if matches!(ty(st), "Import" | "ImportFrom") {
+                self.resolve_import(st);
             }
         }
         let mut module_locals = Vec::new();
@@ -696,7 +729,29 @@ impl<'l> Lowerer<'l> {
             .filter(|st| ty(st) == "ClassDef")
             .flat_map(|c| arr(c, "body").iter().filter(|m| ty(m) == "FunctionDef"))
             .collect();
-        for st in body.iter().filter(|st| ty(st) == "FunctionDef").chain(methods) {
+        // Functions defined inside module-level blocks (`try: from _c import f`
+        // / `except ImportError: def f(...)`) read module variables too.
+        fn block_defs<'v>(stmts: &'v [Value], out: &mut Vec<&'v Value>) {
+            for st in stmts {
+                match ty(st) {
+                    "FunctionDef" | "AsyncFunctionDef" => out.push(st),
+                    "If" | "While" | "For" | "With" | "Try" => {
+                        for key in ["body", "orelse", "finalbody"] {
+                            block_defs(arr(st, key), out);
+                        }
+                        for h in arr(st, "handlers") {
+                            block_defs(arr(h, "body"), out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut nested_defs = Vec::new();
+        for st in body.iter().filter(|st| !matches!(ty(st), "FunctionDef" | "AsyncFunctionDef" | "ClassDef")) {
+            block_defs(std::slice::from_ref(st), &mut nested_defs);
+        }
+        for st in body.iter().filter(|st| ty(st) == "FunctionDef").chain(methods).chain(nested_defs) {
             let sig = signature(&st["args"]).1;
             let mut fl = sig.names;
             fl.extend(sig.vararg);
@@ -719,6 +774,7 @@ impl<'l> Lowerer<'l> {
             g.extend(v.iter().map(|(b, _, _)| b.clone()));
         }
         g.extend(self.decorated.iter().cloned());
+        g.extend(self.hidden_globals.iter().cloned());
         let mut lam = HashSet::new();
         for st in body.iter().filter(|st| ty(st) != "FunctionDef") {
             scan_lambda_names(st, &mut lam);
@@ -752,6 +808,7 @@ impl<'l> Lowerer<'l> {
                 let f = self.lower_function(id, st);
                 (self.locals, self.in_module, self.extra_locals, self.cur_fid) = saved;
                 self.ld.funcs[id] = Some(f);
+                main_body.extend(self.default_assigns(id));
                 if self.decorated.contains(name) {
                     let fsp = self.span(st);
                     let mut value = Expr { kind: ExprKind::MakeClosure { func: id, captures: vec![], defaults: vec![] }, span: fsp };
@@ -815,22 +872,6 @@ impl<'l> Lowerer<'l> {
             is_generator: false,
         });
         self.ld.units[self.unit].init = init;
-    }
-
-    fn reject_nested_imports(&mut self, st: &Value) {
-        for h in arr(st, "handlers") {
-            self.reject_nested_imports(h);
-        }
-        for key in ["body", "orelse", "finalbody"] {
-            for s in arr(st, key) {
-                if matches!(ty(s), "Import" | "ImportFrom") {
-                    let sp = self.span(s);
-                    self.unsupported(sp, "import inside a function or block", "move imports to module level");
-                } else {
-                    self.reject_nested_imports(s);
-                }
-            }
-        }
     }
 
     fn record(&mut self, name: &str, kind: &'static str, path: Option<&Path>, note: Option<String>) {
@@ -995,6 +1036,102 @@ impl<'l> Lowerer<'l> {
         self.import_actions.insert(sp, actions);
     }
 
+    /// An import inside a function or a block (`try: import x`, a lazy
+    /// import in a function): a CPython import that assigns the bound names as
+    /// variables (Python objects), as CPython does. Natively compiled modules
+    /// (`.py`/`.rs`/`.c` next to the file) must be imported at module level,
+    /// where their functions are bound for direct calls.
+    fn lower_nested_import(&mut self, st: &Value) -> Option<Stmt> {
+        let sp = self.span(st);
+        let mut stmts = Vec::new();
+        let native = |me: &mut Self, module: &str| -> bool {
+            if module.contains('.') || !["py", "rs", "c"].iter().any(|ext| me.dir.join(format!("{module}.{ext}")).exists()) {
+                return false;
+            }
+            me.unsupported(
+                sp,
+                &format!("import of the natively compiled module `{module}` inside a function or block"),
+                "import it at module level",
+            );
+            true
+        };
+        if ty(st) == "Import" {
+            for alias in arr(st, "names") {
+                let module = sstr(alias, "name").to_string();
+                if native(self, &module) {
+                    return None;
+                }
+                let asname = alias["asname"].as_str().map(String::from);
+                let bind = asname.clone().unwrap_or_else(|| module.split('.').next().unwrap_or("").to_string());
+                let slot = self.add_slot(&bind, SlotKind::Import { module: module.clone(), bind_top: asname.is_none() });
+                self.record(&module, "cpython", None, None);
+                stmts.push(Stmt { kind: StmtKind::Import(ImportAction::Py(slot)), span: sp });
+                self.used_slots.insert(slot);
+                let value = Expr { kind: ExprKind::Slot(slot), span: sp };
+                stmts.push(Stmt { kind: self.bind_target(bind, value), span: sp });
+            }
+        } else {
+            if st["level"].as_u64().unwrap_or(0) > 0 {
+                self.unsupported(sp, "relative import", "use an absolute import next to the entry file");
+                return None;
+            }
+            let module = sstr(st, "module").to_string();
+            if native(self, &module) {
+                return None;
+            }
+            for alias in arr(st, "names") {
+                let attr = sstr(alias, "name").to_string();
+                if attr == "*" {
+                    self.unsupported(sp, "`from ... import *`", "import the names you use explicitly");
+                    return None;
+                }
+                let bind = alias["asname"].as_str().unwrap_or(&attr).to_string();
+                let slot = self.add_slot(&bind, SlotKind::From { module: module.clone(), attr: attr.clone() });
+                stmts.push(Stmt { kind: StmtKind::Import(ImportAction::Py(slot)), span: sp });
+                self.used_slots.insert(slot);
+                let value = Expr { kind: ExprKind::Slot(slot), span: sp };
+                stmts.push(Stmt { kind: self.bind_target(bind, value), span: sp });
+            }
+            self.record(&module, "cpython", None, None);
+        }
+        match stmts.len() {
+            0 => None,
+            1 => stmts.into_iter().next(),
+            _ => Some(Stmt { kind: StmtKind::If { test: Expr { kind: ExprKind::Bool(true), span: sp }, body: stmts, orelse: vec![] }, span: sp }),
+        }
+    }
+
+    /// Non-literal defaults of a top-level function or method (`qual` is its
+    /// qualified name): calls read a hidden global, which `default_assigns`
+    /// assigns where the `def` runs.
+    fn hoist_defaults(&mut self, id: FuncId, qual: &str, sig: &Sig, sp: Span) {
+        for (i, (n, d)) in sig.names.iter().zip(&sig.defaults).enumerate() {
+            let Some(d) = d else { continue };
+            if literal_default(d) {
+                continue;
+            }
+            let g = format!("{qual}.<default {n}>");
+            if let Some(cs) = self.ld.func_sigs.get_mut(&id) {
+                cs.defaults[i] = Some(Expr { kind: ExprKind::Global { unit: self.unit, name: g.clone() }, span: sp });
+            }
+            self.hidden_globals.insert(g.clone());
+            self.pending_defaults.entry(id).or_default().push((g, d.clone()));
+        }
+    }
+
+    /// The assignments of `id`'s hoisted defaults, lowered in the current
+    /// (module) scope, in parameter order.
+    fn default_assigns(&mut self, id: FuncId) -> Vec<Stmt> {
+        let mut out = Vec::new();
+        for (g, d) in self.pending_defaults.remove(&id).unwrap_or_default() {
+            let dsp = self.span(&d);
+            if let Some(value) = self.lower_expr(&d) {
+                out.push(Stmt { kind: StmtKind::AssignGlobal { unit: self.unit, name: g, value }, span: dsp });
+            }
+        }
+        out
+    }
+
     fn extern_missing(&mut self, e: usize, attr: &str, sp: Span) {
         let m = &self.ld.externs[e];
         let why = m.skipped.iter().find(|(n, _)| n == attr).map(|(_, w)| w.clone());
@@ -1014,17 +1151,6 @@ impl<'l> Lowerer<'l> {
         let sp = self.span(st);
         let a = &st["args"];
         let (_, sig) = signature(a);
-        for (n, d) in sig.names.iter().zip(&sig.defaults) {
-            if let Some(d) = d {
-                if !literal_default(d) && self.scopes.is_empty() {
-                    let dsp = self.span(d);
-                    self.diags.push(
-                        Diagnostic::error("P101", dsp, format!("default value of `{n}` in `{name}` must be a literal"))
-                            .note("CPython evaluates defaults once, at `def` time; pyfast inlines them at each call. Use `None` and assign in the body"),
-                    );
-                }
-            }
-        }
         let mut params: Vec<String> = sig.names.clone();
         params.extend(sig.vararg.clone());
         params.extend(sig.kwarg.clone());
@@ -1204,6 +1330,9 @@ impl<'l> Lowerer<'l> {
                     value = Expr { kind: ExprKind::CallObj { func: Box::new(dec), args: vec![value], kwargs: vec![] }, span: sp };
                 }
                 self.bind_target(name, value)
+            }
+            "Import" | "ImportFrom" if !self.import_actions.contains_key(&sp) && !self.var_imports.contains_key(&sp) => {
+                return self.lower_nested_import(st);
             }
             "Import" | "ImportFrom" => {
                 let actions = self.import_actions.remove(&sp).unwrap_or_default();
@@ -1905,6 +2034,7 @@ impl<'l> Lowerer<'l> {
                     anns.extend(sig.vararg.iter().chain(&sig.kwarg).map(|_| None));
                     self.ld.func_anns.insert(id, (anns, parse_ann(&item["returns"])));
                     self.ld.func_sigs.insert(id, call_sig(&sig, self.unit));
+                    self.hoist_defaults(id, &format!("{name}.{mname}"), &sig, isp);
                     if matches!(kind, MethodKind::Instance | MethodKind::Property | MethodKind::Setter) {
                         match sig.names.first() {
                             Some(self_name) => scan_self_fields(arr(item, "body"), self_name, &mut fields),
@@ -1969,6 +2099,12 @@ impl<'l> Lowerer<'l> {
                 "FunctionDef" => {
                     let m = &methods[mi];
                     mi += 1;
+                    let mfunc = m.func;
+                    self.cur_fid = None;
+                    self.locals = self.module_vars.difference(&self.globals).cloned().collect();
+                    self.in_module = true;
+                    out.extend(self.default_assigns(mfunc));
+                    let m = &methods[mi - 1];
                     let self_name = match m.kind {
                         MethodKind::Static | MethodKind::Class => None,
                         _ => self.ld.func_sigs.get(&m.func).and_then(|s| s.names.first().cloned()),

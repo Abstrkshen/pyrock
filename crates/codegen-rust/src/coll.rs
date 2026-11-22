@@ -362,6 +362,11 @@ impl FnEmitter<'_, '_> {
                     )
                 }
             },
+            // A dict that never receives a key (`{}` only read from): every
+            // lookup is a KeyError, with the key's repr as CPython prints it.
+            Some(Comp::Dict(k, _)) if k.is_never() => {
+                format!("{{ let _ = &{o}; let __k = {i}; rt::coll::missing_key(&rt::conv::PyFmt::py_repr(&__k))? }}")
+            }
             Some(Comp::Dict(k, _)) => format!("{}.get(&{})?", o, borrow(&convert(&i, it, k))),
             _ => unreachable!("subscript of {ot}"),
         }
@@ -491,7 +496,15 @@ impl FnEmitter<'_, '_> {
         let int = |v: &(String, Ty)| crate::as_int(&v.0, v.1);
         if recv == Ty::Str {
             let s = b(&o);
-            let arg_str = |v: &(String, Ty)| format!("&{}", borrow(&v.0));
+            // A Python object where a str is needed (`sep=os.sep`): unboxed
+            // with a checked TypeError.
+            let arg_str = |v: &(String, Ty)| {
+                if v.1 == Ty::Obj {
+                    format!("&rt::py::to_str(&{})?", borrow(&v.0))
+                } else {
+                    format!("&{}", borrow(&v.0))
+                }
+            };
             let opt_str = |v: Option<&(String, Ty)>| match v {
                 None => "None".to_string(),
                 Some((c, Ty::None)) => format!("{{ {c}; None }}"),

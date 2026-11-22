@@ -10,8 +10,7 @@ Format: `file.py:LINE:COL  CODE  error|warning: message`, followed by indented
 | P001 | Python syntax error (from CPython's parser) | Fix the syntax. Check that the `--python` interpreter version supports it |
 | P002 | Frontend failure (python3 missing, protocol mismatch) | Make sure `python3` (or `--python`) runs |
 | P003 | An imported `.rs` file doesn't parse | Fix the Rust syntax |
-| P100 | Unsupported statement or expression: `match`, `for`/`while ... else`, `del name`, `except*`, complex literals, `**` in a dict literal, relative import, `import *`, import inside a function, a class with a CPython base class / metaclass / several bases, unsupported decorators | Rewrite (see language.md), or move that code into an imported `.py` so hybrid mode imports it through CPython (P220) |
-| P101 | A non-literal default value of a top-level function | Use `None` as the default and assign in the body |
+| P100 | Unsupported statement or expression: `match`, `for`/`while ... else`, `del name`, `except*`, complex literals, `**` in a dict literal, relative import, `import *`, a native module imported inside a function, a class with a CPython base class / metaclass / several bases, unsupported decorators, `globals()`/`locals()`/`eval` without a namespace | Rewrite (see language.md), or move that code into an imported `.py` so hybrid mode imports it through CPython (P220) |
 | P110 | Integer literal outside i64 | Use a float, or compute it in a CPython module |
 | P140 | `mod.NAME` / `from mod import NAME` where the native module has no function, class or variable NAME | Define it in that module |
 | P141 | A module-level function or class is defined twice, or a name rebinds a function or import | Use a different name |

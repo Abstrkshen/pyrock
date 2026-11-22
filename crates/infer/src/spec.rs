@@ -593,6 +593,13 @@ fn add_spec(prog: &mut Program, key: SpecKey) {
             }
         }
     }
+    // Functions defined in module-level blocks (`if c: def f` / `else: def f`)
+    // share a name and have no enclosing function to tell them apart.
+    let mangled = if prog.specs.iter().any(|s| s.mangled == mangled && s.key.func != key.func) {
+        mangled.replacen("__", &format!("_f{}__", key.func), 1)
+    } else {
+        mangled
+    };
     let maybe_unbound = definite::maybe_unbound(f);
     let id = prog.specs.len();
     prog.index.insert(key.clone(), id);
@@ -1020,6 +1027,16 @@ impl Ctx<'_, '_> {
     /// A value of type `vt` is stored where values have type `dest`: when it
     /// carries identity (a mutable container) its own place must agree.
     fn flow(&mut self, value: &Expr, vt: Ty, dest: Ty) {
+        // A function or instance stored where a Python object is kept (a
+        // variable that also holds a CPython value): it is boxed at the
+        // store, so it needs its Python wrapper like any escaping value.
+        if dest == Ty::Obj && vt != Ty::Obj {
+            let members = vt.union_members().unwrap_or(vec![vt]);
+            if has_class(vt) || members.iter().any(|m| m.as_closure().is_some()) {
+                self.escape(value);
+                return;
+            }
+        }
         if vt != dest && vt.has_mutable() && is_place(value) {
             self.widen(value, dest);
         }

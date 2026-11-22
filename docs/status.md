@@ -18,10 +18,10 @@ exception line.
 ## How much of Python
 
 51 of the 55 statement and expression kinds of Python 3.12 compile natively. The missing
-ones are `match`, `:=`, `type X = ...` and `except*`. Measured on code as it is, 54% of the
-standard library's functions and methods are accepted, and 32–38% of those in `requests`,
-`huggingface_hub` and `langchain_core`. Library code leans on lazy imports, non-literal
-defaults, `abc`/`functools` decorators and relative imports, which are the main gaps.
+ones are `match`, `:=`, `type X = ...` and `except*`. Measured on code as it is, 60% of the
+standard library's functions and methods are accepted, and 32–40% of those in `requests`,
+`huggingface_hub` and `langchain_core`. Library code leans on `abc`/`functools` decorators,
+`Enum`/`NamedTuple` classes, mixins and relative imports, which are the main gaps.
 Details and the ranked blockers: [coverage.md](coverage.md).
 
 ## What compiles natively
@@ -118,9 +118,8 @@ next to the program; compiled dependencies are cached in `~/.cache/pyfast/target
   CPython instead, warning P220).
 * `match`, `:=`, `for`/`while ... else`, `del name`, `except*`, `[*a, *b]`, `{**d}`, `...`,
   complex numbers.
-* Non-literal default values of top-level functions; `f(*xs)` where `xs` is a list filling
-  fixed parameters.
-* Relative imports, `import *`, imports inside functions or blocks.
+* `f(*xs)` where `xs` is a list filling fixed parameters.
+* Relative imports, `import *`, a native module (`.py`/`.rs`/`.c`) imported inside a function.
 * Arbitrary-precision integers.
 * `globals()`, `locals()`, `vars()`/`dir()` without arguments, and `eval`/`exec` without an
   explicit namespace dict (compiled code has no Python frame; a module using them is imported

@@ -205,8 +205,20 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
                 println!("{}", exe.display());
                 return Ok(ExitCode::SUCCESS);
             }
-            let status = Command::new(&exe).args(&o.passthrough).status().map_err(|e| e.to_string())?;
-            Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+            // Replace this process with the program, so signals (`kill %1`,
+            // a service manager's SIGTERM) and the exit status reach it
+            // directly instead of leaving it running behind a dead `pyfast`.
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                let err = Command::new(&exe).args(&o.passthrough).exec();
+                Err(format!("failed to run {}: {err}", exe.display()))
+            }
+            #[cfg(not(unix))]
+            {
+                let status = Command::new(&exe).args(&o.passthrough).status().map_err(|e| e.to_string())?;
+                Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+            }
         }
         other => Err(format!("unknown command `{other}`\n\n{USAGE}")),
     }

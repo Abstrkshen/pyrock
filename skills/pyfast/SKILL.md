@@ -61,8 +61,9 @@ imports `.c` files.
 | `x.c` (+`x.h`) | Built with `cc`, called over FFI. Scalars, strings, pointer+length arrays, `typedef struct` values, function pointers; `// pyfast: link` / `pkg-config` |
 | nothing | CPython import at runtime (stdlib, site-packages, numpy, ...) |
 
-Dotted names (`import os.path`) always go to CPython. Relative imports, `import *` and imports
-inside functions are rejected. Full details and type tables are in [references/imports.md](references/imports.md).
+Dotted names (`import os.path`) always go to CPython. Imports inside functions and `try`/`if`
+blocks work for CPython modules (`try: import x` / `except ImportError: x = None`). Relative
+imports and `import *` are rejected. Full details and type tables are in [references/imports.md](references/imports.md).
 
 ## What compiles natively (short version)
 
@@ -81,10 +82,10 @@ Not supported in either mode: classes with a CPython base class or a metaclass (
 an imported `.py`, which falls back to CPython),
 relative imports, `import *`.
 
-Not supported either: `match`, `:=`, `for`/`while ... else`, `del name`, imports inside
-functions, non-literal defaults of top-level functions, `Enum`/`NamedTuple` subclasses,
+Not supported either: `match`, `:=`, `for`/`while ... else`, `del name`, a native module
+imported inside a function, `Enum`/`NamedTuple` subclasses,
 multiple inheritance, method decorators other than `@property`/`@staticmethod`/`@classmethod`.
-On the standard library as it is, 54% of functions are accepted (`docs/coverage.md` in the repo).
+On the standard library as it is, 60% of functions are accepted (`docs/coverage.md` in the repo).
 
 See [references/language.md](references/language.md) for the precise subset, semantics and
 the rewrites that make code compile.

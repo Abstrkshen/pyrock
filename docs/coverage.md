@@ -11,21 +11,20 @@ covered.
   `ast` module compile natively (table below). The 4 missing are `match`, the walrus
   operator `:=`, `type X = ...` and `except*`. Some forms of supported nodes are missing too:
   the `...` literal, complex numbers, and `*`/`**` unpacking inside list/dict literals. Several supported nodes have unsupported forms: `for ... else`,
-  `del name`, `class` inside a function or `if`, relative imports, imports inside functions,
-  non-literal default values, and classes with a CPython base class (`Enum`, `NamedTuple`,
-  `Exception` subclasses are fine), multiple bases or a metaclass.
+  `del name`, `class` inside a function or `if`, relative imports, and classes with a CPython base class (`Enum`, `NamedTuple`; `Exception` subclasses are
+  fine), multiple bases or a metaclass.
 * **Values:** everything a program builds itself (numbers, strings, lists, dicts, sets,
   tuples, classes, closures, generators, coroutines) is native. Values from CPython imports
   (numpy arrays, sockets, `re` matches, ...) stay Python objects; in hybrid mode they work
   through CPython at reported boundaries, and native-only mode rejects them.
-* **Real code, as it is:** 54% of the functions and methods in the standard library pass
-  (49% of their lines). Third-party packages pass at 32–38%. Whole modules pass much less
-  often (8% of stdlib modules), because one blocker in a module stops that whole module.
+* **Real code, as it is:** 60% of the functions and methods in the standard library pass
+  (59% of their lines). Third-party packages pass at 32–40%. Whole modules pass much less
+  often (31 of 167 stdlib modules), because one blocker in a module stops that whole module.
 * **Code written for pyfast:** the 21 samples, 3 demos and 14 user samples all compile; the
   fully native ones need no CPython at all.
 
-Library code is the hardest case: it is full of lazy imports, decorators from `abc` and
-`functools`, `Enum`/`NamedTuple` classes and relative imports. Application code, especially
+Library code is the hardest case: it is full of decorators from `abc` and `functools`,
+`Enum`/`NamedTuple` classes, mixins and relative imports. Application code, especially
 hot loops, uses far fewer of these. In hybrid mode none of this stops a program: a module
 pyfast can't compile is imported through CPython instead (P220), and a CPython package is
 always usable.
@@ -36,7 +35,7 @@ All statement and expression nodes of Python 3.12's `ast` module.
 
 | Node | Status | Notes |
 |---|---|---|
-| `FunctionDef` | native | parameters `/`, `*`, defaults (literal for top-level functions), `*args`, `**kwargs`, nested functions, decorators |
+| `FunctionDef` | native | parameters `/`, `*`, defaults (any expression, evaluated once at `def` time), `*args`, `**kwargs`, nested functions, functions defined in `if`/`try` blocks, decorators |
 | `AsyncFunctionDef` | native | run by asyncio; also async generators |
 | `ClassDef` | native, at module level | single inheritance; `@dataclass`; not inside a function or `if`, not with a CPython base class, several bases, `metaclass=` or other class decorators |
 | `Return`, `Pass`, `Break`, `Continue`, `Expr` | native | |
@@ -50,7 +49,7 @@ All statement and expression nodes of Python 3.12's `ast` module.
 | `Try` | native | `except`, `else`, `finally`, `except (A, B) as e` |
 | `TryStar` (`except*`) | not supported | |
 | `Assert` | native | |
-| `Import`, `ImportFrom` | at module level | `.py`/`.rs`/`.c` next to the file are compiled, everything else is a CPython import. Relative imports, `import *` and imports in functions are P100 |
+| `Import`, `ImportFrom` | native | `.py`/`.rs`/`.c` next to the file are compiled (imported at module level), everything else is a CPython import, also inside functions and `try`/`if` blocks. Relative imports, `import *` and a native module imported inside a function are P100 |
 | `Global`, `Nonlocal` | native | |
 | `Match` | not supported | |
 | `TypeAlias` (`type X = ...`) | not supported | |
@@ -76,10 +75,14 @@ Results (pyfast 0.1.0, CPython 3.12.3, 2026-11-23):
 
 | Corpus | Modules with no error | Functions + methods accepted |
 |---|---|---|
-| CPython standard library (top-level modules) | 14 / 167 (8%) | 3707 / 6823 (54.3%; 48.5% of lines) |
-| `requests` | 2 / 19 | 102 / 267 (38.2%) |
-| `huggingface_hub` | 0 / 35 | 329 / 877 (37.5%) |
-| `langchain_core` | 4 / 18 | 35 / 108 (32.4%) |
+| CPython standard library (top-level modules) | 31 / 167 (19%) | 4071 / 6823 (59.7%; 58.9% of lines) |
+| `requests` | 3 / 19 | 107 / 267 (40.1%) |
+| `huggingface_hub` | 0 / 35 | 352 / 877 (40.1%) |
+| `langchain_core` | 5 / 18 | 35 / 108 (32.4%) |
+
+Before phase 8 started (same day): stdlib 14 modules and 54.3% of functions; `requests`
+38.2%, `huggingface_hub` 37.5%. Imports inside functions and blocks, non-literal defaults
+and functions defined in module-level blocks account for the difference.
 
 What the measurement means:
 
@@ -93,32 +96,28 @@ What the measurement means:
 * Each file is checked alone, so its imports are CPython imports. A blocker in a sibling
   module doesn't count twice.
 
-The most common blockers in the standard library, by count (undefined-name errors are left
-out because most of them follow from another blocker, such as an import inside a function):
+The most common blockers left in the standard library, by count (undefined-name errors are
+left out because most of them follow from another blocker):
 
 | Count | Blocker | Typical source |
 |---|---|---|
-| 452 | Import inside a function or a `try`/`if` block | lazy imports, `try: import _speedup` fallbacks |
-| 233 | Non-literal default value (`def f(x=_sentinel)`, `sep=os.sep`) | sentinels, module constants |
 | 152 | Method decorator other than `@property`/`@staticmethod`/`@classmethod` | `@abstractmethod` (107), `@functools.cached_property`, `@lru_cache`, `@contextmanager` |
 | 110 | Computed class-body assignment | `__add__, __radd__ = _operator_fallbacks(...)`, dispatch tables |
 | 101 | Base class that isn't a native class | `Enum`, `NamedTuple`, `dict`, `threading.Thread`, ABCs |
 | 54 | `del name` | cleaning up module namespaces |
+| 42 / 4 | `for ... else` / `while ... else` | |
 | 41 | Class keywords | `metaclass=ABCMeta` |
 | 40 | `class` inside a function or block | |
 | 39 | Multiple inheritance | mixins |
-| 38 / 4 | `for ... else` / `while ... else` | |
 | 35 | Walrus `:=` | |
+| 33 | `eval`/`exec`/`globals()`/`locals()` without a namespace | |
+| 25 | A module-level name bound both by `def`/`import` and by assignment | `try: from _c import f` / `except: f = None` |
 | 22 | Class decorators | `@functools.total_ordering`, `@dataclass(frozen=True)` options |
 | 20 | `[*a, *b]` / `{*a}` | |
 | 11 | `from x import *` | |
 
-In third-party packages, relative imports (`from . import utils`) lead, followed by imports
-inside functions and method decorators.
-
-Removing the first three blockers (lazy imports, non-literal defaults, `abc`/`functools`
-method decorators) would accept most of the remaining stdlib functions. They are the next
-items in [roadmap.md](roadmap.md) phase 8.
+In third-party packages, relative imports (`from . import utils`) lead, followed by method
+decorators.
 
 ## What this doesn't cover
 

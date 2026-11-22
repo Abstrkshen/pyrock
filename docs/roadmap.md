@@ -103,10 +103,21 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 From a review of `Project.md` against the implementation (2026-11-23) and the coverage
 measurement in [coverage.md](coverage.md). Not started unless marked.
 
+Problems found while building `.ignore/samples/ollama-agents` (its `FINDINGS.md`; repros in
+its `repro/` folder), which block ordinary app code:
+
+- [ ] F-01: `x is None` checks don't narrow `str | None` for later uses (P301/P307)
+- [ ] F-02: an empty module-level dict filled later (`AGENTS = {}`) gives unknown value
+      types; `AGENTS: dict[str, Agent] = {}` is ignored (P215)
+- [ ] F-03: a list attribute appended in one method and read in another has an unresolved
+      element type (P215)
+- [ ] F-05: annotations on local variables (`parts: list[str] = []`) are ignored
+
 Language coverage (ordered by how much code each one blocks in the standard library):
 
-- [ ] Imports inside functions and in `try`/`if` blocks (452 stdlib sites)
-- [ ] Non-literal default values of top-level functions, evaluated once at definition (233)
+- [x] Imports inside functions and in `try`/`if` blocks (452 stdlib sites)
+- [x] Non-literal default values of top-level functions, evaluated once at definition (233)
+- [x] Functions defined inside module-level `if`/`try` blocks
 - [ ] `@abstractmethod`, `@functools.cached_property`, `@lru_cache` on methods, `@contextmanager` (152)
 - [ ] Computed class-body assignments, `del name`, `for`/`while ... else`, `:=`, `[*a, *b]`, `{**d}`, `...`
 - [ ] `Enum`, `NamedTuple` and `TypedDict` classes; multiple inheritance (mixins)
@@ -763,3 +774,37 @@ Each bridged operation cost ~400 ns.
 * Test: `tests/golden/stale_specs.py` (a dict gaining a key in each of 20 functions; the
   old compiler bridged `show(st, x: object)`). `cargo test --workspace`, samples 21/21,
   demos 3/3.
+
+### Phase 8: imports in functions and blocks, non-literal defaults (2026-11-23)
+
+* Imports inside functions and inside module-level `try`/`if`/`with`/loop blocks: a CPython
+  import there fills a slot and assigns the bound name as a variable (a Python object), in
+  the scope CPython binds it in. `try: import x` / `except ImportError: x = None` therefore
+  works (the variable is `object | None`). A natively compiled module (`.py`/`.rs`/`.c` next
+  to the file) imported inside a function is still P100: its functions are bound for direct
+  calls at module level.
+* `from m import missing` now raises CPython's message, `cannot import name 'missing' from
+  'm' (path)`, instead of `No module named 'm.missing'`.
+* Non-literal defaults of top-level functions and methods (`def f(sep=os.sep, cache={})`):
+  each becomes a hidden global, assigned where the `def` (or the class statement) runs, and
+  calls that omit the argument read it. So a default is evaluated once, in definition order,
+  and a mutable default is shared between calls, as in CPython. P101 no longer exists.
+* Functions defined inside module-level blocks (`except ImportError: def f(...)`, `if c:
+  def f` / `else: def f`) are module variables, can read module variables, and get distinct
+  Rust names. A function stored in a variable that also holds a Python object gets its
+  Python-callable wrapper (the generated code referred to a missing `box_fn..`).
+* Two code generation bugs found on the way (the generated Rust did not compile): a lookup
+  in a dict literal that never receives a key (`lookup({}, "k")`) now raises `KeyError`, and
+  a Python object passed to a native `str` method (`p.replace("/", os.sep)`) is unboxed with
+  a checked `TypeError`.
+* `pyfast run` now replaces itself with the program (`exec` on Unix): `kill %1` or a
+  service manager's SIGTERM reaches the program, and its exit status is passed on. Before,
+  killing `pyfast run` left the program running.
+* `scripts/readme_check.sh`: a README block that starts a background job runs as one shell
+  session; a timed-out interactive program is killed with its whole process group (a
+  leftover server kept the check waiting forever).
+* Coverage (`scripts/coverage.py`): stdlib 54.3% → 59.7% of functions and methods, 14 → 31
+  whole modules; `requests` 38.2% → 40.1%, `huggingface_hub` 37.5% → 40.1%.
+* Tests: `tests/differential/nested_imports.py`, `tests/differential/default_values.py`;
+  `tests/diagnostics/call_errors` no longer reports P101. `cargo test --workspace` passes;
+  `ollama-agents` README session passes.

@@ -31,6 +31,24 @@ for d in "${dirs[@]}"; do
     name=$(basename "$d")
     mapfile -t cmds < <(sed -n '/^```sh/,/^```/p' "$d/README.md" | grep -v '^```' | grep -v '^\s*$' | grep -v '^\s*#')
     ok=1
+    # A block that starts a background job (`cmd &` ... `kill %1`) is one shell
+    # session: run it as a single script, in its own process group, and pass if
+    # the session reaches its end successfully.
+    if printf '%s\n' "${cmds[@]}" | grep -qE '&\s*$|kill %'; then
+        script=$(printf '%s\n' "${cmds[@]}" | grep -v "^pyfast bench" )
+        [[ $bench -eq 1 ]] && script=$(printf '%s\n' "${cmds[@]}")
+        # Give a background server time to come up before the next command.
+        script=$(sed -E 's/&\s*$/\& sleep 5/' <<<"$script")
+        out=$(cd "$d" && timeout 900 bash -c "set -m; bash -c \"\$0\" & p=\$!; trap 'kill -TERM -- -\$p 2>/dev/null; exit 124' TERM; wait \$p" "$script" 2>&1 </dev/null); rc=$?
+        if [[ $rc -ne 0 ]]; then
+            printf "FAIL  %-20s rc=%d  (shell session)\n" "$name" "$rc"
+            echo "$out" | tail -8 | sed 's/^/      /'
+            fail=$((fail+1))
+        else
+            printf "ok    %s (shell session)\n" "$name"; pass=$((pass+1))
+        fi
+        continue
+    fi
     for cmd in "${cmds[@]}"; do
         [[ $bench -eq 0 && "$cmd" == pyfast\ bench* ]] && continue
         if [[ "$cmd" == pyfast\ run* ]]; then
@@ -41,7 +59,11 @@ for d in "${dirs[@]}"; do
             bcmd="${bcmd%% -- *}"
             out=$(cd "$d" && timeout 600 bash -c "$bcmd" 2>&1 </dev/null); rc=$?
             if [[ $rc -eq 0 ]]; then
-                out=$(cd "$d" && timeout 30 bash -c "$cmd" 2>&1 </dev/null); rc=$?
+                # `set -m` puts the command in its own process group, and the
+                # trap kills that whole group on timeout: a server started by
+                # `pyfast run` must not outlive the check (it would keep this
+                # command substitution's pipe open forever).
+                out=$(cd "$d" && timeout 30 bash -c "set -m; $cmd & p=\$!; trap 'kill -TERM -- -\$p 2>/dev/null; exit 124' TERM; wait \$p" 2>&1 </dev/null); rc=$?
                 if [[ $rc -eq 124 ]]; then
                     printf "      %-20s still running after 30s (interactive): %s\n" "$name" "$cmd"
                     rc=0

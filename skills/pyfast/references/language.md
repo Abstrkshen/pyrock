@@ -4,7 +4,7 @@ The full, authoritative list is `docs/subset.md` in the repo. This is the workin
 
 ## Native (plain Rust, no Python objects)
 
-* Functions: recursion, `/` and `*` parameter markers, literal defaults, keyword arguments,
+* Functions: recursion, `/` and `*` parameter markers, defaults (evaluated once at `def`), keyword arguments,
   `*args` / `**kwargs` (fixed-shape tuples when the call site is known, so forwarding
   wrappers stay native).
 * Module-level variables in functions (`RATE * x`), `global count`, `config.DEBUG`,
@@ -80,8 +80,7 @@ turns them into errors.
 | Construct | Rewrite |
 |---|---|
 | Class with a CPython base class, a metaclass or a class decorator other than `@dataclass` | Keep it in an imported `.py` (the module falls back to CPython, P220) |
-| Non-literal default of a top-level function (`def f(x=[])`) | `def f(x=None): if x is None: x = []` |
-| Relative imports, `import *`, imports inside functions | Absolute top-level imports |
+| Relative imports, `import *`, a native `.py`/`.rs`/`.c` module imported inside a function | Absolute imports; native modules at module level |
 | `match` | `if`/`elif` chains |
 | `for ... else` / `while ... else` | A `found` flag checked after the loop |
 | Multiple inheritance | Composition, or keep the class in a CPython-imported module |

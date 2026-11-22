@@ -479,7 +479,20 @@ impl Slot {
             match m.getattr(attr) {
                 Ok(v) => Ok(own(v)),
                 // `from pkg import submodule`
-                Err(_) => py.import(format!("{module}.{attr}").as_str()).map(|s| own(s.into_any())),
+                Err(_) => match py.import(format!("{module}.{attr}").as_str()) {
+                    Ok(s) => Ok(own(s.into_any())),
+                    // CPython's message: the module's file, if it has one.
+                    Err(e) if e.is_instance_of::<pyo3::exceptions::PyModuleNotFoundError>(py) => {
+                        let loc = m
+                            .getattr("__file__")
+                            .ok()
+                            .filter(|f| !f.is_none())
+                            .and_then(|f| f.str().ok().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "unknown location".to_string());
+                        Err(pyo3::exceptions::PyImportError::new_err(format!("cannot import name '{attr}' from '{module}' ({loc})")))
+                    }
+                    Err(e) => Err(e),
+                },
             }
         })
         .map_err(|e| if e.kind == "AttributeError" { Exc::new("ImportError", format!("cannot import name '{attr}' from '{module}'")) } else { e })?;
