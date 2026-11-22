@@ -4,7 +4,7 @@
 //!
 //! In `native-only` mode each boundary becomes a compile error.
 
-use pyfast_infer::{Program, Slot, Spec};
+use pyfast_infer::{CallClass, Program, Slot, Spec};
 use pyfast_ir::*;
 use std::collections::{BTreeSet, HashSet};
 
@@ -49,9 +49,16 @@ pub struct Plan {
     pub uses_python: bool,
     /// Rust / C modules actually called.
     pub externs_used: BTreeSet<usize>,
+    /// Specializations reachable from the module body under the final types
+    /// (widening can leave earlier, now-unused specializations behind).
+    pub reachable: BTreeSet<usize>,
 }
 
 impl Plan {
+    pub fn is_reachable(&self, spec_id: usize) -> bool {
+        self.reachable.contains(&spec_id)
+    }
+
     pub fn is_recursive(&self, spec_id: usize) -> bool {
         self.entries.iter().any(|e| e.spec_id == spec_id && e.recursive)
     }
@@ -94,6 +101,13 @@ pub fn call_graph(prog: &Program) -> Vec<BTreeSet<usize>> {
 pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
     let g = call_graph(prog);
     let n = prog.specs.len();
+    let mut reachable = BTreeSet::new();
+    let mut stack = vec![0usize];
+    while let Some(x) = stack.pop() {
+        if reachable.insert(x) {
+            stack.extend(g[x].iter().copied());
+        }
+    }
     let reaches = |from: usize, to: usize| -> bool {
         let mut seen = HashSet::new();
         let mut stack: Vec<usize> = g[from].iter().copied().collect();
@@ -113,6 +127,10 @@ pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
     let mut externs_used = BTreeSet::new();
     let mut eff: Vec<BTreeSet<&'static str>> = Vec::with_capacity(n);
     for s in &prog.specs {
+        if !reachable.contains(&s.id) {
+            eff.push(BTreeSet::new());
+            continue;
+        }
         let f = &prog.module.funcs[s.key.func];
         let mut e = BTreeSet::new();
         walk_block(&f.body, &mut |x| local_effects(prog, s, x, &mut e));
@@ -150,7 +168,7 @@ pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
     boundaries.sort_by_key(|b| (b.span.unit, b.span.line, b.span.col));
 
     let mut entries = Vec::new();
-    for s in &prog.specs {
+    for s in prog.specs.iter().filter(|s| reachable.contains(&s.id)) {
         let f = &prog.module.funcs[s.key.func];
         let recursive = reaches(s.id, s.id);
         let mut effects: Vec<&'static str> = eff[s.id].iter().copied().collect();
@@ -177,7 +195,7 @@ pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
             span: f.span,
         });
     }
-    let reached: HashSet<FuncId> = prog.specs.iter().map(|s| s.key.func).collect();
+    let reached: HashSet<FuncId> = prog.specs.iter().filter(|s| reachable.contains(&s.id)).map(|s| s.key.func).collect();
     let unreachable = prog.module.funcs.iter().filter(|f| !reached.contains(&f.id) && !f.is_module).map(|f| f.name.clone()).collect();
 
     let mut diags = Vec::new();
@@ -190,8 +208,24 @@ pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
             );
         }
     }
-    let uses_python = per_spec_bridge.iter().any(|b| *b);
-    (Plan { entries, unreachable, boundaries, uses_python, externs_used }, diags)
+    // Native values can hold Python objects (`list[object]`) without any
+    // boundary operation: the runtime still needs the embedded interpreter.
+    let mut holds_obj = prog.globals.values().any(|s| matches!(s, Slot::Boxed(..)) || s.known().is_some_and(|t| t.mentions_obj()));
+    for s in prog.specs.iter().filter(|s| reachable.contains(&s.id)) {
+        if holds_obj {
+            break;
+        }
+        holds_obj |= s.locals.values().any(|x| x.known().is_some_and(|t| t.mentions_obj()));
+        holds_obj |= s.key.args.iter().any(|t| t.mentions_obj());
+        let f = &prog.module.funcs[s.key.func];
+        walk_block(&f.body, &mut |e| {
+            if !holds_obj && prog.type_of(s, e).is_some_and(|t| t.mentions_obj()) {
+                holds_obj = true;
+            }
+        });
+    }
+    let uses_python = holds_obj || per_spec_bridge.iter().any(|b| *b);
+    (Plan { entries, unreachable, boundaries, uses_python, externs_used, reachable }, diags)
 }
 
 fn short(e: &Expr) -> String {
@@ -232,6 +266,7 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
     if let Slot::Boxed(a, b) = s.ret {
         push("P215", f.span, format!("return value is {a} or {b}"), "boxed as a Python object (no common native type)");
     }
+    let ty0 = |e: &Expr| prog.type_of(s, e);
     walk_stmts(&f.body, &mut |st| match &st.kind {
         StmtKind::Import(ImportAction::Py(slot)) => {
             let sl = &prog.module.slots[*slot];
@@ -241,8 +276,13 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
             };
             push("P200", st.span, format!("runtime import of `{m}`"), "no .py/.rs/.c of that name next to the source: CPython import");
         }
-        StmtKind::ForIter { .. } => push("P214", st.span, "for-loop over a Python iterable".into(), "CPython iterator protocol"),
-        StmtKind::SetItem { .. } => push("P212", st.span, "item assignment".into(), "CPython __setitem__"),
+        StmtKind::ForIter { iter, .. } if ty0(iter) == Some(Ty::Obj) => push("P214", st.span, "for-loop over a Python iterable".into(), "CPython iterator protocol"),
+        StmtKind::SetItem { obj, .. } if ty0(obj) == Some(Ty::Obj) => push("P212", st.span, "item assignment".into(), "CPython __setitem__"),
+        StmtKind::Del(t) => match &t.kind {
+            ExprKind::Subscript { obj, .. } if ty0(obj) == Some(Ty::Obj) => push("P212", st.span, "item deletion".into(), "CPython __delitem__"),
+            ExprKind::GetAttr { name, .. } => push("P210", st.span, format!("attribute deletion `.{name}`"), "CPython __delattr__"),
+            _ => {}
+        },
         StmtKind::SetAttr { name, .. } => push("P210", st.span, format!("attribute assignment `.{name}`"), "CPython __setattr__"),
         StmtKind::With { .. } => push("P216", st.span, "`with` statement".into(), "CPython context manager protocol (__enter__/__exit__)"),
         StmtKind::Try { handlers, .. } => {
@@ -256,6 +296,9 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
     });
     let ty = |e: &Expr| prog.type_of(s, e);
     walk_block_skip_callees(&f.body, &mut |e| match &e.kind {
+        // Untyped expressions are in code this specialization never runs.
+        _ if ty(e).is_none() => {}
+        ExprKind::CallObj { func, args, kwargs } if !matches!(prog.classify_call(s, func, args, kwargs), CallClass::Bridge | CallClass::Pending) => {}
         ExprKind::CallObj { func, .. } => {
             let reason = match &func.kind {
                 ExprKind::GetAttr { .. } => "CPython attribute lookup + call",
@@ -266,11 +309,13 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
             push("P210", e.span, format!("{}(...)", name_of(func)), reason);
         }
         ExprKind::GetAttr { name, .. } => push("P210", e.span, format!("attribute `.{name}`"), "dynamic receiver: CPython attribute lookup"),
-        ExprKind::List(_) => push("P212", e.span, "list literal".into(), "mutable collection kept as a Python list (preserves aliasing)"),
-        ExprKind::Dict(_) => push("P212", e.span, "dict literal".into(), "mutable collection kept as a Python dict (preserves aliasing)"),
-        ExprKind::Tuple(_) => push("P212", e.span, "tuple literal".into(), "tuples are Python objects until native tuples land"),
-        ExprKind::Subscript { .. } => push("P212", e.span, "subscript".into(), "CPython __getitem__"),
-        ExprKind::PyBuiltin(n) => push("P211", e.span, format!("builtin `{n}` used as a value"), "CPython builtin object"),
+        ExprKind::List(_) if ty(e) == Some(Ty::Obj) => push("P212", e.span, "list literal".into(), "kept as a Python list"),
+        ExprKind::Dict(_) if ty(e) == Some(Ty::Obj) => push("P212", e.span, "dict literal".into(), "kept as a Python dict (keys are not natively hashable)"),
+        ExprKind::Set(_) if ty(e) == Some(Ty::Obj) => push("P212", e.span, "set literal".into(), "kept as a Python set (elements are not natively hashable)"),
+        ExprKind::Subscript { obj, .. } if ty(obj) == Some(Ty::Obj) => push("P212", e.span, "subscript".into(), "CPython __getitem__"),
+        ExprKind::PyBuiltin(n) if !matches!(n.as_str(), "int" | "float" | "str" | "bool" | "list" | "dict" | "set" | "tuple" | "object") => {
+            push("P211", e.span, format!("builtin `{n}` used as a value"), "CPython builtin object")
+        }
         ExprKind::BinOp { op, left, right } if ty(left) == Some(Ty::Obj) || ty(right) == Some(Ty::Obj) => {
             push("P213", e.span, format!("operator `{}` on a Python object", op.symbol()), "CPython number protocol")
         }
@@ -354,6 +399,7 @@ fn stmt_exprs(s: &Stmt) -> Vec<&Expr> {
         StmtKind::SetItem { obj, index, value } => vec![obj, index, value],
         StmtKind::SetAttr { obj, value, .. } => vec![obj, value],
         StmtKind::Raise(Some(e)) => vec![e],
+        StmtKind::Del(e) => vec![e],
         StmtKind::AssignGlobal { value, .. } => vec![value],
         StmtKind::With { ctx, .. } => vec![ctx],
         StmtKind::Try { handlers, .. } => handlers
@@ -403,7 +449,33 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr), skip_callee: bool) {
             walk_expr(body, f, skip_callee);
             walk_expr(orelse, f, skip_callee);
         }
-        ExprKind::Call { args, .. } | ExprKind::ExternCall { args, .. } | ExprKind::List(args) | ExprKind::Tuple(args) | ExprKind::NewExc { args, .. } => {
+        ExprKind::Slice { lo, hi, step } => [lo, hi, step].into_iter().flatten().for_each(|a| walk_expr(a, f, skip_callee)),
+        ExprKind::Unpack { value, .. } => walk_expr(value, f, skip_callee),
+        ExprKind::Comp { elt, val, gens, .. } => {
+            for g in gens {
+                walk_expr(&g.iter, f, skip_callee);
+                for st in &g.unpack {
+                    for x in stmt_exprs(st) {
+                        walk_expr(x, f, skip_callee);
+                    }
+                    if let StmtKind::If { body, .. } = &st.kind {
+                        for b in body {
+                            for x in stmt_exprs(b) {
+                                walk_expr(x, f, skip_callee);
+                            }
+                        }
+                    }
+                }
+                for c in &g.ifs {
+                    walk_expr(c, f, skip_callee);
+                }
+            }
+            walk_expr(elt, f, skip_callee);
+            if let Some(v) = val {
+                walk_expr(v, f, skip_callee);
+            }
+        }
+        ExprKind::Call { args, .. } | ExprKind::ExternCall { args, .. } | ExprKind::List(args) | ExprKind::Tuple(args) | ExprKind::NewExc { args, .. } | ExprKind::Set(args) => {
             args.iter().for_each(|a| walk_expr(a, f, skip_callee))
         }
         ExprKind::GetAttr { obj, .. } | ExprKind::Annotated { value: obj, .. } => walk_expr(obj, f, skip_callee),

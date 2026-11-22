@@ -8,6 +8,7 @@
 //! whose exact result does not fit raises `OverflowError` instead of
 //! wrapping or silently changing type. Arbitrary precision is milestone M4.
 
+pub mod coll;
 pub mod conv;
 pub mod exc;
 pub mod ext;
@@ -18,6 +19,7 @@ pub mod io;
 pub mod py;
 pub mod string;
 
+pub use coll::{Dict, List, Never, Set, Tup, Tuple0};
 pub use exc::{Exc, Flow, PyResult};
 pub use io::{print, run_main};
 

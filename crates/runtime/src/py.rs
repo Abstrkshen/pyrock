@@ -520,3 +520,164 @@ impl ToPy for Exc {
         exc_obj(self)
     }
 }
+
+// ---- collections <-> Python (copies: escape analysis keeps shared
+// mutable containers that reach Python boxed from creation) ----
+
+impl<T: ToPy> ToPy for crate::List<T>
+where
+    T: Clone,
+{
+    fn to_py(&self) -> PyResult<Obj> {
+        let items: Vec<Obj> = self.to_vec().iter().map(|v| v.to_py()).collect::<PyResult<_>>()?;
+        list(items)
+    }
+}
+
+impl<T: ToPy + Clone> ToPy for crate::Tup<T> {
+    fn to_py(&self) -> PyResult<Obj> {
+        let items: Vec<Obj> = self.to_vec().iter().map(|v| v.to_py()).collect::<PyResult<_>>()?;
+        tuple(items)
+    }
+}
+
+impl ToPy for crate::Tuple0 {
+    fn to_py(&self) -> PyResult<Obj> {
+        tuple(vec![])
+    }
+}
+
+impl ToPy for crate::Never {
+    fn to_py(&self) -> PyResult<Obj> {
+        match *self {}
+    }
+}
+
+impl<K: ToPy + Clone + Eq + std::hash::Hash, V: ToPy + Clone> ToPy for crate::Dict<K, V> {
+    fn to_py(&self) -> PyResult<Obj> {
+        let mut items = Vec::new();
+        for (k, v) in self.items_vec() {
+            items.push((k.to_py()?, v.to_py()?));
+        }
+        dict(items)
+    }
+}
+
+impl<T: ToPy + Clone + Eq + std::hash::Hash> ToPy for crate::Set<T> {
+    fn to_py(&self) -> PyResult<Obj> {
+        let items: Vec<Obj> = self.to_vec().iter().map(|v| v.to_py()).collect::<PyResult<_>>()?;
+        let l = list(items)?;
+        call(&builtin("set")?, vec![l], vec![])
+    }
+}
+
+macro_rules! tuple_to_py {
+    ($($n:tt $T:ident),+) => {
+        impl<$($T: ToPy),+> ToPy for ($($T,)+) {
+            fn to_py(&self) -> PyResult<Obj> {
+                tuple(vec![$(self.$n.to_py()?),+])
+            }
+        }
+    };
+}
+tuple_to_py!(0 A);
+tuple_to_py!(0 A, 1 B);
+tuple_to_py!(0 A, 1 B, 2 C);
+tuple_to_py!(0 A, 1 B, 2 C, 3 D);
+tuple_to_py!(0 A, 1 B, 2 C, 3 D, 4 E);
+tuple_to_py!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F);
+tuple_to_py!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G);
+tuple_to_py!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H);
+tuple_to_py!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H, 8 I);
+tuple_to_py!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H, 8 I, 9 J);
+tuple_to_py!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H, 8 I, 9 J, 10 K);
+tuple_to_py!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H, 8 I, 9 J, 10 K, 11 L);
+
+impl crate::coll::PyEq for Obj {
+    fn py_eq(&self, o: &Self) -> bool {
+        Python::attach(|py| self.bind(py).eq(o.bind(py)).unwrap_or(false))
+    }
+}
+
+impl crate::coll::PyOrd for Obj {
+    fn py_cmp(&self, o: &Self) -> PyResult<std::cmp::Ordering> {
+        with(|py| {
+            let (a, b) = (self.bind(py), o.bind(py));
+            if a.lt(b)? {
+                Ok(std::cmp::Ordering::Less)
+            } else if b.lt(a)? {
+                Ok(std::cmp::Ordering::Greater)
+            } else {
+                Ok(std::cmp::Ordering::Equal)
+            }
+        })
+    }
+}
+
+/// Elements of a Python iterable (for `list(obj)`, `sorted(obj)`, ...).
+pub fn to_vec(o: &Obj) -> PyResult<Vec<Obj>> {
+    let mut it = iter(o)?;
+    let mut out = Vec::new();
+    while let Some(v) = it.next()? {
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// Unpack exactly `n` items from a Python iterable (`a, b = obj`).
+pub fn unpack(o: &Obj, n: usize) -> PyResult<Vec<Obj>> {
+    let v = to_vec(o)?;
+    if v.len() != n {
+        let msg = if v.len() > n {
+            format!("too many values to unpack (expected {n})")
+        } else {
+            format!("not enough values to unpack (expected {n}, got {})", v.len())
+        };
+        return Err(Exc::new("ValueError", msg));
+    }
+    Ok(v)
+}
+
+/// `slice(lo, hi, step)` for a Python receiver.
+pub fn slice(lo: Obj, hi: Obj, step: Obj) -> PyResult<Obj> {
+    with(|py| Ok(own(pyo3::types::PySlice::full(py).get_type().call1((lo.0, hi.0, step.0))?)))
+}
+
+/// A Python object used as a slice bound of a native sequence (`None` or an int).
+pub fn opt_index(o: &Obj) -> PyResult<Option<i64>> {
+    with(|py| {
+        let b = o.bind(py);
+        if b.is_none() {
+            Ok(None)
+        } else {
+            b.extract::<i64>().map(Some)
+        }
+    })
+}
+
+pub fn delitem(o: &Obj, k: Obj) -> PyResult<()> {
+    with(|py| o.bind(py).del_item(k.0))
+}
+
+pub fn delattr(o: &Obj, name: &str) -> PyResult<()> {
+    with(|py| o.bind(py).delattr(name))
+}
+
+macro_rules! view_to_py {
+    ($name:ident) => {
+        impl<K: ToPy + Clone + Eq + std::hash::Hash, V: ToPy + Clone> ToPy for crate::coll::$name<K, V> {
+            fn to_py(&self) -> PyResult<Obj> {
+                let d = self.0.to_py()?;
+                let m = match stringify!($name) {
+                    "Keys" => "keys",
+                    "Values" => "values",
+                    _ => "items",
+                };
+                call(&getattr(&d, m)?, vec![], vec![])
+            }
+        }
+    };
+}
+view_to_py!(Keys);
+view_to_py!(Values);
+view_to_py!(Items);

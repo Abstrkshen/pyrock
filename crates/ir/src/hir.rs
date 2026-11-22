@@ -208,6 +208,8 @@ pub enum StmtKind {
     Raise(Option<Expr>),
     /// `with a as x, b as y: body` (one item per statement after lowering).
     With { ctx: Expr, var: Option<String>, body: Vec<Stmt> },
+    /// `del obj[index]` / `del obj.attr` (one target per statement).
+    Del(Expr),
     /// Assignment to a module-level variable kept in a global cell
     /// (module body, `global x` in a function, or `mod.x = v`).
     AssignGlobal { unit: usize, name: String, value: Expr },
@@ -224,6 +226,24 @@ pub struct Handler {
     pub name: Option<String>,
     pub body: Vec<Stmt>,
     pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompKind {
+    List,
+    Set,
+    Dict,
+    Gen,
+}
+
+/// One `for var in iter if cond` clause. `var` is a synthetic local; `unpack`
+/// assigns the clause's target names from it.
+#[derive(Clone, Debug)]
+pub struct CompFor {
+    pub var: String,
+    pub iter: Expr,
+    pub unpack: Vec<Stmt>,
+    pub ifs: Vec<Expr>,
 }
 
 #[derive(Clone, Debug)]
@@ -285,6 +305,16 @@ pub enum ExprKind {
     Tuple(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
     Subscript { obj: Box<Expr>, index: Box<Expr> },
+    /// `a:b:c` inside a subscript.
+    Slice { lo: Option<Box<Expr>>, hi: Option<Box<Expr>>, step: Option<Box<Expr>> },
+    /// `{a, b}`
+    Set(Vec<Expr>),
+    /// The value of an unpacking assignment (`a, *b, c = value`): a fixed
+    /// tuple of `n` items whose `star` item (if any) is a list. Checks the
+    /// length like CPython (ValueError).
+    Unpack { value: Box<Expr>, n: usize, star: Option<usize> },
+    /// List/set/dict comprehension or generator expression (evaluated eagerly).
+    Comp { kind: CompKind, elt: Box<Expr>, val: Option<Box<Expr>>, gens: Vec<CompFor> },
     /// `ValueError(...)`: a builtin exception instance (native `rt::Exc`).
     NewExc { kind: String, args: Vec<Expr> },
 }

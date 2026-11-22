@@ -405,6 +405,23 @@ impl State<'_> {
             }
             ExprKind::Slot(_) | ExprKind::PyBuiltin(_) => Sym::Con(Ty::Obj),
             ExprKind::Global { .. } => self.fresh(),
+            ExprKind::Slice { lo, hi, step } => {
+                for p in [lo, hi, step].into_iter().flatten() {
+                    self.expr(p, cx);
+                }
+                Sym::Con(Ty::Obj)
+            }
+            ExprKind::Set(items) => {
+                for a in items {
+                    self.expr(a, cx);
+                }
+                self.fresh()
+            }
+            ExprKind::Unpack { value, .. } => {
+                self.expr(value, cx);
+                self.fresh()
+            }
+            ExprKind::Comp { .. } => self.fresh(),
             ExprKind::NewExc { args, .. } => {
                 for a in args {
                     self.expr(a, cx);
@@ -426,7 +443,7 @@ impl State<'_> {
                 for a in items {
                     self.expr(a, cx);
                 }
-                Sym::Con(Ty::Obj)
+                self.fresh()
             }
             ExprKind::Dict(pairs) => {
                 for (k, v) in pairs {

@@ -229,6 +229,10 @@ struct Lowerer<'l> {
     fn_globals: HashSet<String>,
     /// Synthetic locals created while lowering the current function.
     extra_locals: Vec<String>,
+    /// Counter for synthetic locals (`__u1`, ...).
+    tmp: usize,
+    /// Comprehension scopes: source name -> renamed local.
+    comp_scopes: Vec<HashMap<String, String>>,
     /// `from mod import NAME` of module variables, per import statement:
     /// (binding, unit, name). The binding is a global of this unit, assigned
     /// once at the import (CPython copies the value at import time).
@@ -334,18 +338,25 @@ fn global_decls(body: &[Value], out: &mut HashSet<String>) {
 /// Collect names bound by assignment-like statements, in first-binding order.
 /// Does not descend into nested function definitions.
 fn collect_bindings(body: &[Value], out: &mut Vec<String>, top: bool) {
-    let push = |n: &str, out: &mut Vec<String>| {
+    fn push(n: &str, out: &mut Vec<String>) {
         if !out.iter().any(|x| x == n) {
             out.push(n.to_string());
         }
-    };
+    }
+    /// Names bound by an assignment target (`a`, `a, (b, *c)`).
+    fn target(t: &Value, out: &mut Vec<String>) {
+        match ty(t) {
+            "Name" => push(sstr(t, "id"), out),
+            "Tuple" | "List" => arr(t, "elts").iter().for_each(|e| target(e, out)),
+            "Starred" => target(&t["value"], out),
+            _ => {}
+        }
+    }
     for st in body {
         match ty(st) {
             "Assign" => {
                 for t in arr(st, "targets") {
-                    if ty(t) == "Name" {
-                        push(sstr(t, "id"), out);
-                    }
+                    target(t, out);
                 }
             }
             "AugAssign" | "AnnAssign" => {
@@ -354,9 +365,7 @@ fn collect_bindings(body: &[Value], out: &mut Vec<String>, top: bool) {
                 }
             }
             "For" => {
-                if ty(&st["target"]) == "Name" {
-                    push(sstr(&st["target"], "id"), out);
-                }
+                target(&st["target"], out);
                 collect_bindings(arr(st, "body"), out, top);
                 collect_bindings(arr(st, "orelse"), out, top);
             }
@@ -377,9 +386,7 @@ fn collect_bindings(body: &[Value], out: &mut Vec<String>, top: bool) {
             }
             "With" => {
                 for item in arr(st, "items") {
-                    if ty(&item["optional_vars"]) == "Name" {
-                        push(sstr(&item["optional_vars"], "id"), out);
-                    }
+                    target(&item["optional_vars"], out);
                 }
                 collect_bindings(arr(st, "body"), out, top);
             }
@@ -403,6 +410,8 @@ impl<'l> Lowerer<'l> {
             fn_globals: HashSet::new(),
             extra_locals: vec![],
             var_imports: HashMap::new(),
+            tmp: 0,
+            comp_scopes: vec![],
             locals: HashSet::new(),
             in_module: true,
             ret_ann: None,
@@ -792,6 +801,10 @@ impl<'l> Lowerer<'l> {
             "Assign" => {
                 let targets = arr(st, "targets");
                 let value = self.lower_expr(&st["value"])?;
+                if targets.len() == 1 && matches!(ty(&targets[0]), "Tuple" | "List") {
+                    let stmts = self.lower_target(&targets[0], value, sp)?;
+                    return Some(self.block_stmt(stmts, sp));
+                }
                 if targets.len() == 1 && ty(&targets[0]) != "Name" {
                     return self.lower_store(&targets[0], value, sp);
                 }
@@ -800,9 +813,14 @@ impl<'l> Lowerer<'l> {
                     match self.name_target(t) {
                         Some(n) => names.push(n),
                         None => {
-                            let tsp = self.span(t);
-                            self.unsupported(tsp, &format!("assignment to `{}`", ty(t)), "tuple unpacking is not compiled yet");
-                            return None;
+                            // `a = b, c = value`: bind a temp, then each target from it.
+                            let tmp = self.fresh_local();
+                            let mut stmts = vec![Stmt { kind: StmtKind::Assign { target: tmp.clone(), value }, span: sp }];
+                            for t in targets {
+                                let read = Expr { kind: ExprKind::Local(tmp.clone()), span: sp };
+                                stmts.extend(self.lower_target(t, read, sp)?);
+                            }
+                            return Some(self.block_stmt(stmts, sp));
                         }
                     }
                 }
@@ -964,9 +982,11 @@ impl<'l> Lowerer<'l> {
                             Some(v)
                         }
                         _ => {
-                            let vsp = self.span(&item["optional_vars"]);
-                            self.unsupported(vsp, "unpacking in a `with` target", "bind one name and unpack it in the body");
-                            return None;
+                            let tmp = self.fresh_local();
+                            let read = Expr { kind: ExprKind::Local(tmp.clone()), span: sp };
+                            let stmts = self.lower_target(&item["optional_vars"], read, sp)?;
+                            body.insert(0, self.block_stmt(stmts, sp));
+                            Some(tmp)
                         }
                     };
                     body = vec![Stmt { kind: StmtKind::With { ctx, var, body }, span: sp }];
@@ -974,6 +994,32 @@ impl<'l> Lowerer<'l> {
                 return body.into_iter().next();
             }
             "Global" => return None, // handled by the pre-scan
+            "Delete" => {
+                let mut stmts = Vec::new();
+                for t in arr(st, "targets") {
+                    let tsp = self.span(t);
+                    match ty(t) {
+                        "Subscript" => {
+                            let obj = self.lower_expr(&t["value"])?;
+                            let index = self.lower_index(&t["slice"])?;
+                            stmts.push(Stmt { kind: StmtKind::Del(Expr { kind: ExprKind::Subscript { obj: Box::new(obj), index: Box::new(index) }, span: tsp }), span: tsp });
+                        }
+                        "Attribute" => {
+                            let obj = self.lower_expr(&t["value"])?;
+                            let name = sstr(t, "attr").to_string();
+                            stmts.push(Stmt { kind: StmtKind::Del(Expr { kind: ExprKind::GetAttr { obj: Box::new(obj), name }, span: tsp }), span: tsp });
+                        }
+                        _ => {
+                            self.unsupported(tsp, "`del` of a name", "rebind it instead (e.g. to None)");
+                            return None;
+                        }
+                    }
+                }
+                return match stmts.len() {
+                    1 => stmts.pop(),
+                    _ => Some(Stmt { kind: StmtKind::If { test: Expr { kind: ExprKind::Bool(true), span: sp }, body: stmts, orelse: vec![] }, span: sp }),
+                };
+            }
             "Nonlocal" => {
                 self.err("P142", sp, "`global`/`nonlocal` rebinding is never lowered into a native assumption");
                 return None;
@@ -1025,11 +1071,15 @@ impl<'l> Lowerer<'l> {
             self.unsupported(sp, "`for ... else`", "move the else-body after the loop with an explicit flag");
             return None;
         }
-        let Some(var) = self.name_target(&st["target"]) else {
-            self.unsupported(sp, "tuple unpacking in `for`", "iterate and index explicitly for now");
-            return None;
+        let (var, prefix) = match self.name_target(&st["target"]) {
+            Some(var) => self.local_target(var, sp),
+            None => {
+                let tmp = self.fresh_local();
+                let read = Expr { kind: ExprKind::Local(tmp.clone()), span: sp };
+                let stmts = self.lower_target(&st["target"], read, sp)?;
+                (tmp, Some(self.block_stmt(stmts, sp)))
+            }
         };
-        let (var, prefix) = self.local_target(var, sp);
         let with_prefix = |mut body: Vec<Stmt>| {
             if let Some(p) = prefix.clone() {
                 body.insert(0, p);
@@ -1103,11 +1153,13 @@ impl<'l> Lowerer<'l> {
             return self.lower_expr(idx);
         }
         let sp = self.span(idx);
-        let mut parts = Vec::new();
-        for k in ["lower", "upper", "step"] {
-            parts.push(if idx[k].is_null() { Expr { kind: ExprKind::NoneLit, span: sp } } else { self.lower_expr(&idx[k])? });
-        }
-        Some(self.call_obj(self.py_builtin("slice", sp), parts, sp))
+        let part = |me: &mut Self, k: &str| -> Option<Option<Box<Expr>>> {
+            Some(if idx[k].is_null() { None } else { Some(Box::new(me.lower_expr(&idx[k])?)) })
+        };
+        let lo = part(self, "lower")?;
+        let hi = part(self, "upper")?;
+        let step = part(self, "step")?;
+        Some(Expr { kind: ExprKind::Slice { lo, hi, step }, span: sp })
     }
 
     fn lower_exprs(&mut self, vs: &[Value]) -> Option<Vec<Expr>> {
@@ -1225,10 +1277,7 @@ impl<'l> Lowerer<'l> {
             }
             "List" => ExprKind::List(self.lower_exprs(arr(e, "elts"))?),
             "Tuple" => ExprKind::Tuple(self.lower_exprs(arr(e, "elts"))?),
-            "Set" => {
-                let items = Expr { kind: ExprKind::List(self.lower_exprs(arr(e, "elts"))?), span: sp };
-                return Some(self.call_obj(self.py_builtin("set", sp), vec![items], sp));
-            }
+            "Set" => ExprKind::Set(self.lower_exprs(arr(e, "elts"))?),
             "Dict" => {
                 let mut pairs = Vec::new();
                 for (k, v) in arr(e, "keys").iter().zip(arr(e, "values")) {
@@ -1241,7 +1290,8 @@ impl<'l> Lowerer<'l> {
                 ExprKind::Dict(pairs)
             }
             "Subscript" => ExprKind::Subscript { obj: Box::new(self.lower_expr(&e["value"])?), index: Box::new(self.lower_index(&e["slice"])?) },
-            "ListComp" | "DictComp" | "SetComp" | "GeneratorExp" | "Lambda" => {
+            "ListComp" | "SetComp" | "GeneratorExp" | "DictComp" => return self.lower_comp(e),
+            "Lambda" => {
                 self.diags.push(
                     Diagnostic::error("P120", sp, format!("`{}` is not supported yet", ty(e)))
                         .note("comprehensions and lambdas need closures (milestone M6); use an explicit loop"),
@@ -1254,6 +1304,123 @@ impl<'l> Lowerer<'l> {
             }
         };
         Some(Expr { kind, span: sp })
+    }
+
+    /// A fresh synthetic local of the current function.
+    fn fresh_local(&mut self) -> String {
+        self.tmp += 1;
+        let n = format!("__u{}", self.tmp);
+        self.locals.insert(n.clone());
+        self.extra_locals.push(n.clone());
+        n
+    }
+
+    /// Several statements in one statement slot.
+    fn block_stmt(&self, stmts: Vec<Stmt>, sp: Span) -> Stmt {
+        Stmt { kind: StmtKind::If { test: Expr { kind: ExprKind::Bool(true), span: sp }, body: stmts, orelse: vec![] }, span: sp }
+    }
+
+    /// Assign `value` to an arbitrary target (name, attribute, subscript,
+    /// or a tuple/list pattern with at most one starred name).
+    fn lower_target(&mut self, t: &Value, value: Expr, sp: Span) -> Option<Vec<Stmt>> {
+        match ty(t) {
+            "Name" => {
+                let name = sstr(t, "id").to_string();
+                if let Some(r) = self.comp_scopes.iter().rev().find_map(|m| m.get(&name)).cloned() {
+                    return Some(vec![Stmt { kind: StmtKind::Assign { target: r, value }, span: sp }]);
+                }
+                Some(vec![Stmt { kind: self.bind_target(name, value), span: sp }])
+            }
+            "Attribute" | "Subscript" => Some(vec![self.lower_store(t, value, sp)?]),
+            "Tuple" | "List" => {
+                let elts = arr(t, "elts");
+                let stars: Vec<usize> = elts.iter().enumerate().filter(|(_, e)| ty(e) == "Starred").map(|(i, _)| i).collect();
+                if stars.len() > 1 {
+                    self.err("P001", sp, "SyntaxError: multiple starred expressions in assignment");
+                    return None;
+                }
+                let tmp = self.fresh_local();
+                let n = elts.len();
+                let unpack = Expr { kind: ExprKind::Unpack { value: Box::new(value), n, star: stars.first().copied() }, span: sp };
+                let mut out = vec![Stmt { kind: StmtKind::Assign { target: tmp.clone(), value: unpack }, span: sp }];
+                for (i, el) in elts.iter().enumerate() {
+                    let item = Expr {
+                        kind: ExprKind::Subscript {
+                            obj: Box::new(Expr { kind: ExprKind::Local(tmp.clone()), span: sp }),
+                            index: Box::new(Expr { kind: ExprKind::Int(i as i64), span: sp }),
+                        },
+                        span: sp,
+                    };
+                    let target = if ty(el) == "Starred" { &el["value"] } else { el };
+                    out.extend(self.lower_target(target, item, sp)?);
+                }
+                Some(out)
+            }
+            other => {
+                let tsp = self.span(t);
+                self.unsupported(tsp, &format!("assignment to `{other}`"), "assign to names, attributes, subscripts or tuples of those");
+                None
+            }
+        }
+    }
+
+    /// `[elt for x in xs if c]`, `{k: v for ...}`, `{e for ...}`, `(e for ...)`.
+    fn lower_comp(&mut self, e: &Value) -> Option<Expr> {
+        let sp = self.span(e);
+        let kind = match ty(e) {
+            "ListComp" => CompKind::List,
+            "SetComp" => CompKind::Set,
+            "DictComp" => CompKind::Dict,
+            _ => CompKind::Gen,
+        };
+        let mut gens = Vec::new();
+        let pushed = self.comp_scopes.len();
+        for (gi, g) in arr(e, "generators").iter().enumerate() {
+            if g["is_async"].as_u64().unwrap_or(0) != 0 {
+                self.unsupported(sp, "async comprehension", "use a loop");
+                return None;
+            }
+            // The first iterable is evaluated in the enclosing scope.
+            let iter = if gi == 0 {
+                let saved = self.comp_scopes.split_off(pushed);
+                let it = self.lower_expr(&g["iter"]);
+                self.comp_scopes.extend(saved);
+                it?
+            } else {
+                self.lower_expr(&g["iter"])?
+            };
+            let mut names = HashSet::new();
+            scan_names(&g["target"], &mut names);
+            let mut scope = HashMap::new();
+            for n in names {
+                self.tmp += 1;
+                let r = format!("__c{}_{n}", self.tmp);
+                self.locals.insert(r.clone());
+                self.extra_locals.push(r.clone());
+                scope.insert(n, r);
+            }
+            self.comp_scopes.push(scope);
+            let var = self.fresh_local();
+            let read = Expr { kind: ExprKind::Local(var.clone()), span: sp };
+            let unpack = self.lower_target(&g["target"], read, sp)?;
+            let mut ifs = Vec::new();
+            for c in arr(g, "ifs") {
+                ifs.push(self.lower_expr(c)?);
+            }
+            gens.push(CompFor { var, iter, unpack, ifs });
+        }
+        let r = (|| {
+            if kind == CompKind::Dict {
+                let k = self.lower_expr(&e["key"])?;
+                let v = self.lower_expr(&e["value"])?;
+                Some((k, Some(Box::new(v))))
+            } else {
+                Some((self.lower_expr(&e["elt"])?, None))
+            }
+        })();
+        self.comp_scopes.truncate(pushed);
+        let (elt, val) = r?;
+        Some(Expr { kind: ExprKind::Comp { kind, elt: Box::new(elt), val, gens }, span: sp })
     }
 
     /// `name = value` for a local or a global cell.
@@ -1305,6 +1472,9 @@ impl<'l> Lowerer<'l> {
     }
 
     fn lower_name(&mut self, id: &str, sp: Span) -> Option<Expr> {
+        if let Some(r) = self.comp_scopes.iter().rev().find_map(|m| m.get(id)).cloned() {
+            return Some(Expr { kind: ExprKind::Local(r), span: sp });
+        }
         let kind = if self.locals.contains(id) {
             ExprKind::Local(id.to_string())
         } else if self.fn_globals.contains(id) || self.globals.contains(id) {

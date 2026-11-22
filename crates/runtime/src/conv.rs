@@ -164,3 +164,61 @@ impl PyFmt for Exc {
         Str::from(self.msg.as_str())
     }
 }
+
+/// `ascii(x)`: repr with non-ASCII characters escaped.
+pub fn ascii_of<T: PyFmt + ?Sized>(v: &T) -> Str {
+    let r = v.py_repr();
+    let mut out = String::with_capacity(r.len());
+    for c in r.chars() {
+        let n = c as u32;
+        if n < 0x80 {
+            out.push(c);
+        } else if n <= 0xff {
+            out.push_str(&format!("\\x{n:02x}"));
+        } else if n <= 0xffff {
+            out.push_str(&format!("\\u{n:04x}"));
+        } else {
+            out.push_str(&format!("\\U{n:08x}"));
+        }
+    }
+    Str::from(out)
+}
+
+/// `round(x)` for a float: round half to even, as an int.
+pub fn round_int(x: f64) -> PyResult<i64> {
+    if x.is_nan() {
+        return Err(Exc::new("ValueError", "cannot convert float NaN to integer"));
+    }
+    if x.is_infinite() {
+        return Err(Exc::new("OverflowError", "cannot convert float infinity to integer"));
+    }
+    int_from_float(x.round_ties_even())
+}
+
+/// `round(x, n)` for a float: correctly rounded to `n` decimal places.
+pub fn round_to(x: f64, n: i64) -> f64 {
+    if !x.is_finite() || n > 308 {
+        return x;
+    }
+    if n >= 0 {
+        // Rust formats the exact binary value correctly rounded (half to even),
+        // which is what CPython's round() computes.
+        format!("{:.*}", n as usize, x).parse().unwrap_or(x)
+    } else {
+        let p = 10f64.powi((-n) as i32);
+        let y = (x / p).round_ties_even() * p;
+        if y == 0.0 { 0.0f64.copysign(x) } else { y }
+    }
+}
+
+pub fn hex(v: i64) -> Str {
+    Str::from(if v < 0 { format!("-0x{:x}", v.unsigned_abs()) } else { format!("0x{v:x}") })
+}
+
+pub fn oct(v: i64) -> Str {
+    Str::from(if v < 0 { format!("-0o{:o}", v.unsigned_abs()) } else { format!("0o{v:o}") })
+}
+
+pub fn bin(v: i64) -> Str {
+    Str::from(if v < 0 { format!("-0b{:b}", v.unsigned_abs()) } else { format!("0b{v:b}") })
+}

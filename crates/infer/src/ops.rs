@@ -91,8 +91,20 @@ pub fn compare(op: CmpOp, l: Ty, r: Ty) -> bool {
         return true;
     }
     let optional = |t: Ty| t == Ty::None || t.as_opt().is_some();
+    if l.as_comp().is_some_and(|c| !matches!(c, pyfast_ir::Comp::Opt(_))) || r.as_comp().is_some_and(|c| !matches!(c, pyfast_ir::Comp::Opt(_))) {
+        return match op {
+            CmpOp::Eq | CmpOp::NotEq | CmpOp::Is | CmpOp::IsNot => true,
+            CmpOp::In | CmpOp::NotIn => crate::native::contains_ok(l, r),
+            // Ordering: same-shaped sequences (lists, tuples), set inclusion.
+            _ => {
+                let seq = |t: Ty| t.list_elem().is_some() || t.tuple_items().is_some() || matches!(t.as_comp(), Some(pyfast_ir::Comp::TupleVar(_)));
+                (l == r && (seq(l) || l.set_elem().is_some())) || (seq(l) && seq(r) && crate::native::ty_join(l, r, false).is_some())
+            }
+        };
+    }
     match op {
         CmpOp::Eq | CmpOp::NotEq => true,
+        CmpOp::In | CmpOp::NotIn if r.as_comp().is_some() => crate::native::contains_ok(l, r),
         CmpOp::Is | CmpOp::IsNot if optional(l) || optional(r) => true,
         _ if l.as_opt().is_some() || r.as_opt().is_some() => compare(op, base(l), base(r)),
         CmpOp::In | CmpOp::NotIn => l == Ty::Str && r == Ty::Str,
@@ -150,13 +162,22 @@ pub fn builtin(b: Builtin, args: &[Ty], boxing: bool) -> Result<Ty, String> {
         }
         Builtin::Len => {
             arity(1)?;
-            if args[0] == Ty::Str || args[0] == Ty::Obj {
+            let sized = args[0].as_comp().is_some_and(|c| matches!(c, pyfast_ir::Comp::List(_) | pyfast_ir::Comp::Dict(..) | pyfast_ir::Comp::Set(_) | pyfast_ir::Comp::Tuple(_) | pyfast_ir::Comp::TupleVar(_) | pyfast_ir::Comp::View(..)));
+            if args[0] == Ty::Str || args[0] == Ty::Obj || sized {
                 Ok(Ty::Int)
             } else {
                 Err(format!("object of type '{}' has no len()", args[0]))
             }
         }
         Builtin::Min | Builtin::Max => {
+            if args.len() == 1 && !any_obj {
+                if let Some(e) = crate::native::iter_elem(args[0]) {
+                    if e.is_never() {
+                        return Err(format!("{}() iterable argument is empty", b.name()));
+                    }
+                    return Ok(e);
+                }
+            }
             if args.len() < 2 && (any_obj || boxing) {
                 return Ok(Ty::Obj); // min(iterable): CPython builtin
             }

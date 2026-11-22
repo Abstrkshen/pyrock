@@ -3,7 +3,8 @@
 
 pub mod definite;
 pub mod generic;
+pub mod native;
 pub mod ops;
 pub mod spec;
 
-pub use spec::{specialize, spec_label, Program, Slot, Spec, SpecKey};
+pub use spec::{specialize, spec_label, CallClass, Program, Slot, Spec, SpecKey};

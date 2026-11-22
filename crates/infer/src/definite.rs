@@ -82,6 +82,7 @@ fn stmt(s: &Stmt, mut cur: Set, out: &mut HashSet<String>) -> Option<Set> {
             return None;
         }
         StmtKind::AssignGlobal { value, .. } => expr(value, &cur, out),
+        StmtKind::Del(t) => expr(t, &cur, out),
         StmtKind::With { ctx, var, body } => {
             expr(ctx, &cur, out);
             let mut inner = cur.clone();
@@ -171,7 +172,26 @@ fn expr(e: &Expr, cur: &Set, out: &mut HashSet<String>) {
             expr(obj, cur, out);
             expr(index, cur, out);
         }
-        ExprKind::NewExc { args, .. } => args.iter().for_each(|a| expr(a, cur, out)),
+        ExprKind::NewExc { args, .. } | ExprKind::Set(args) => args.iter().for_each(|a| expr(a, cur, out)),
+        ExprKind::Slice { lo, hi, step } => [lo, hi, step].into_iter().flatten().for_each(|a| expr(a, cur, out)),
+        ExprKind::Unpack { value, .. } => expr(value, cur, out),
+        ExprKind::Comp { elt, val, gens, .. } => {
+            let mut inner = cur.clone();
+            for g in gens {
+                expr(&g.iter, &inner, out);
+                inner.insert(g.var.clone());
+                if let Some(after) = block(&g.unpack, inner.clone(), out) {
+                    inner = after;
+                }
+                for c in &g.ifs {
+                    expr(c, &inner, out);
+                }
+            }
+            expr(elt, &inner, out);
+            if let Some(v) = val {
+                expr(v, &inner, out);
+            }
+        }
         _ => {}
     }
 }

@@ -1,0 +1,725 @@
+//! Code generation for native collections, strings and builtins.
+
+use crate::{borrow, boxed, FnEmitter};
+use pyfast_infer::native;
+use pyfast_ir::*;
+
+/// Rust code converting a value of type `from` to type `to`. Mutable
+/// containers are copied here; inference widens places so that this only
+/// happens for fresh values or at documented boundaries.
+pub(crate) fn convert(code: &str, from: Ty, to: Ty) -> String {
+    if from == to {
+        return code.to_string();
+    }
+    if from.is_never() {
+        return format!("(match {code} {{}})");
+    }
+    if to == Ty::Obj {
+        return boxed(code, from);
+    }
+    if let Some(x) = to.as_opt() {
+        return match from {
+            Ty::None if code == "()" => "None".into(),
+            Ty::None => format!("{{ {code}; None }}"),
+            f if f.as_opt().is_some() => {
+                let fx = f.as_opt().unwrap();
+                if fx == x { code.into() } else { format!("{code}.map(|__o| {})", convert("__o", fx, x)) }
+            }
+            f => format!("Some({})", convert(code, f, x)),
+        };
+    }
+    match (from.as_comp(), to.as_comp()) {
+        (Some(Comp::List(a)), Some(Comp::List(b))) => {
+            format!("rt::List::from_vec({code}.to_vec().into_iter().map(|__e| {}).collect())", convert("__e", a, b))
+        }
+        (Some(Comp::Set(a)), Some(Comp::Set(b))) => format!("rt::Set::from_vec({code}.to_vec().into_iter().map(|__e| {}).collect())", convert("__e", a, b)),
+        (Some(Comp::Dict(k1, v1)), Some(Comp::Dict(k2, v2))) => format!(
+            "rt::Dict::from_pairs({code}.items_vec().into_iter().map(|(__k, __v)| ({}, {})).collect())",
+            convert("__k", k1, k2),
+            convert("__v", v1, v2)
+        ),
+        (Some(Comp::Tuple(xs)), Some(Comp::Tuple(ys))) if xs.len() == ys.len() => {
+            let parts: Vec<String> = xs.iter().zip(&ys).enumerate().map(|(i, (x, y))| convert(&format!("__t.{i}"), *x, *y)).collect();
+            format!("{{ let __t = {code}; ({},) }}", parts.join(", "))
+        }
+        (Some(Comp::Tuple(xs)), Some(Comp::TupleVar(y))) => {
+            let parts: Vec<String> = xs.iter().enumerate().map(|(i, x)| convert(&format!("__t.{i}"), *x, y)).collect();
+            if xs.is_empty() {
+                "rt::Tup::from_vec(vec![])".into()
+            } else {
+                format!("{{ let __t = {code}; rt::Tup::from_vec(vec![{}]) }}", parts.join(", "))
+            }
+        }
+        (Some(Comp::TupleVar(a)), Some(Comp::TupleVar(b))) => format!("rt::Tup::from_vec({code}.to_vec().into_iter().map(|__e| {}).collect())", convert("__e", a, b)),
+        _ => crate::coerce_basic(code.to_string(), from, to),
+    }
+}
+
+/// `Vec<E>` of the elements of an iterable value of type `t`.
+pub(crate) fn iter_vec(code: &str, t: Ty) -> String {
+    match t {
+        Ty::Str => format!("rt::coll::chars(&{})", borrow(code)),
+        Ty::Obj => format!("rt::py::to_vec(&{})?", borrow(code)),
+        _ => match t.as_comp() {
+            Some(Comp::Dict(..)) => format!("{}.keys_vec()", code),
+            Some(Comp::Tuple(ts)) => {
+                if ts.is_empty() {
+                    return "Vec::<rt::Never>::new()".into();
+                }
+                let parts: Vec<String> = (0..ts.len()).map(|i| format!("__t.{i}")).collect();
+                format!("{{ let __t = {code}; vec![{}] }}", parts.join(", "))
+            }
+            _ => format!("{}.to_vec()", code),
+        },
+    }
+}
+
+fn opt_i64(code: Option<String>) -> String {
+    match code {
+        Some(c) => format!("Some({c})"),
+        None => "None".into(),
+    }
+}
+
+impl FnEmitter<'_, '_> {
+    /// Code for `e` as a value of type `to` (fresh literals are built
+    /// directly at that type, so they never need a copy).
+    pub(crate) fn expr_as(&mut self, e: &Expr, to: Ty) -> String {
+        let et = self.ty(e);
+        if et == to {
+            return self.expr(e).0;
+        }
+        let literal = match (&e.kind, to.as_comp()) {
+            (ExprKind::List(_), Some(Comp::List(_))) | (ExprKind::Set(_), Some(Comp::Set(_))) | (ExprKind::Dict(_), Some(Comp::Dict(..))) => true,
+            (ExprKind::Tuple(items), Some(Comp::Tuple(ts))) => items.len() == ts.len(),
+            (ExprKind::Tuple(_), Some(Comp::TupleVar(_))) => true,
+            _ => false,
+        };
+        if literal {
+            return self.build(e, to);
+        }
+        let (c, t) = self.expr(e);
+        convert(&c, t, to)
+    }
+
+    /// Literal containers (their own type).
+    pub(crate) fn literal(&mut self, e: &Expr, t: Ty) -> String {
+        if t == Ty::Obj {
+            return match &e.kind {
+                ExprKind::List(items) => {
+                    let a: Vec<String> = items.iter().map(|x| self.obj(x)).collect();
+                    format!("rt::py::list(vec![{}])?", a.join(", "))
+                }
+                ExprKind::Tuple(items) => {
+                    let a: Vec<String> = items.iter().map(|x| self.obj(x)).collect();
+                    format!("rt::py::tuple(vec![{}])?", a.join(", "))
+                }
+                ExprKind::Set(items) => {
+                    let a: Vec<String> = items.iter().map(|x| self.obj(x)).collect();
+                    format!("rt::py::call(&rt::py::builtin(\"set\")?, vec![rt::py::list(vec![{}])?], vec![])?", a.join(", "))
+                }
+                ExprKind::Dict(pairs) => {
+                    let a: Vec<String> = pairs.iter().map(|(k, v)| format!("({}, {})", self.obj(k), self.obj(v))).collect();
+                    format!("rt::py::dict(vec![{}])?", a.join(", "))
+                }
+                _ => unreachable!(),
+            };
+        }
+        self.build(e, t)
+    }
+
+    /// Construct a container literal at type `to` (which may differ from the
+    /// literal's own type, e.g. `[1, 2]` stored into a `list[object]`).
+    fn build(&mut self, e: &Expr, to: Ty) -> String {
+        match (&e.kind, to.as_comp()) {
+            (ExprKind::List(items), Some(Comp::List(b))) => {
+                let parts: Vec<String> = items.iter().map(|x| self.expr_as(x, b)).collect();
+                format!("rt::List::<{}>::from_vec(vec![{}])", b.rust(), parts.join(", "))
+            }
+            (ExprKind::Set(items), Some(Comp::Set(b))) => {
+                let parts: Vec<String> = items.iter().map(|x| self.expr_as(x, b)).collect();
+                format!("rt::Set::<{}>::from_vec(vec![{}])", b.rust(), parts.join(", "))
+            }
+            (ExprKind::Dict(pairs), Some(Comp::Dict(k, v))) => {
+                let parts: Vec<String> = pairs.iter().map(|(a, b)| format!("({}, {})", self.expr_as(a, k), self.expr_as(b, v))).collect();
+                format!("rt::Dict::<{}, {}>::from_pairs(vec![{}])", k.rust(), v.rust(), parts.join(", "))
+            }
+            (ExprKind::Tuple(items), Some(Comp::Tuple(ts))) if items.len() == ts.len() => {
+                let parts: Vec<String> = items.iter().zip(&ts).map(|(x, t)| self.expr_as(x, *t)).collect();
+                if parts.is_empty() { "rt::Tuple0".into() } else { format!("({},)", parts.join(", ")) }
+            }
+            (ExprKind::Tuple(items), Some(Comp::TupleVar(b))) => {
+                let parts: Vec<String> = items.iter().map(|x| self.expr_as(x, b)).collect();
+                format!("rt::Tup::<{}>::from_vec(vec![{}])", b.rust(), parts.join(", "))
+            }
+            _ => unreachable!("build {to} from a literal"),
+        }
+    }
+
+    fn slice_args(&mut self, lo: &Option<Box<Expr>>, hi: &Option<Box<Expr>>, step: &Option<Box<Expr>>) -> String {
+        let part = |me: &mut Self, x: &Option<Box<Expr>>| -> String {
+            match x {
+                None => "None".into(),
+                Some(x) => {
+                    let (c, t) = me.expr(x);
+                    match t {
+                        Ty::None => format!("{{ {c}; None }}"),
+                        Ty::Obj => format!("rt::py::opt_index(&{})?", borrow(&c)),
+                        t if t.as_opt().is_some() => c,
+                        t => opt_i64(Some(crate::as_int(&c, t))),
+                    }
+                }
+            }
+        };
+        let a = part(self, lo);
+        let b = part(self, hi);
+        let c = part(self, step);
+        format!("{a}, {b}, {c}")
+    }
+
+    /// `obj[index]` on a native receiver.
+    pub(crate) fn subscript(&mut self, obj: &Expr, index: &Expr, t: Ty) -> String {
+        let (o, ot) = self.expr(obj);
+        let ot = ot.as_opt().map(|_| ot).unwrap_or(ot);
+        let o = if ot.as_opt().is_some() { format!("rt::unopt({o}, \"'NoneType' object is not subscriptable\")?") } else { o };
+        let ot = ot.as_opt().unwrap_or(ot);
+        if let ExprKind::Slice { lo, hi, step } = &index.kind {
+            let args = self.slice_args(lo, hi, step);
+            return match ot.as_comp() {
+                _ if ot == Ty::Str => format!("rt::string::slice(&{}, {args})?", borrow(&o)),
+                Some(Comp::List(_) | Comp::TupleVar(_)) => format!("{}.slice({args})?", o),
+                Some(Comp::Tuple(ts)) => {
+                    let lit = |x: &Option<Box<Expr>>| match x.as_deref().map(|e| &e.kind) {
+                        None => Some(None),
+                        Some(ExprKind::Int(v)) => Some(Some(*v)),
+                        _ => None,
+                    };
+                    match (lit(lo), lit(hi), lit(step), t.tuple_items()) {
+                        (Some(_), Some(_), Some(_), Some(out)) => {
+                            // Positions are known at compile time: pick fields.
+                            let pos = tuple_slice_positions(lo, hi, step, ts.len());
+                            let parts: Vec<String> = pos.iter().map(|p| format!("__t.{p}")).collect();
+                            if out.is_empty() {
+                                format!("{{ let _ = {o}; rt::Tuple0 }}")
+                            } else {
+                                format!("{{ let __t = {o}; ({},) }}", parts.join(", "))
+                            }
+                        }
+                        _ => format!("rt::Tup::from_vec({}).slice({args})?", iter_vec(&o, ot)),
+                    }
+                }
+                _ => unreachable!("slice of {ot}"),
+            };
+        }
+        let (i, it) = self.expr(index);
+        match ot.as_comp() {
+            _ if ot == Ty::Str => {
+                let (i, it) = crate::unopt(i, it, "string indices must be integers, not 'NoneType'");
+                format!("rt::string::index(&{}, {})?", borrow(&o), crate::as_int(&i, it))
+            }
+            Some(Comp::List(_) | Comp::TupleVar(_)) => {
+                let (i, it) = crate::unopt(i, it, "list indices must be integers or slices, not NoneType");
+                format!("{}.get({})?", o, crate::as_int(&i, it))
+            }
+            Some(Comp::Tuple(ts)) => match index.kind {
+                ExprKind::Int(v) => {
+                    let n = ts.len() as i64;
+                    let j = if v < 0 { v + n } else { v };
+                    format!("({o}).{j}")
+                }
+                _ => {
+                    let idx = crate::as_int(&i, it);
+                    let arms: Vec<String> = (0..ts.len()).map(|k| format!("{k} => __t.{k}")).collect();
+                    format!(
+                        "{{ let __t = {o}; let __n = {}_i64; let __i = {idx}; let __j = if __i < 0 {{ __i + __n }} else {{ __i }}; match __j {{ {}, _ => return Err(rt::Exc::new(\"IndexError\", \"tuple index out of range\")) }} }}",
+                        ts.len(),
+                        arms.join(", ")
+                    )
+                }
+            },
+            Some(Comp::Dict(k, _)) => format!("{}.get(&{})?", o, convert(&i, it, k)),
+            _ => unreachable!("subscript of {ot}"),
+        }
+    }
+
+    /// `obj[index] = value` on a native receiver.
+    pub(crate) fn set_item(&mut self, obj: &Expr, index: &Expr, value: &Expr, ind: &str) -> String {
+        let ot = self.ty(obj);
+        match ot.as_comp() {
+            Some(Comp::List(e)) => {
+                if let ExprKind::Slice { lo, hi, step } = &index.kind {
+                    let (v, vt) = self.expr(value);
+                    let items = iter_vec(&v, vt);
+                    let ve = native::iter_elem(vt).unwrap_or(e);
+                    let items = if ve == e { items } else { format!("{items}.into_iter().map(|__e| {}).collect()", convert("__e", ve, e)) };
+                    let o = self.expr(obj).0;
+                    let args = self.slice_args(lo, hi, step);
+                    return format!("{ind}{{\n{ind}    let __v = {items};\n{ind}    {o}.set_slice({args}, __v)?;\n{ind}}}");
+                }
+                // Python evaluates the value first, then the target.
+                let v = self.expr_as(value, e);
+                let o = self.expr(obj).0;
+                let (i, it) = self.expr(index);
+                format!("{ind}{{\n{ind}    let __v = {v};\n{ind}    {o}.set({}, __v)?;\n{ind}}}", crate::as_int(&i, it))
+            }
+            Some(Comp::Dict(k, vty)) => {
+                let v = self.expr_as(value, vty);
+                let o = self.expr(obj).0;
+                let kc = self.expr_as(index, k);
+                format!("{ind}{{\n{ind}    let __v = {v};\n{ind}    {o}.set({kc}, __v);\n{ind}}}")
+            }
+            _ => unreachable!("set_item on {ot}"),
+        }
+    }
+
+    /// `del obj[index]`
+    pub(crate) fn del_item(&mut self, obj: &Expr, index: &Expr) -> String {
+        let (o, ot) = self.expr(obj);
+        if ot == Ty::Obj {
+            if let ExprKind::Slice { .. } = index.kind {
+                let i = self.obj(index);
+                return format!("rt::py::delitem(&{}, {i})?;", borrow(&o));
+            }
+            let i = self.obj(index);
+            return format!("rt::py::delitem(&{}, {i})?;", borrow(&o));
+        }
+        match ot.as_comp() {
+            Some(Comp::List(_)) => {
+                if let ExprKind::Slice { lo, hi, step } = &index.kind {
+                    let args = self.slice_args(lo, hi, step);
+                    return format!("{o}.del_slice({args})?;");
+                }
+                let (i, it) = self.expr(index);
+                format!("{o}.del({})?;", crate::as_int(&i, it))
+            }
+            Some(Comp::Dict(k, _)) => {
+                let kc = self.expr_as(index, k);
+                format!("{o}.del(&{kc})?;")
+            }
+            _ => unreachable!("del on {ot}"),
+        }
+    }
+
+    /// `for var in iter:` over a native iterable: returns (loop head, element expression).
+    pub(crate) fn for_native(&mut self, iter: &Expr, it: Ty, ind: &str, out: &mut String) -> (String, String) {
+        let (src, _) = self.expr(iter);
+        let n = self.fresh();
+        match it.as_comp() {
+            Some(Comp::List(_) | Comp::TupleVar(_)) => {
+                writeln!(out, "{ind}let __c{n} = {src};\n{ind}let mut __i{n} = 0usize;").unwrap();
+                (format!("while let Some(__v) = {{ let __x = __c{n}.at(__i{n}); __i{n} += 1; __x }}"), "__v".into())
+            }
+            Some(Comp::Dict(..)) => {
+                writeln!(out, "{ind}let mut __c{n} = {src}.cursor();").unwrap();
+                (format!("while let Some((__v, _)) = __c{n}.next()?"), "__v".into())
+            }
+            Some(Comp::Set(_) | Comp::View(..)) => {
+                writeln!(out, "{ind}let mut __c{n} = {src}.cursor();").unwrap();
+                (format!("while let Some(__v) = __c{n}.next()?"), "__v".into())
+            }
+            _ => {
+                writeln!(out, "{ind}let __c{n} = {};", iter_vec(&src, it)).unwrap();
+                (format!("for __v in __c{n}"), "__v".into())
+            }
+        }
+    }
+
+    /// A native method call.
+    pub(crate) fn method(&mut self, obj: &Expr, recv: Ty, name: &str, args: &[Expr], kwargs: &[(String, Expr)], t: Ty) -> String {
+        let (o, ot) = self.expr(obj);
+        let o = if ot.as_opt().is_some() { format!("rt::unopt({o}, \"'NoneType' object has no attribute '{name}'\")?") } else { o };
+        let vals: Vec<(String, Ty)> = args.iter().map(|a| self.expr(a)).collect();
+        let kw = |k: &str| kwargs.iter().position(|(n, _)| n == k);
+        let kwv: Vec<(String, Ty)> = kwargs.iter().map(|(_, v)| self.expr(v)).collect();
+        let b = |c: &str| borrow(c).to_string();
+        let int = |v: &(String, Ty)| crate::as_int(&v.0, v.1);
+        if recv == Ty::Str {
+            let s = b(&o);
+            let arg_str = |v: &(String, Ty)| format!("&{}", borrow(&v.0));
+            let opt_str = |v: Option<&(String, Ty)>| match v {
+                None => "None".to_string(),
+                Some((c, Ty::None)) => format!("{{ {c}; None }}"),
+                Some(v) => format!("Some({})", arg_str(v)),
+            };
+            return match name {
+                "upper" | "lower" | "casefold" | "swapcase" | "title" | "capitalize" => format!("rt::string::{name}(&{s})"),
+                "strip" | "lstrip" | "rstrip" => format!("rt::string::{name}(&{s}, {})", opt_str(vals.first())),
+                "removeprefix" | "removesuffix" => format!("rt::string::{name}(&{s}, {})", arg_str(&vals[0])),
+                "split" | "rsplit" => {
+                    let sep = vals.first().cloned().or_else(|| kw("sep").map(|i| kwv[i].clone()));
+                    let maxs = vals.get(1).cloned().or_else(|| kw("maxsplit").map(|i| kwv[i].clone()));
+                    let m = maxs.map(|v| int(&v)).unwrap_or_else(|| "-1".into());
+                    format!("rt::string::{name}(&{s}, {}, {m})?", opt_str(sep.as_ref()))
+                }
+                "splitlines" => {
+                    let keep = vals.first().cloned().or_else(|| kw("keepends").map(|i| kwv[i].clone()));
+                    format!("rt::string::splitlines(&{s}, {})", keep.map(|v| crate::truthy(&v.0, v.1)).unwrap_or_else(|| "false".into()))
+                }
+                "join" => format!("rt::string::join(&{s}, &{})", iter_vec(&vals[0].0, vals[0].1)),
+                "replace" => {
+                    let count = vals.get(2).cloned().or_else(|| kw("count").map(|i| kwv[i].clone()));
+                    format!("rt::string::replace(&{s}, {}, {}, {})", arg_str(&vals[0]), arg_str(&vals[1]), count.map(|v| int(&v)).unwrap_or_else(|| "-1".into()))
+                }
+                "startswith" | "endswith" => {
+                    let (c, at) = &vals[0];
+                    if *at == Ty::Str {
+                        format!("rt::string::{name}(&{s}, &{})", borrow(c))
+                    } else {
+                        format!("{{ let __s = {s}.clone(); {}.into_iter().any(|__p: rt::Str| rt::string::{name}(&__s, &__p)) }}", iter_vec(c, *at))
+                    }
+                }
+                "find" | "rfind" | "count" => format!("rt::string::{name}(&{s}, {})", arg_str(&vals[0])),
+                "index" => format!("rt::string::index_of(&{s}, {})?", arg_str(&vals[0])),
+                "rindex" => format!("rt::string::rindex_of(&{s}, {})?", arg_str(&vals[0])),
+                "isdigit" | "isnumeric" | "isdecimal" | "isalpha" | "isalnum" | "isspace" | "isupper" | "islower" | "isidentifier" | "istitle" => {
+                    format!("rt::string::{name}(&{s})")
+                }
+                "center" | "ljust" | "rjust" => format!("rt::string::{name}(&{s}, {}, {})?", int(&vals[0]), opt_str(vals.get(1))),
+                "zfill" => format!("rt::string::zfill(&{s}, {})", int(&vals[0])),
+                "expandtabs" => format!("rt::string::expandtabs(&{s}, {})", vals.first().map(int).unwrap_or_else(|| "8".into())),
+                "partition" => format!("rt::string::partition(&{s}, {}, false)?", arg_str(&vals[0])),
+                "rpartition" => format!("rt::string::partition(&{s}, {}, true)?", arg_str(&vals[0])),
+                _ => unreachable!("str.{name}"),
+            };
+        }
+        let comp = recv.as_comp().unwrap();
+        match comp {
+            Comp::List(e) => match name {
+                "append" => format!("{o}.append({})", self.expr_as(&args[0], e)),
+                "insert" => {
+                    let i = int(&vals[0]);
+                    format!("{o}.insert({i}, {})", self.expr_as(&args[1], e))
+                }
+                "extend" => {
+                    let (c, ct) = &vals[0];
+                    let ve = native::iter_elem(*ct).unwrap_or(e);
+                    let items = iter_vec(c, *ct);
+                    let items = if ve == e { items } else { format!("{items}.into_iter().map(|__e| {}).collect()", convert("__e", ve, e)) };
+                    format!("{{ let __v = {items}; {o}.extend(__v) }}")
+                }
+                "pop" => format!("{o}.pop({})?", opt_i64(vals.first().map(int))),
+                "remove" => format!("{o}.remove(&{})?", convert(&vals[0].0, vals[0].1, e)),
+                "index" => format!("{o}.index(&{})?", convert(&vals[0].0, vals[0].1, e)),
+                "count" => format!("{o}.count(&{})", convert(&vals[0].0, vals[0].1, e)),
+                "sort" => {
+                    let rev = kw("reverse").map(|i| crate::truthy(&kwv[i].0, kwv[i].1)).unwrap_or_else(|| "false".into());
+                    format!("{o}.sort({rev})?")
+                }
+                "reverse" | "clear" => format!("{o}.{name}()"),
+                "copy" => format!("{o}.copy()"),
+                _ => unreachable!("list.{name}"),
+            },
+            Comp::Dict(k, v) => match name {
+                "get" => {
+                    let key = convert(&vals[0].0, vals[0].1, k);
+                    if vals.len() == 1 {
+                        convert(&format!("{o}.get_opt(&{key})"), Ty::opt(v), t)
+                    } else {
+                        let d = convert(&vals[1].0, vals[1].1, t);
+                        format!("{{ let __d = {d}; match {o}.get_opt(&{key}) {{ Some(__x) => {}, None => __d }} }}", convert("__x", v, t))
+                    }
+                }
+                "pop" => {
+                    let key = convert(&vals[0].0, vals[0].1, k);
+                    if vals.len() == 1 {
+                        format!("{o}.pop(&{key})?")
+                    } else {
+                        let d = convert(&vals[1].0, vals[1].1, t);
+                        format!("{{ let __d = {d}; match {o}.get_opt(&{key}) {{ Some(_) => {}, None => __d }} }}", convert(&format!("{o}.pop(&{key})?"), v, t))
+                    }
+                }
+                "setdefault" => format!("{o}.setdefault({}, {})", self.expr_as(&args[0], k), self.expr_as(&args[1], v)),
+                "keys" => format!("rt::coll::Keys({o})"),
+                "values" => format!("rt::coll::Values({o})"),
+                "items" => format!("rt::coll::Items({o})"),
+                "popitem" => format!("{o}.popitem()?"),
+                "update" => format!("{o}.update(&{})", convert(&vals[0].0, vals[0].1, recv)),
+                "clear" => format!("{o}.clear()"),
+                "copy" => format!("{o}.copy()"),
+                _ => unreachable!("dict.{name}"),
+            },
+            Comp::Set(e) => match name {
+                "add" => format!("{o}.add({})", self.expr_as(&args[0], e)),
+                "update" => format!("{o}.update({})", iter_vec(&vals[0].0, vals[0].1)),
+                "discard" => format!("{o}.discard(&{})", convert(&vals[0].0, vals[0].1, e)),
+                "remove" => format!("{o}.remove(&{})?", convert(&vals[0].0, vals[0].1, e)),
+                "pop" => format!("{o}.pop()?"),
+                "clear" => format!("{o}.clear()"),
+                "copy" => format!("{o}.copy()"),
+                "union" | "intersection" | "difference" | "symmetric_difference" | "issubset" | "issuperset" | "isdisjoint" => {
+                    format!("{}.{name}(&{})", convert(&o, recv, if t == Ty::Bool { recv } else { t }), convert(&vals[0].0, vals[0].1, if t == Ty::Bool { recv } else { t }))
+                }
+                _ => unreachable!("set.{name}"),
+            },
+            Comp::Tuple(_) | Comp::TupleVar(_) => {
+                let e = native::iter_elem(recv).unwrap();
+                let tup = if matches!(comp, Comp::TupleVar(_)) { o.clone() } else { format!("rt::Tup::from_vec({})", iter_vec(&o, recv)) };
+                match name {
+                    "index" => format!("{tup}.index(&{})?", convert(&vals[0].0, vals[0].1, e)),
+                    "count" => format!("{tup}.count(&{})", convert(&vals[0].0, vals[0].1, e)),
+                    _ => unreachable!("tuple.{name}"),
+                }
+            }
+            _ => unreachable!("method on {recv}"),
+        }
+    }
+
+    /// A CPython builtin with a native implementation.
+    pub(crate) fn native_builtin(&mut self, name: &str, args: &[Expr], kwargs: &[(String, Expr)], t: Ty) -> String {
+        let vals: Vec<(String, Ty)> = args.iter().map(|a| self.expr(a)).collect();
+        let kw = |k: &str| kwargs.iter().position(|(n, _)| n == k);
+        let kwv: Vec<(String, Ty)> = kwargs.iter().map(|(_, v)| self.expr(v)).collect();
+        let elems = |v: &(String, Ty)| iter_vec(&v.0, v.1);
+        match name {
+            "sorted" => {
+                let rev = kw("reverse").map(|i| crate::truthy(&kwv[i].0, kwv[i].1)).unwrap_or_else(|| "false".into());
+                format!("rt::coll::sorted({}, {rev})?", elems(&vals[0]))
+            }
+            "sum" => {
+                let e = native::iter_elem(vals[0].1).unwrap_or(Ty::Int);
+                if t == Ty::Int {
+                    let start = vals.get(1).map(|v| crate::as_int(&v.0, v.1)).unwrap_or_else(|| "0".into());
+                    let items = if e == Ty::Bool { format!("{}.into_iter().map(|b| b as i64).collect()", elems(&vals[0])) } else { elems(&vals[0]) };
+                    format!("rt::coll::sum_int({items}, {start})?")
+                } else {
+                    let start = vals.get(1).map(|v| crate::as_float(&v.0, v.1)).unwrap_or_else(|| "0.0".into());
+                    let items = if e == Ty::Float { elems(&vals[0]) } else { format!("{}.into_iter().map(|x| {}).collect()", elems(&vals[0]), crate::as_float("x", e)) };
+                    format!("rt::coll::sum_float({items}, {start})")
+                }
+            }
+            "min" | "max" => format!("rt::coll::min_of({}, {})?", elems(&vals[0]), name == "max"),
+            "any" | "all" => format!("rt::coll::{name}(&{})", elems(&vals[0])),
+            "list" => match vals.first() {
+                None => format!("rt::List::<{}>::new()", t.list_elem().unwrap().rust()),
+                Some(v) => format!("rt::List::from_vec({})", elems(v)),
+            },
+            "tuple" => match vals.first() {
+                None => "rt::Tuple0".into(),
+                Some(v) => format!("rt::Tup::from_vec({})", elems(v)),
+            },
+            "set" => match vals.first() {
+                None => format!("rt::Set::<{}>::new()", t.set_elem().unwrap().rust()),
+                Some(v) => format!("rt::Set::from_vec({})", elems(v)),
+            },
+            "dict" => {
+                let (k, v) = t.dict_kv().unwrap();
+                if vals.is_empty() {
+                    let pairs: Vec<String> = kwargs.iter().zip(&kwv).map(|((n, _), (c, ct))| format!("(rt::Str::from({n:?}), {})", convert(c, *ct, v))).collect();
+                    return format!("rt::Dict::<{}, {}>::from_pairs(vec![{}])", k.rust(), v.rust(), pairs.join(", "));
+                }
+                if vals[0].1.dict_kv().is_some() {
+                    return format!("{}.copy()", vals[0].0);
+                }
+                format!("rt::Dict::from_pairs({})", elems(&vals[0]))
+            }
+            "reversed" => format!("{{ let mut __v = {}; __v.reverse(); rt::List::from_vec(__v) }}", elems(&vals[0])),
+            "enumerate" => {
+                let start = vals.get(1).or(kw("start").map(|i| &kwv[i])).map(|v| crate::as_int(&v.0, v.1)).unwrap_or_else(|| "0".into());
+                format!("{{ let __s: i64 = {start}; rt::List::from_vec({}.into_iter().enumerate().map(|(i, x)| (__s + i as i64, x)).collect()) }}", elems(&vals[0]))
+            }
+            "zip" => {
+                let vs: Vec<String> = vals.iter().map(elems).collect();
+                let lets: Vec<String> = vs.iter().enumerate().map(|(i, v)| format!("let __z{i} = {v};")).collect();
+                let n = vals.len();
+                let len = (0..n).map(|i| format!("__z{i}.len()")).collect::<Vec<_>>();
+                let iters: Vec<String> = (0..n).map(|i| format!("let mut __it{i} = __z{i}.into_iter();")).collect();
+                let items: Vec<String> = (0..n).map(|i| format!("__it{i}.next().unwrap()")).collect();
+                format!(
+                    "{{ {} let __n = [{}].into_iter().min().unwrap_or(0); {} rt::List::from_vec((0..__n).map(|_| ({},)).collect()) }}",
+                    lets.join(" "),
+                    len.join(", "),
+                    iters.join(" "),
+                    items.join(", ")
+                )
+            }
+            "range" => {
+                let ints: Vec<String> = vals.iter().map(|v| crate::as_int(&v.0, v.1)).collect();
+                let (a, b, c) = match ints.len() {
+                    1 => ("0".to_string(), ints[0].clone(), "1".to_string()),
+                    2 => (ints[0].clone(), ints[1].clone(), "1".to_string()),
+                    _ => (ints[0].clone(), ints[1].clone(), ints[2].clone()),
+                };
+                format!("rt::List::from_vec(rt::coll::range_vec({a}, {b}, {c})?)")
+            }
+            "repr" => format!("rt::conv::repr_of(&{})", borrow(&vals[0].0)),
+            "ascii" => format!("rt::conv::ascii_of(&{})", borrow(&vals[0].0)),
+            "ord" => format!("rt::string::ord(&{})?", borrow(&vals[0].0)),
+            "chr" => format!("rt::string::chr({})?", crate::as_int(&vals[0].0, vals[0].1)),
+            "divmod" => {
+                let (a, at) = &vals[0];
+                let (b, bt) = &vals[1];
+                if t.tuple_items().is_some_and(|ts| ts[0] == Ty::Int) {
+                    format!("{{ let (__a, __b) = ({}, {}); (rt::int::floordiv(__a, __b)?, rt::int::modulo(__a, __b)?) }}", crate::as_int(a, *at), crate::as_int(b, *bt))
+                } else {
+                    format!("{{ let (__a, __b) = ({}, {}); (rt::float::floordiv(__a, __b)?, rt::float::modulo(__a, __b)?) }}", crate::as_float(a, *at), crate::as_float(b, *bt))
+                }
+            }
+            "round" => {
+                let (a, at) = &vals[0];
+                match (at, t) {
+                    (Ty::Int | Ty::Bool, _) => crate::as_int(a, *at),
+                    (_, Ty::Int) => format!("rt::conv::round_int({a})?"),
+                    _ => format!("rt::conv::round_to({a}, {})", crate::as_int(&vals[1].0, vals[1].1)),
+                }
+            }
+            "hex" | "oct" | "bin" => format!("rt::conv::{name}({})", crate::as_int(&vals[0].0, vals[0].1)),
+            _ => unreachable!("native builtin {name}"),
+        }
+    }
+
+    /// Binary operator on native collections.
+    pub(crate) fn coll_binop(&mut self, op: BinOp, l: &str, lt: Ty, r: &str, rt: Ty, t: Ty) -> String {
+        use BinOp::*;
+        let (lc, rc) = (lt.as_comp(), rt.as_comp());
+        match (op, lc, rc) {
+            (Add, Some(Comp::List(_)), _) => format!("{}.concat(&{})", convert(l, lt, t), convert(r, rt, t)),
+            (Mul, Some(Comp::List(_)), _) => format!("{l}.repeat({})", crate::as_int(r, rt)),
+            (Mul, _, Some(Comp::List(_))) => format!("{r}.repeat({})", crate::as_int(l, lt)),
+            (Add, Some(Comp::Tuple(a)), Some(Comp::Tuple(b))) if t.tuple_items().is_some() => {
+                let mut parts: Vec<String> = (0..a.len()).map(|i| format!("__a.{i}")).collect();
+                parts.extend((0..b.len()).map(|i| format!("__b.{i}")));
+                if parts.is_empty() {
+                    format!("{{ let _ = ({l}, {r}); rt::Tuple0 }}")
+                } else {
+                    format!("{{ let __a = {l}; let __b = {r}; ({},) }}", parts.join(", "))
+                }
+            }
+            (Add, _, _) => format!("{}.concat(&{})", convert(l, lt, t), convert(r, rt, t)),
+            (Mul, _, _) => {
+                let e = t.as_comp();
+                let _ = e;
+                format!("{{ let __v = {}; let __n = {}; rt::Tup::from_vec((0..__n.max(0)).flat_map(|_| __v.iter().cloned()).collect::<Vec<_>>()) }}", iter_vec(l, lt), crate::as_int(r, rt))
+            }
+            (BitOr, Some(Comp::Set(_)), _) => format!("{}.union(&{})", convert(l, lt, t), convert(r, rt, t)),
+            (BitAnd, Some(Comp::Set(_)), _) => format!("{}.intersection(&{})", convert(l, lt, t), convert(r, rt, t)),
+            (Sub, Some(Comp::Set(_)), _) => format!("{}.difference(&{})", convert(l, lt, t), convert(r, rt, t)),
+            (BitXor, Some(Comp::Set(_)), _) => format!("{}.symmetric_difference(&{})", convert(l, lt, t), convert(r, rt, t)),
+            (BitOr, Some(Comp::Dict(..)), _) => format!("{}.merge(&{})", convert(l, lt, t), convert(r, rt, t)),
+            _ => unreachable!("collection operator {} on {lt} and {rt}", op.symbol()),
+        }
+    }
+
+    /// `a, *b, c = value`: a fixed tuple of the unpacked items.
+    pub(crate) fn unpack(&mut self, value: &Expr, n: usize, star: Option<usize>, t: Ty) -> String {
+        let (v, vt) = self.expr(value);
+        let items = t.tuple_items().unwrap();
+        if let Some(ts) = vt.tuple_items() {
+            let Some(k) = star else { return v };
+            let after = n - 1 - k;
+            let me = items[k].list_elem().unwrap();
+            let mut parts: Vec<String> = (0..k).map(|i| format!("__t.{i}")).collect();
+            let mid: Vec<String> = (k..ts.len() - after).map(|i| convert(&format!("__t.{i}"), ts[i], me)).collect();
+            parts.push(format!("rt::List::<{}>::from_vec(vec![{}])", me.rust(), mid.join(", ")));
+            parts.extend((ts.len() - after..ts.len()).map(|i| format!("__t.{i}")));
+            return format!("{{ let __t = {v}; ({},) }}", parts.join(", "));
+        }
+        let mut parts = Vec::new();
+        for i in 0..n {
+            if Some(i) == star {
+                parts.push(format!("rt::List::from_vec(__it.by_ref().take(__n - {}).collect())", n - 1));
+            } else {
+                parts.push("__it.next().unwrap()".to_string());
+            }
+        }
+        format!(
+            "{{ let __v = {}; let __n = __v.len(); rt::coll::unpack_check(__n, {n}, {})?; let mut __it = __v.into_iter(); ({},) }}",
+            iter_vec(&v, vt),
+            star.is_some(),
+            parts.join(", ")
+        )
+    }
+
+    /// A comprehension, built eagerly in a block expression.
+    pub(crate) fn comp(&mut self, kind: CompKind, elt: &Expr, val: Option<&Expr>, gens: &[CompFor], t: Ty) -> String {
+        let r = format!("__r{}", self.fresh());
+        let mut code = String::new();
+        let empty = match kind {
+            CompKind::List | CompKind::Gen => format!("rt::List::<{}>::new()", t.list_elem().unwrap().rust()),
+            CompKind::Set => format!("rt::Set::<{}>::new()", t.set_elem().unwrap().rust()),
+            CompKind::Dict => {
+                let (k, v) = t.dict_kv().unwrap();
+                format!("rt::Dict::<{}, {}>::new()", k.rust(), v.rust())
+            }
+        };
+        write!(code, "{{ let {r} = {empty}; ").unwrap();
+        let mut closers = String::new();
+        for g in gens {
+            let (src, it) = self.expr(&g.iter);
+            let el = native::iter_elem(it).unwrap();
+            let n = self.fresh();
+            write!(code, "for __v{n} in {} {{ ", iter_vec(&src, it)).unwrap();
+            let mut buf = String::new();
+            self.assign(&g.var, format!("__v{n}"), el, 0, &mut buf);
+            for st in &g.unpack {
+                self.stmt(st, 0, &mut buf);
+            }
+            for c in &g.ifs {
+                let (cc, ct) = self.expr(c);
+                writeln!(buf, "if !{} {{ continue; }}", crate::truthy(&cc, ct)).unwrap();
+            }
+            code.push_str(&buf.replace('\n', " "));
+            closers.push_str("} ");
+        }
+        match kind {
+            CompKind::List | CompKind::Gen => {
+                let x = self.expr_as(elt, t.list_elem().unwrap());
+                write!(code, "{r}.append({x}); ").unwrap();
+            }
+            CompKind::Set => {
+                let x = self.expr_as(elt, t.set_elem().unwrap());
+                write!(code, "{r}.add({x}); ").unwrap();
+            }
+            CompKind::Dict => {
+                let (k, v) = t.dict_kv().unwrap();
+                let kc = self.expr_as(elt, k);
+                let vc = self.expr_as(val.unwrap(), v);
+                write!(code, "{{ let __k = {kc}; let __x = {vc}; {r}.set(__k, __x); }} ").unwrap();
+            }
+        }
+        write!(code, "{closers}{r} }}").unwrap();
+        code
+    }
+
+    /// `x in container` for a native container.
+    pub(crate) fn contains(&mut self, x: &str, xt: Ty, c: &str, ct: Ty) -> String {
+        if ct == Ty::Str {
+            let (x, _) = crate::unopt(x.to_string(), xt, "'in <string>' requires string as left operand, not NoneType");
+            return format!("rt::string::contains(&{}, &{})", borrow(&x), borrow(c));
+        }
+        let e = match ct.as_comp() {
+            Some(Comp::Dict(k, _)) => k,
+            _ => native::iter_elem(ct).unwrap_or(Ty::never()),
+        };
+        if e.is_never() {
+            return format!("{{ let _ = ({x}, {c}); false }}");
+        }
+        let probe = convert(x, xt, e);
+        match ct.as_comp() {
+            Some(Comp::Tuple(_)) => format!("{{ let __x = {probe}; {}.iter().any(|__e| rt::coll::eq(__e, &__x)) }}", iter_vec(c, ct)),
+            _ => format!("{c}.contains(&{probe})"),
+        }
+    }
+}
+
+fn tuple_slice_positions(lo: &Option<Box<Expr>>, hi: &Option<Box<Expr>>, step: &Option<Box<Expr>>, len: usize) -> Vec<usize> {
+    let lit = |x: &Option<Box<Expr>>| match x.as_deref().map(|e| &e.kind) {
+        Some(ExprKind::Int(v)) => Some(*v),
+        _ => None,
+    };
+    let n = len as i64;
+    let step = lit(step).unwrap_or(1);
+    let adj = |v: i64, a: i64, b: i64| if v < 0 { (v + n).clamp(a, b) } else { v.clamp(a, b) };
+    let (mut i, stop) = if step > 0 {
+        (lit(lo).map(|v| adj(v, 0, n)).unwrap_or(0), lit(hi).map(|v| adj(v, 0, n)).unwrap_or(n))
+    } else {
+        (lit(lo).map(|v| adj(v, -1, n - 1)).unwrap_or(n - 1), lit(hi).map(|v| adj(v, -1, n - 1)).unwrap_or(-1))
+    };
+    let mut out = Vec::new();
+    while (step > 0 && i < stop) || (step < 0 && i > stop) {
+        out.push(i as usize);
+        i += step;
+    }
+    out
+}
+
+use std::fmt::Write;

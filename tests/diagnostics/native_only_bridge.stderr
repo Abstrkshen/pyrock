@@ -1,12 +1,6 @@
 tests/diagnostics/native_only_bridge.py:2:1  P200  error: runtime import of `json` in <module>
     reason: no .py/.rs/.c of that name next to the source: CPython import
     native-only: compilation error (use --mode hybrid to bridge through CPython)
-tests/diagnostics/native_only_bridge.py:4:5  P212  error: list literal in <module>
-    reason: mutable collection kept as a Python list (preserves aliasing)
-    native-only: compilation error (use --mode hybrid to bridge through CPython)
-tests/diagnostics/native_only_bridge.py:6:1  P210  error: b.append(...) in <module>
-    reason: CPython attribute lookup + call
-    native-only: compilation error (use --mode hybrid to bridge through CPython)
 tests/diagnostics/native_only_bridge.py:7:7  P210  error: json.dumps(...) in <module>
     reason: CPython attribute lookup + call
     native-only: compilation error (use --mode hybrid to bridge through CPython)

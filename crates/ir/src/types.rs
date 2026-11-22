@@ -53,6 +53,19 @@ pub enum Comp {
     Opt(Ty),
     /// An exception instance of a builtin exception type (`rt::Exc`).
     Exc,
+    /// `tuple[T, ...]`: immutable, variable length (`rt::Tup<T>`).
+    TupleVar(Ty),
+    /// The element type of a container that never receives an element.
+    Never,
+    /// A live dict view: `d.keys()`, `d.values()`, `d.items()`.
+    View(ViewKind, Ty, Ty),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ViewKind {
+    Keys,
+    Values,
+    Items,
 }
 
 struct Entry {
@@ -98,7 +111,13 @@ impl Ty {
             Comp::Set(e) => (format!("set[{}]", e.py_name()), format!("rt::Set<{}>", e.rust()), format!("set_{}", e.mangle())),
             Comp::Tuple(ts) => (
                 if ts.is_empty() { "tuple[()]".to_string() } else { format!("tuple[{}]", join(ts, Ty::py_name, ", ")) },
-                if ts.len() == 1 { format!("({},)", ts[0].rust()) } else { format!("({})", join(ts, Ty::rust, ", ")) },
+                if ts.is_empty() {
+                    "rt::Tuple0".to_string()
+                } else if ts.len() == 1 {
+                    format!("({},)", ts[0].rust())
+                } else {
+                    format!("({})", join(ts, Ty::rust, ", "))
+                },
                 format!("tup{}_{}", ts.len(), join(ts, Ty::mangle, "_")),
             ),
             Comp::Class(_, name) => (name.to_string(), format!("rt::Ref<{}>", name.replace('.', "_")), name.replace('.', "_")),
@@ -109,6 +128,16 @@ impl Ty {
             ),
             Comp::Opt(t) => (format!("{} | None", t.py_name()), format!("Option<{}>", t.rust()), format!("opt_{}", t.mangle())),
             Comp::Exc => ("BaseException".to_string(), "rt::Exc".to_string(), "exc".to_string()),
+            Comp::TupleVar(t) => (format!("tuple[{}, ...]", t.py_name()), format!("rt::Tup<{}>", t.rust()), format!("tupv_{}", t.mangle())),
+            Comp::Never => ("Never".to_string(), "rt::Never".to_string(), "never".to_string()),
+            Comp::View(kind, k, v) => {
+                let (py, rs) = match kind {
+                    ViewKind::Keys => ("dict_keys", "Keys"),
+                    ViewKind::Values => ("dict_values", "Values"),
+                    ViewKind::Items => ("dict_items", "Items"),
+                };
+                (format!("{py}[{}, {}]", k.py_name(), v.py_name()), format!("rt::coll::{rs}<{}, {}>", k.rust(), v.rust()), format!("{}_{}_{}", rs.to_lowercase(), k.mangle(), v.mangle()))
+            }
         };
         let mut i = interner().lock().unwrap();
         if let Some(&id) = i.index.get(&c) {
@@ -134,6 +163,60 @@ impl Ty {
 
     pub fn tuple(items: Vec<Ty>) -> Ty {
         Ty::comp(Comp::Tuple(items))
+    }
+
+    pub fn never() -> Ty {
+        Ty::comp(Comp::Never)
+    }
+
+    pub fn tuple_var(t: Ty) -> Ty {
+        Ty::comp(Comp::TupleVar(t))
+    }
+
+    /// Element type when iterating a value of this type (`for x in v`).
+    pub fn iter_elem(self) -> Option<Ty> {
+        match self.as_comp()? {
+            Comp::List(e) | Comp::Set(e) | Comp::TupleVar(e) => Some(e),
+            Comp::Dict(k, _) | Comp::View(ViewKind::Keys, k, _) => Some(k),
+            Comp::View(ViewKind::Values, _, v) => Some(v),
+            Comp::View(ViewKind::Items, k, v) => Some(Ty::tuple(vec![k, v])),
+            Comp::Tuple(ts) => {
+                let first = *ts.first()?;
+                ts.iter().all(|t| *t == first).then_some(first)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_never(self) -> bool {
+        matches!(self.as_comp(), Some(Comp::Never))
+    }
+
+    /// Whether a native value of this type contains a mutable container
+    /// anywhere (and so has identity that a copy would break).
+    pub fn has_mutable(self) -> bool {
+        match self.as_comp() {
+            None => false,
+            Some(Comp::List(_) | Comp::Dict(..) | Comp::Set(_) | Comp::Class(..)) => true,
+            Some(Comp::Tuple(ts)) => ts.iter().any(|t| t.has_mutable()),
+            Some(Comp::TupleVar(t) | Comp::Opt(t)) => t.has_mutable(),
+            Some(Comp::View(..)) => true,
+            _ => false,
+        }
+    }
+
+    /// Valid native dict key / set element (hashable with Python equality).
+    pub fn is_hashable(self) -> bool {
+        match self {
+            Ty::Int | Ty::Str | Ty::Bool | Ty::None => true,
+            Ty::C(_) => match self.as_comp() {
+                Some(Comp::Tuple(ts)) => ts.iter().all(|t| t.is_hashable()),
+                Some(Comp::TupleVar(t) | Comp::Opt(t)) => t.is_hashable(),
+                Some(Comp::Never) => true,
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     /// A caught or constructed exception.
@@ -202,6 +285,21 @@ impl Ty {
         match self.as_comp() {
             Some(Comp::Opt(t)) => Some(t),
             _ => None,
+        }
+    }
+
+    /// Whether values of this type involve a CPython object anywhere.
+    pub fn mentions_obj(self) -> bool {
+        match self {
+            Ty::Obj => true,
+            Ty::C(_) => match self.as_comp() {
+                Some(Comp::List(t) | Comp::Set(t) | Comp::Opt(t) | Comp::TupleVar(t)) => t.mentions_obj(),
+                Some(Comp::Dict(k, v) | Comp::View(_, k, v)) => k.mentions_obj() || v.mentions_obj(),
+                Some(Comp::Tuple(ts)) => ts.iter().any(|t| t.mentions_obj()),
+                Some(Comp::Func(ps, r)) => r.mentions_obj() || ps.iter().any(|t| t.mentions_obj()),
+                _ => false,
+            },
+            _ => false,
         }
     }
 

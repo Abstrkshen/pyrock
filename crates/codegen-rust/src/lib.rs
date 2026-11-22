@@ -9,8 +9,10 @@
 //! * CPython objects are `rt::py::Obj`; native values are boxed exactly
 //!   where they meet one, and unboxed only through checked conversions.
 
+mod coll;
+
 use pyfast_analysis::Plan;
-use pyfast_infer::{Program, Slot, Spec, SpecKey};
+use pyfast_infer::{CallClass, Program, Slot, Spec, SpecKey};
 use pyfast_ir::*;
 use std::fmt::Write;
 
@@ -74,14 +76,14 @@ pub fn emit(prog: &Program, plan: &Plan, file_name: &str, py_paths: &[String]) -
         }
         writeln!(out, "thread_local! {{ static {}: std::cell::RefCell<Option<{}>> = const {{ std::cell::RefCell::new(None) }}; }}", gname(*u, name), t.rust()).unwrap();
     }
-    for s in &prog.specs {
+    for s in prog.specs.iter().filter(|s| plan.is_reachable(s.id)) {
         let f = &m.funcs[s.key.func];
         if f.is_module && f.unit != 0 {
             writeln!(out, "static INIT_{}: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);", m.units[f.unit].name).unwrap();
         }
     }
 
-    for s in prog.specs.iter().skip(1) {
+    for s in prog.specs.iter().skip(1).filter(|s| plan.is_reachable(s.id)) {
         out.push('\n');
         let f = &m.funcs[s.key.func];
         source_map.push((s.mangled.clone(), f.span));
@@ -223,6 +225,18 @@ fn boxed(code: &str, t: Ty) -> String {
 /// Convert a value of type `from` for a slot of type `to`. Inference only
 /// joins types by boxing, so the only conversion needed is native -> object.
 fn coerce(code: String, from: Ty, to: Ty) -> String {
+    if from == to {
+        return code;
+    }
+    let comp = |t: Ty| t.as_comp().is_some_and(|c| !matches!(c, Comp::Opt(_)));
+    if (comp(from) && comp(to)) || from.is_never() || (to.as_opt().is_some_and(|x| x.as_comp().is_some()) && from != Ty::None) {
+        return coll::convert(&code, from, to);
+    }
+    coerce_basic(code, from, to)
+}
+
+/// Scalar / Optional / boxing coercions (no container conversion).
+fn coerce_basic(code: String, from: Ty, to: Ty) -> String {
     if from == to {
         return code;
     }
@@ -459,8 +473,16 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
         let ind = "    ".repeat(depth);
         match &s.kind {
             StmtKind::Assign { target, value } => {
-                let (code, t) = self.expr(value);
-                self.assign(target, code, t, depth, out);
+                match self.local_ty(target) {
+                    Some(to) => {
+                        let code = self.expr_as(value, to);
+                        self.assign(target, code, to, depth, out);
+                    }
+                    None => {
+                        let (code, t) = self.expr(value);
+                        self.assign(target, code, t, depth, out);
+                    }
+                }
             }
             StmtKind::AugAssign { target, op, value } => {
                 let cur = Expr { kind: ExprKind::Local(target.clone()), span: s.span };
@@ -470,6 +492,33 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     let v = self.obj(value);
                     let code = format!("rt::py::binop({:?}, {c}, {v})?", py_iop(*op));
                     self.assign(target, code, Ty::Obj, depth, out);
+                    return;
+                }
+                if let Some(tt) = self.local_ty(target).filter(|t| t.is_mutable()) {
+                    // In-place: `xs += ys` / `s |= t` mutate the object (aliases see it).
+                    let (c, _) = self.expr(&cur);
+                    let (v, vt) = self.expr(value);
+                    let code = match (tt.as_comp(), op) {
+                        (Some(Comp::List(e)), BinOp::Add) => {
+                            let ve = pyfast_infer::native::iter_elem(vt).unwrap_or(e);
+                            let items = coll::iter_vec(&v, vt);
+                            let items = if ve == e { items } else { format!("{items}.into_iter().map(|__e| {}).collect()", coll::convert("__e", ve, e)) };
+                            format!("{{ let __v = {items}; {c}.extend(__v); }}")
+                        }
+                        (Some(Comp::List(_)), BinOp::Mul) => format!("{{ let __n = {}; let __v = {c}.repeat(__n).to_vec(); {c}.clear(); {c}.extend(__v); }}", as_int(&v, vt)),
+                        (Some(Comp::Set(_)), BinOp::BitOr) => format!("{c}.update({});", coll::iter_vec(&v, vt)),
+                        (Some(Comp::Set(_)), _) => {
+                            let m = match op {
+                                BinOp::BitAnd => "intersection",
+                                BinOp::Sub => "difference",
+                                _ => "symmetric_difference",
+                            };
+                            format!("{{ let __n = {c}.{m}(&{}); {c}.clear(); {c}.update(__n.to_vec()); }}", coll::convert(&v, vt, tt))
+                        }
+                        (Some(Comp::Dict(..)), _) => format!("{c}.update(&{});", coll::convert(&v, vt, tt)),
+                        _ => unreachable!("in-place operator on {tt}"),
+                    };
+                    writeln!(out, "{ind}{code}").unwrap();
                     return;
                 }
                 let e = Expr { kind: ExprKind::BinOp { op: *op, left: Box::new(cur), right: Box::new(value.clone()) }, span: s.span };
@@ -490,7 +539,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             StmtKind::Return(v) => {
                 let ret = ret_ty(self.spec);
                 let (code, t) = match v {
-                    Some(e) => self.expr(e),
+                    Some(e) => (self.expr_as(e, ret), ret),
                     None => ("()".into(), Ty::None),
                 };
                 let code = coerce(code, t, ret);
@@ -587,6 +636,15 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 self.loop_body(body, depth + 1, out);
                 writeln!(out, "{ind}}}").unwrap();
             }
+            StmtKind::ForIter { var, iter, body } if self.ty(iter) != Ty::Obj => {
+                let it = self.ty(iter);
+                let (head, v) = self.for_native(iter, it, &ind, out);
+                let elem = pyfast_infer::native::iter_elem(it).unwrap();
+                writeln!(out, "{ind}{head} {{").unwrap();
+                self.assign(var, v, elem, depth + 1, out);
+                self.loop_body(body, depth + 1, out);
+                writeln!(out, "{ind}}}").unwrap();
+            }
             StmtKind::ForIter { var, iter, body } => {
                 let it = self.fresh();
                 let src = self.obj(iter);
@@ -595,6 +653,10 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 self.assign(var, "__v".into(), Ty::Obj, depth + 1, out);
                 self.loop_body(body, depth + 1, out);
                 writeln!(out, "{ind}}}").unwrap();
+            }
+            StmtKind::SetItem { obj, index, value } if self.ty(obj) != Ty::Obj => {
+                let code = self.set_item(obj, index, value, &ind);
+                writeln!(out, "{code}").unwrap();
             }
             StmtKind::SetItem { obj, index, value } => {
                 // Python evaluates the right-hand side first.
@@ -623,10 +685,21 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 }
             }
             StmtKind::AssignGlobal { unit, name, value } => {
-                let (code, t) = self.expr(value);
-                let gt = self.prog.globals.get(&(*unit, name.clone())).and_then(|s| s.known()).unwrap_or(t);
-                writeln!(out, "{ind}rt::gset(&{}, {});", gname(*unit, name), coerce(code, t, gt)).unwrap();
+                let gt = self.prog.globals.get(&(*unit, name.clone())).and_then(|s| s.known()).unwrap_or_else(|| self.ty(value));
+                let code = self.expr_as(value, gt);
+                writeln!(out, "{ind}rt::gset(&{}, {code});", gname(*unit, name)).unwrap();
             }
+            StmtKind::Del(target) => match &target.kind {
+                ExprKind::Subscript { obj, index } => {
+                    let code = self.del_item(obj, index);
+                    writeln!(out, "{ind}{code}").unwrap();
+                }
+                ExprKind::GetAttr { obj, name } => {
+                    let o = self.obj(obj);
+                    writeln!(out, "{ind}rt::py::delattr(&{}, {name:?})?;", borrow(&o)).unwrap();
+                }
+                _ => unreachable!(),
+            },
             StmtKind::Break => writeln!(out, "{ind}{}", self.jump("break", "Break")).unwrap(),
             StmtKind::Continue => writeln!(out, "{ind}{}", self.jump("continue", "Continue")).unwrap(),
             StmtKind::Pass => {}
@@ -762,6 +835,16 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
     /// `PyResult`) together with its type.
     fn expr(&mut self, e: &Expr) -> (String, Ty) {
         let t = self.ty(e);
+        // A value of type Never cannot exist: evaluate operands, then diverge.
+        if t.is_never() && matches!(e.kind, ExprKind::BinOp { .. } | ExprKind::Unary { .. }) {
+            let parts: Vec<String> = match &e.kind {
+                ExprKind::BinOp { left, right, .. } => vec![self.expr(left).0, self.expr(right).0],
+                ExprKind::Unary { operand, .. } => vec![self.expr(operand).0],
+                _ => vec![],
+            };
+            let lets: String = parts.iter().map(|p| format!("let _ = {p}; ")).collect();
+            return (format!("{{ {lets}unreachable!() }}"), t);
+        }
         let code = match &e.kind {
             ExprKind::Int(v) => {
                 if *v == i64::MIN {
@@ -801,6 +884,8 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 let (r, rt) = if t == Ty::Obj { (r, rt) } else { unopt(r, rt, &msg_r) };
                 if t == Ty::Obj {
                     format!("rt::py::binop({:?}, {}, {})?", py_op(*op), boxed(&l, lt), boxed(&r, rt))
+                } else if t.as_comp().is_some_and(|c| !matches!(c, Comp::Opt(_))) {
+                    self.coll_binop(*op, &l, lt, &r, rt, t)
                 } else {
                     self.binop(*op, &l, lt, &r, rt, t)
                 }
@@ -832,7 +917,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     if t == Ty::Obj {
                         format!("rt::py::compare({:?}, {}, {})?", rest[0].0.rt_fn(), boxed(&l, lt), boxed(&r, rt))
                     } else {
-                        compare(rest[0].0, &l, lt, &r, rt)
+                        self.compare_any(rest[0].0, &l, lt, &r, rt)
                     }
                 } else {
                     // a < b < c: evaluate each operand at most once, short-circuit.
@@ -846,7 +931,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                         let cur = self.fresh();
                         let pc = if prev_t.is_clone() { format!("{prev}.clone()") } else { prev.clone() };
                         let cc = if rt.is_clone() { format!("{cur}.clone()") } else { cur.clone() };
-                        let cmp = compare(*op, &pc, prev_t, &cc, rt);
+                        let cmp = self.compare_any(*op, &pc, prev_t, &cc, rt);
                         if i + 1 == rest.len() {
                             write!(code, "let {cur} = {r}; {cmp}").unwrap();
                         } else {
@@ -957,24 +1042,38 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 let o = self.obj(obj);
                 format!("rt::py::getattr(&{}, {name:?})?", borrow(&o))
             }
+            ExprKind::CallObj { func, args, kwargs } if !matches!(self.prog.classify_call(self.spec, func, args, kwargs), CallClass::Bridge | CallClass::Pending) => {
+                match self.prog.classify_call(self.spec, func, args, kwargs) {
+                    CallClass::StaticBool(b) => {
+                        let parts: Vec<String> = args.iter().take(1).map(|a| self.expr(a).0).collect();
+                        format!("{{ let _ = {}; {b} }}", parts.join(", "))
+                    }
+                    CallClass::Method { recv, name } => {
+                        let ExprKind::GetAttr { obj, .. } = &func.kind else { unreachable!() };
+                        self.method(obj, recv, &name, args, kwargs, t)
+                    }
+                    CallClass::Builtin(name) => self.native_builtin(&name, args, kwargs, t),
+                    CallClass::Bridge | CallClass::Pending => unreachable!(),
+                }
+            }
             ExprKind::CallObj { func, args, kwargs } => {
                 let f = self.obj(func);
                 let a: Vec<String> = args.iter().map(|x| self.obj(x)).collect();
                 let k: Vec<String> = kwargs.iter().map(|(n, x)| format!("({n:?}, {})", self.obj(x))).collect();
                 format!("rt::py::call(&{}, vec![{}], vec![{}])?", borrow(&f), a.join(", "), k.join(", "))
             }
-            ExprKind::List(items) => {
-                let a: Vec<String> = items.iter().map(|x| self.obj(x)).collect();
-                format!("rt::py::list(vec![{}])?", a.join(", "))
+            ExprKind::List(_) | ExprKind::Tuple(_) | ExprKind::Dict(_) | ExprKind::Set(_) => self.literal(e, t),
+            ExprKind::Unpack { value, n, star } => self.unpack(value, *n, *star, t),
+            ExprKind::Comp { kind, elt, val, gens } => self.comp(*kind, elt, val.as_deref(), gens, t),
+            ExprKind::Slice { lo, hi, step } => {
+                let part = |me: &mut Self, x: &Option<Box<Expr>>| match x {
+                    None => "rt::py::none()".to_string(),
+                    Some(x) => me.obj(x),
+                };
+                let (a, b, c) = (part(self, lo), part(self, hi), part(self, step));
+                format!("rt::py::slice({a}, {b}, {c})?")
             }
-            ExprKind::Tuple(items) => {
-                let a: Vec<String> = items.iter().map(|x| self.obj(x)).collect();
-                format!("rt::py::tuple(vec![{}])?", a.join(", "))
-            }
-            ExprKind::Dict(pairs) => {
-                let a: Vec<String> = pairs.iter().map(|(k, v)| format!("({}, {})", self.obj(k), self.obj(v))).collect();
-                format!("rt::py::dict(vec![{}])?", a.join(", "))
-            }
+            ExprKind::Subscript { obj, index } if self.ty(obj) != Ty::Obj => self.subscript(obj, index, t),
             ExprKind::Subscript { obj, index } => {
                 let o = self.obj(obj);
                 let i = self.obj(index);
@@ -1056,6 +1155,54 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
         }
     }
 
+    /// One comparison, including native collections.
+    fn compare_any(&mut self, op: CmpOp, l: &str, lt: Ty, r: &str, rt: Ty) -> String {
+        let comp = |t: Ty| t.as_comp().is_some_and(|c| !matches!(c, Comp::Opt(_) | Comp::Exc));
+        if lt == Ty::Obj || rt == Ty::Obj || !(comp(lt) || comp(rt)) {
+            return compare(op, l, lt, r, rt);
+        }
+        match op {
+            CmpOp::In | CmpOp::NotIn => {
+                let c = self.contains(l, lt, r, rt);
+                if op == CmpOp::NotIn { format!("!{c}") } else { c }
+            }
+            CmpOp::Is | CmpOp::IsNot => {
+                let neg = if op == CmpOp::IsNot { "!" } else { "" };
+                if lt == rt && lt.is_mutable() {
+                    format!("{neg}{l}.is(&{})", borrow(r))
+                } else {
+                    format!("{{ let _ = {l}; let _ = {r}; {} }}", op == CmpOp::IsNot)
+                }
+            }
+            _ => {
+                let j = pyfast_infer::native::ty_join(lt, rt, false);
+                match j {
+                    None => {
+                        let v = matches!(op, CmpOp::NotEq);
+                        format!("{{ let _ = {l}; let _ = {r}; {v} }}")
+                    }
+                    Some(j) => {
+                        let (a, b) = (coll::convert(l, lt, j), coll::convert(r, rt, j));
+                        match op {
+                            CmpOp::Eq => format!("rt::coll::eq(&{}, &{})", borrow(&a), borrow(&b)),
+                            CmpOp::NotEq => format!("rt::coll::ne(&{}, &{})", borrow(&a), borrow(&b)),
+                            o if j.set_elem().is_some() => {
+                                // Set inclusion: <= is issubset, < proper subset.
+                                match o {
+                                    CmpOp::LtE => format!("{a}.issubset(&{b})"),
+                                    CmpOp::GtE => format!("{a}.issuperset(&{b})"),
+                                    CmpOp::Lt => format!("{{ let (__a, __b) = ({a}, {b}); __a.issubset(&__b) && __a.len() < __b.len() }}"),
+                                    _ => format!("{{ let (__a, __b) = ({a}, {b}); __a.issuperset(&__b) && __a.len() > __b.len() }}"),
+                                }
+                            }
+                            o => format!("rt::coll::{}(&{}, &{})?", o.rt_fn(), borrow(&a), borrow(&b)),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn py_builtin_call(&mut self, name: &str, vals: Vec<(String, Ty)>) -> String {
         let a: Vec<String> = vals.iter().map(|(c, t)| boxed(c, *t)).collect();
         format!("rt::py::call(&rt::py::builtin({name:?})?, vec![{}], vec![])?", a.join(", "))
@@ -1076,6 +1223,12 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
         };
         let one = || vals[0].clone();
         match b {
+            Builtin::Print if vals.iter().any(|(_, t)| t.has_mutable()) && vals.len() > 1 => {
+                // print() calls str() only after evaluating every argument.
+                let lets: String = vals.iter().enumerate().map(|(i, (c, _))| format!("let __p{i} = {c}; ")).collect();
+                let parts: Vec<String> = vals.iter().enumerate().map(|(i, (_, t))| to_str(&format!("__p{i}"), *t)).collect();
+                format!("{{ {lets}rt::print(&[{}]) }}", parts.join(", "))
+            }
             Builtin::Print => {
                 let parts: Vec<String> = vals.iter().map(|(c, t)| to_str(c, *t)).collect();
                 format!("rt::print(&[{}])", parts.join(", "))
@@ -1124,8 +1277,15 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             },
             Builtin::Len => match vals[0].1 {
                 Ty::Obj => format!("rt::py::len(&{})?", borrow(&vals[0].0)),
-                _ => format!("rt::string::len(&{})", borrow(&vals[0].0)),
+                Ty::Str => format!("rt::string::len(&{})", borrow(&vals[0].0)),
+                lt => match lt.tuple_items() {
+                    Some(ts) => format!("{{ let _ = {}; {}_i64 }}", vals[0].0, ts.len()),
+                    None => format!("{}.len()", vals[0].0),
+                },
             },
+            Builtin::Min | Builtin::Max if vals.len() == 1 && t != Ty::Obj => {
+                format!("rt::coll::min_of({}, {})?", coll::iter_vec(&vals[0].0, vals[0].1), b == Builtin::Max)
+            }
             Builtin::Min | Builtin::Max if t == Ty::Obj => self.py_builtin_call(b.name(), vals),
             Builtin::Min | Builtin::Max => {
                 // Python keeps the first extreme element: replace only on strict improvement.

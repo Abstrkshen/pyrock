@@ -9,7 +9,7 @@
 //! In hybrid mode a value that takes several types (or meets a CPython
 //! object) is *boxed*: it becomes a Python object instead of an error.
 
-use crate::{definite, ops};
+use crate::{definite, native, ops};
 use pyfast_ir::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -34,13 +34,7 @@ pub enum Slot {
 
 /// `None` joined with `T` is `T | None` (a native `Option<T>`), in every mode.
 pub fn opt_join(a: Ty, b: Ty) -> Option<Ty> {
-    let base = |t: Ty| t.as_opt().unwrap_or(t);
-    match (a, b) {
-        _ if a == Ty::Obj || b == Ty::Obj => None,
-        (Ty::None, x) | (x, Ty::None) => Some(Ty::opt(x)),
-        _ if base(a) == base(b) && (a.as_opt().is_some() || b.as_opt().is_some()) => Some(Ty::opt(base(a))),
-        _ => None,
-    }
+    native::ty_join(a, b, false)
 }
 
 impl Slot {
@@ -48,12 +42,22 @@ impl Slot {
         match self {
             Slot::Unknown => Slot::Known(t),
             Slot::Known(a) if a == t => self,
-            Slot::Known(a) if opt_join(a, t).is_some() => Slot::Known(opt_join(a, t).unwrap()),
+            Slot::Known(a) if native::ty_join(a, t, boxing).is_some() => Slot::Known(native::ty_join(a, t, boxing).unwrap()),
             Slot::Known(a) if boxing || a == Ty::Obj || t == Ty::Obj => Slot::Boxed(a, t),
             Slot::Known(a) => Slot::Conflict(a, t),
             c => c,
         }
     }
+    /// Join two slots.
+    pub fn join_slot(self, o: Slot, boxing: bool) -> Slot {
+        match o {
+            Slot::Unknown => self,
+            Slot::Known(t) => self.join(t, boxing),
+            Slot::Boxed(a, b) => self.join(a, boxing).join(b, boxing),
+            Slot::Conflict(..) => o,
+        }
+    }
+
     pub fn known(self) -> Option<Ty> {
         match self {
             Slot::Known(t) => Some(t),
@@ -76,6 +80,8 @@ pub struct Spec {
     pub analyzed: bool,
     pub locals: BTreeMap<String, Slot>,
     pub maybe_unbound: HashSet<String>,
+    /// Lower bound on the return type requested by callers.
+    pub ret_floor: Slot,
 }
 
 /// A module-level variable kept in a global cell: (unit, name).
@@ -187,7 +193,7 @@ pub fn short_circuit(locals: &BTreeMap<String, Slot>, op: BoolOpKind, values: &[
 impl Program<'_> {
     /// Type of `e` under the locals of `spec`. Returns `None` when unknown or ill-typed.
     pub fn type_of(&self, spec: &Spec, e: &Expr) -> Option<Ty> {
-        let mut ctx = Ctx { prog: self, locals: &spec.locals, requests: None, diags: None, gassigns: vec![] };
+        let mut ctx = self.ctx_for(spec);
         ctx.expr(e)
     }
 }
@@ -204,7 +210,17 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
         let mut i = 0;
         while i < prog.specs.len() {
             let mut requests = Vec::new();
-            let (locals, ret, falls, gassigns) = analyze(&prog, i, &mut requests, None);
+            let (locals, ret, falls, gassigns, ret_widen) = analyze(&prog, i, &mut requests, None);
+            for (key, t) in ret_widen {
+                let boxing = prog.boxing();
+                if let Some(&j) = prog.index.get(&key) {
+                    let floor = prog.specs[j].ret_floor.join(t, boxing);
+                    if floor != prog.specs[j].ret_floor {
+                        prog.specs[j].ret_floor = floor;
+                        changed = true;
+                    }
+                }
+            }
             for (key, t) in gassigns {
                 let boxing = prog.boxing();
                 let slot = prog.globals.entry(key).or_insert(Slot::Unknown);
@@ -337,7 +353,7 @@ fn add_spec(prog: &mut Program, key: SpecKey) {
     let maybe_unbound = definite::maybe_unbound(f);
     let id = prog.specs.len();
     prog.index.insert(key.clone(), id);
-    prog.specs.push(Spec { id, key, mangled, ret: Slot::Unknown, falls_through: true, analyzed: false, locals, maybe_unbound });
+    prog.specs.push(Spec { id, key, mangled, ret: Slot::Unknown, falls_through: true, analyzed: false, locals, maybe_unbound, ret_floor: Slot::Unknown });
 }
 
 type Requests = Vec<(SpecKey, Span)>;
@@ -349,9 +365,15 @@ fn analyze(
     idx: usize,
     requests: &mut Requests,
     diags: Option<&mut Vec<Diagnostic>>,
-) -> (BTreeMap<String, Slot>, Slot, bool, Vec<(GlobalKey, Ty)>) {
+) -> (BTreeMap<String, Slot>, Slot, bool, Vec<(GlobalKey, Ty)>, Vec<(SpecKey, Ty)>) {
     let spec = &prog.specs[idx];
     let mut gassigns;
+    let mut ret_widen;
+    let cur_ret = match spec.ret.join_slot(spec.ret_floor, prog.boxing()) {
+        Slot::Known(t) => Some(t),
+        Slot::Boxed(..) => Some(Ty::Obj),
+        _ => None,
+    };
     let f = &prog.module.funcs[spec.key.func];
     let mut locals = spec.locals.clone();
     let mut ret;
@@ -359,11 +381,13 @@ fn analyze(
     let mut guard = 0;
     loop {
         let before = locals.clone();
-        ret = Slot::Unknown;
-        let mut ctx = Ctx { prog, locals: &locals, requests: Some(requests), diags: None, gassigns: vec![] };
+        ret = spec.ret_floor;
+        let mut ctx = Ctx { prog, locals: &locals, requests: Some(requests), diags: None, gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret };
         let mut assigns = Vec::new();
         falls = ctx.block(&f.body, &mut assigns, &mut ret);
         gassigns = std::mem::take(&mut ctx.gassigns);
+        ret_widen = std::mem::take(&mut ctx.ret_widen);
+        assigns.append(&mut ctx.widens);
         for (name, t) in assigns {
             let s = locals.entry(name).or_insert(Slot::Unknown);
             *s = s.join(t, prog.boxing());
@@ -376,10 +400,10 @@ fn analyze(
     if let Some(d) = diags {
         let mut ret2 = Slot::Unknown;
         let mut sink = Vec::new();
-        let mut ctx = Ctx { prog, locals: &locals, requests: None, diags: Some(d), gassigns: vec![] };
+        let mut ctx = Ctx { prog, locals: &locals, requests: None, diags: Some(d), gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret };
         ctx.block(&f.body, &mut sink, &mut ret2);
     }
-    (locals, ret, falls, gassigns)
+    (locals, ret, falls, gassigns, ret_widen)
 }
 
 struct Ctx<'a, 'p> {
@@ -389,12 +413,123 @@ struct Ctx<'a, 'p> {
     diags: Option<&'a mut Vec<Diagnostic>>,
     /// Assignments to global cells seen in this pass.
     gassigns: Vec<(GlobalKey, Ty)>,
+    /// Places widened by uses (`xs.append(1)` widens `xs`), joined like assignments.
+    widens: Vec<(String, Ty)>,
+    /// Return types callers need from callees (`ys = make(); ys.append(1)`).
+    ret_widen: Vec<(SpecKey, Ty)>,
+    /// The return type of the function being analysed, as currently known.
+    cur_ret: Option<Ty>,
+}
+
+/// How a `CallObj` node executes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CallClass {
+    /// `recv.name(...)` on a native receiver.
+    Method { recv: Ty, name: String },
+    /// A CPython builtin with a native implementation for these argument types.
+    Builtin(String),
+    /// `isinstance(native, cls)`, decided at compile time.
+    StaticBool(bool),
+    /// Through the CPython bridge.
+    Bridge,
+    /// Not decidable yet (argument types still unknown in this pass).
+    Pending,
+}
+
+/// Expressions that denote a storage location a value can be widened through.
+fn is_place(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Local(_) | ExprKind::Global { .. } => true,
+        ExprKind::Subscript { obj, index } => !matches!(index.kind, ExprKind::Slice { .. }) && is_place(obj),
+        ExprKind::Call { callee: Callee::Func(_), .. } => true,
+        ExprKind::CallObj { func, .. } => {
+            matches!(&func.kind, ExprKind::GetAttr { obj, name } if matches!(name.as_str(), "setdefault" | "get" | "pop") && is_place(obj))
+        }
+        _ => false,
+    }
+}
+
+/// `module.attr` name of a bridged callee, for the read-only whitelist.
+fn callee_qualname(prog: &Program, f: &Expr) -> Option<String> {
+    match &f.kind {
+        ExprKind::PyBuiltin(n) => Some(n.clone()),
+        ExprKind::Slot(i) => Some(match &prog.module.slots[*i].kind {
+            SlotKind::Import { module, .. } => module.clone(),
+            SlotKind::From { module, attr } => format!("{module}.{attr}"),
+        }),
+        ExprKind::GetAttr { obj, name } => callee_qualname(prog, obj).map(|q| format!("{q}.{name}")),
+        _ => None,
+    }
 }
 
 impl Ctx<'_, '_> {
     fn report(&mut self, d: Diagnostic) {
         if let Some(ds) = self.diags.as_deref_mut() {
             ds.push(d);
+        }
+    }
+
+    fn boxing(&self) -> bool {
+        self.prog.boxing()
+    }
+
+    fn local_ty(&self, n: &str) -> Option<Ty> {
+        self.locals.get(n).and_then(|s| s.known())
+    }
+
+    /// Widen the type of a place (joined with its current type).
+    fn widen(&mut self, place: &Expr, t: Ty) {
+        match &place.kind {
+            ExprKind::Local(n) => {
+                if self.local_ty(n) != Some(t) {
+                    self.widens.push((n.clone(), t));
+                }
+            }
+            ExprKind::Global { unit, name } => self.gassigns.push(((*unit, name.clone()), t)),
+            ExprKind::Subscript { obj, index } if !matches!(index.kind, ExprKind::Slice { .. }) => {
+                let Some(ot) = self.expr(obj) else { return };
+                match ot.as_comp() {
+                    Some(Comp::List(e)) if e != t => self.widen(obj, Ty::list(t)),
+                    Some(Comp::Dict(k, v)) if v != t => self.widen(obj, Ty::dict(k, t)),
+                    _ => {}
+                }
+            }
+            ExprKind::Call { callee: Callee::Func(fid), args, .. } => {
+                let tys: Option<Vec<Ty>> = args.iter().map(|a| self.expr(a)).collect();
+                if let Some(args) = tys {
+                    self.ret_widen.push((SpecKey { func: *fid, args }, t));
+                }
+            }
+            // Methods that return a stored element: `d.setdefault(k, []).append(x)`.
+            ExprKind::CallObj { func, .. } => {
+                if let ExprKind::GetAttr { obj, name } = &func.kind {
+                    let Some(ot) = self.expr(obj) else { return };
+                    match (ot.as_comp(), name.as_str()) {
+                        (Some(Comp::Dict(k, v)), "setdefault" | "get" | "pop") if v != t => self.widen(obj, Ty::dict(k, t)),
+                        (Some(Comp::List(e)), "pop") if e != t => self.widen(obj, Ty::list(t)),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A value of type `vt` is stored where values have type `dest`: when it
+    /// carries identity (a mutable container) its own place must agree.
+    fn flow(&mut self, value: &Expr, vt: Ty, dest: Ty) {
+        if vt != dest && vt.has_mutable() && is_place(value) {
+            self.widen(value, dest);
+        }
+    }
+
+    /// A value reaches arbitrary Python code: a mutable native container
+    /// must be a Python object from creation (a copy would break aliasing).
+    fn escape(&mut self, e: &Expr) {
+        if let Some(t) = self.expr(e) {
+            if t.has_mutable() && is_place(e) {
+                self.widen(e, Ty::Obj);
+            }
         }
     }
 
@@ -413,6 +548,9 @@ impl Ctx<'_, '_> {
             StmtKind::Assign { target, value } => {
                 if let Some(t) = self.expr(value) {
                     assigns.push((target.clone(), t));
+                    if let Some(dest) = self.local_ty(target) {
+                        self.flow(value, t, dest);
+                    }
                 }
             }
             StmtKind::AugAssign { target, op, value } => {
@@ -430,11 +568,17 @@ impl Ctx<'_, '_> {
             }
             StmtKind::Return(v) => {
                 let t = match v {
-                    Some(e) => self.expr(e),
+                    Some(e) => {
+                        let t = self.expr(e);
+                        if let (Some(t), Some(dest)) = (t, self.cur_ret) {
+                            self.flow(e, t, dest);
+                        }
+                        t
+                    }
                     None => Some(Ty::None),
                 };
                 if let Some(t) = t {
-                    *ret = ret.join(t, self.prog.boxing());
+                    *ret = ret.join(t, self.boxing());
                 }
                 return false;
             }
@@ -472,19 +616,47 @@ impl Ctx<'_, '_> {
                 self.block(body, assigns, ret);
             }
             StmtKind::ForIter { var, iter, body } => {
-                self.expr(iter);
-                assigns.push((var.clone(), Ty::Obj));
+                if let Some(it) = self.expr(iter) {
+                    match native::iter_elem(it) {
+                        Some(e) => {
+                            assigns.push((var.clone(), e));
+                            // `for row in grid: row.append(x)` widens grid's elements.
+                            if let (Some(v), Some(Comp::List(_))) = (self.local_ty(var), it.as_comp()) {
+                                if v != e && e.has_mutable() {
+                                    self.widen(iter, Ty::list(v));
+                                }
+                            }
+                        }
+                        None => self.report(Diagnostic::error("P301", iter.span, format!("'{it}' object is not iterable")).note("CPython would raise TypeError here")),
+                    }
+                }
                 self.block(body, assigns, ret);
             }
-            StmtKind::SetItem { obj, index, value } => {
-                self.expr(obj);
-                self.expr(index);
-                self.expr(value);
+            StmtKind::SetItem { obj, index, value } => self.set_item(obj, index, value),
+            StmtKind::SetAttr { obj, value, name } => {
+                if let Some(ot) = self.expr(obj) {
+                    if ot == Ty::Obj {
+                        self.escape(value);
+                    } else {
+                        self.expr(value);
+                        self.report(Diagnostic::error("P301", s.span, format!("'{ot}' object has no attribute '{name}'")).note("CPython would raise AttributeError here"));
+                    }
+                }
             }
-            StmtKind::SetAttr { obj, value, .. } => {
-                self.expr(obj);
-                self.expr(value);
-            }
+            StmtKind::Del(target) => match &target.kind {
+                ExprKind::Subscript { obj, index } => {
+                    let ot = self.expr(obj);
+                    self.index_types(index);
+                    match ot.and_then(|t| t.as_comp()) {
+                        Some(Comp::List(_) | Comp::Dict(..)) | None => {}
+                        Some(_) => self.report(Diagnostic::error("P301", s.span, format!("'{}' object does not support item deletion", ot.unwrap()))),
+                    }
+                }
+                ExprKind::GetAttr { obj, .. } => {
+                    self.expr(obj);
+                }
+                _ => {}
+            },
             StmtKind::Import(ImportAction::Unit(fid)) => {
                 if let Some(req) = self.requests.as_deref_mut() {
                     req.push((SpecKey { func: *fid, args: vec![] }, s.span));
@@ -512,6 +684,9 @@ impl Ctx<'_, '_> {
             StmtKind::AssignGlobal { unit, name, value } => {
                 if let Some(t) = self.expr(value) {
                     self.gassigns.push(((*unit, name.clone()), t));
+                    if let Some(dest) = self.prog.globals.get(&(*unit, name.clone())).and_then(|s| s.known()) {
+                        self.flow(value, t, dest);
+                    }
                 }
             }
             StmtKind::Raise(e) => {
@@ -543,13 +718,75 @@ impl Ctx<'_, '_> {
         true
     }
 
-    /// Evaluate every sub-expression; the result is an object if all are known.
-    fn all_obj<'e>(&mut self, es: impl IntoIterator<Item = &'e Expr>) -> Option<Ty> {
-        let mut ok = true;
-        for e in es {
-            ok &= self.expr(e).is_some();
+    /// `obj[index] = value`
+    fn set_item(&mut self, obj: &Expr, index: &Expr, value: &Expr) {
+        let Some(ot) = self.expr(obj) else {
+            self.expr(index);
+            self.expr(value);
+            return;
+        };
+        if ot == Ty::Obj {
+            self.expr(index);
+            self.escape(value);
+            return;
         }
-        ok.then_some(Ty::Obj)
+        let Some(vt) = self.expr(value) else { return };
+        let boxing = self.boxing();
+        let elem_join = |e: Ty, t: Ty| native::ty_join(e, t, boxing).or(boxing.then_some(Ty::Obj));
+        match ot.as_comp() {
+            Some(Comp::List(e)) => {
+                if let ExprKind::Slice { .. } = index.kind {
+                    self.index_types(index);
+                    match native::iter_elem(vt).and_then(|x| elem_join(e, x)) {
+                        Some(j) => self.widen(obj, Ty::list(j)),
+                        None => self.report(Diagnostic::error("P301", value.span, "can only assign an iterable to a list slice")),
+                    }
+                    return;
+                }
+                let it = self.expr(index);
+                if !it.map(ops::base).is_some_and(|t| matches!(t, Ty::Int | Ty::Bool | Ty::Obj)) {
+                    self.report(Diagnostic::error("P301", index.span, "list indices must be integers or slices"));
+                    return;
+                }
+                match elem_join(e, vt) {
+                    Some(j) => {
+                        if j != e {
+                            self.widen(obj, Ty::list(j));
+                        }
+                        self.flow(value, vt, j);
+                    }
+                    None => self.report(Diagnostic::error("P304", value.span, format!("storing {vt} into a {ot} in native-only mode"))),
+                }
+            }
+            Some(Comp::Dict(k, v)) => {
+                let Some(kt) = self.expr(index) else { return };
+                match (native::ty_join(k, kt, boxing).filter(|t| t.is_hashable()), elem_join(v, vt)) {
+                    (Some(kk), Some(vv)) => {
+                        if kk != k || vv != v {
+                            self.widen(obj, Ty::dict(kk, vv));
+                        }
+                        self.flow(value, vt, vv);
+                    }
+                    _ => self.report(Diagnostic::error("P304", value.span, format!("storing [{kt}] = {vt} into a {ot} natively"))),
+                }
+            }
+            _ => self.report(Diagnostic::error("P301", obj.span, format!("'{ot}' object does not support item assignment")).note("CPython would raise TypeError here")),
+        }
+    }
+
+    /// Type-check the parts of an index or slice.
+    fn index_types(&mut self, index: &Expr) {
+        if let ExprKind::Slice { lo, hi, step } = &index.kind {
+            for p in [lo, hi, step].into_iter().flatten() {
+                if let Some(t) = self.expr(p) {
+                    if !matches!(ops::base(t), Ty::Int | Ty::Bool | Ty::None | Ty::Obj) {
+                        self.report(Diagnostic::error("P301", p.span, "slice indices must be integers or None"));
+                    }
+                }
+            }
+        } else {
+            self.expr(index);
+        }
     }
 
     /// Common type of values flowing into one result (and/or, if-else).
@@ -558,10 +795,10 @@ impl Ctx<'_, '_> {
         if tys.iter().all(|t| *t == first) {
             return Some(first);
         }
-        if let Some(j) = tys[1..].iter().try_fold(first, |acc, t| if acc == *t { Some(acc) } else { opt_join(acc, *t) }) {
+        if let Some(j) = tys[1..].iter().try_fold(first, |acc, t| native::ty_join(acc, *t, self.boxing())) {
             return Some(j);
         }
-        if self.prog.boxing() || tys.contains(&Ty::Obj) {
+        if self.boxing() || tys.contains(&Ty::Obj) {
             return Some(Ty::Obj);
         }
         let names: Vec<&str> = tys.iter().map(|t| t.py_name()).collect();
@@ -572,6 +809,72 @@ impl Ctx<'_, '_> {
         None
     }
 
+    /// Element type of a container literal, with flows from its items.
+    fn elements(&mut self, items: &[Expr], e: &Expr, what: &str) -> Option<Ty> {
+        let tys: Vec<Option<Ty>> = items.iter().map(|x| self.expr(x)).collect();
+        let tys: Vec<Ty> = tys.into_iter().collect::<Option<_>>()?;
+        let j = match native::join_all(tys.iter().copied(), self.boxing()) {
+            Some(j) => j,
+            None => {
+                let names: Vec<&str> = tys.iter().map(|t| t.py_name()).collect();
+                self.report(
+                    Diagnostic::error("P302", e.span, format!("{what} mixes element types ({})", names.join(", ")))
+                        .note("native-only mode cannot box; use one element type or hybrid mode"),
+                );
+                return None;
+            }
+        };
+        for (x, t) in items.iter().zip(&tys) {
+            self.flow(x, *t, j);
+        }
+        Some(j)
+    }
+
+    /// Classify a `CallObj` node (method / native builtin / bridge).
+    fn classify(&mut self, func: &Expr, args: &[Expr], kwargs: &[(String, Expr)]) -> CallClass {
+        match &func.kind {
+            ExprKind::GetAttr { obj, name } => match self.expr(obj) {
+                Some(t) if t != Ty::Obj => {
+                    let argtys: Option<Vec<Ty>> = args.iter().map(|a| self.expr(a)).collect();
+                    let kwtys: Option<Vec<(String, Ty)>> = kwargs.iter().map(|(k, v)| self.expr(v).map(|t| (k.clone(), t))).collect();
+                    match (argtys, kwtys) {
+                        (Some(a), Some(k)) if native::method(ops::base(t), name, &a, &k, self.boxing()).is_some() => {
+                            CallClass::Method { recv: ops::base(t), name: name.clone() }
+                        }
+                        (Some(_), Some(_)) => CallClass::Bridge,
+                        _ => CallClass::Pending,
+                    }
+                }
+                Some(_) => CallClass::Bridge,
+                None => CallClass::Pending,
+            },
+            ExprKind::PyBuiltin(name) => {
+                let argtys: Option<Vec<Ty>> = args.iter().map(|a| self.expr(a)).collect();
+                let kwtys: Option<Vec<(String, Ty)>> = kwargs.iter().map(|(k, v)| self.expr(v).map(|t| (k.clone(), t))).collect();
+                let (Some(a), Some(k)) = (argtys, kwtys) else { return CallClass::Pending };
+                if name == "isinstance" && a.len() == 2 {
+                    let classes: Option<Vec<&str>> = match &args[1].kind {
+                        ExprKind::PyBuiltin(c) => Some(vec![c.as_str()]),
+                        ExprKind::Tuple(items) => items.iter().map(|i| if let ExprKind::PyBuiltin(c) = &i.kind { Some(c.as_str()) } else { None }).collect(),
+                        _ => None,
+                    };
+                    if let Some(cs) = classes {
+                        let rs: Option<Vec<bool>> = cs.iter().map(|c| native::isinstance_static(a[0], c)).collect();
+                        if let Some(rs) = rs {
+                            return CallClass::StaticBool(rs.iter().any(|r| *r));
+                        }
+                    }
+                    return CallClass::Bridge;
+                }
+                match native::builtin(name, &a, &k, self.boxing()) {
+                    Some(_) => CallClass::Builtin(name.clone()),
+                    None => CallClass::Bridge,
+                }
+            }
+            _ => CallClass::Bridge,
+        }
+    }
+
     pub fn expr(&mut self, e: &Expr) -> Option<Ty> {
         match &e.kind {
             ExprKind::Int(_) => Some(Ty::Int),
@@ -579,14 +882,29 @@ impl Ctx<'_, '_> {
             ExprKind::Str(_) => Some(Ty::Str),
             ExprKind::Bool(_) => Some(Ty::Bool),
             ExprKind::NoneLit => Some(Ty::None),
-            ExprKind::Local(n) => self.locals.get(n).and_then(|s| s.known()),
+            ExprKind::Local(n) => self.local_ty(n),
             ExprKind::Global { unit, name } => self.prog.globals.get(&(*unit, name.clone())).and_then(|s| s.known()),
             ExprKind::BinOp { op, left, right } => {
                 let l = self.expr(left);
                 let r = self.expr(right);
                 let (l, r) = (l?, r?);
+                if l.is_never() || r.is_never() {
+                    return Some(Ty::never());
+                }
                 if l == Ty::Obj || r == Ty::Obj {
+                    self.escape(left);
+                    self.escape(right);
                     return Some(Ty::Obj);
+                }
+                if l.as_comp().is_some_and(|c| !matches!(c, Comp::Opt(_))) || r.as_comp().is_some_and(|c| !matches!(c, Comp::Opt(_))) {
+                    let t = native::coll_binop(*op, ops::base(l), ops::base(r), self.boxing());
+                    if t.is_none() {
+                        self.report(
+                            Diagnostic::error("P301", e.span, format!("unsupported operand type(s) for {}: '{l}' and '{r}'", op.symbol()))
+                                .note("CPython would raise TypeError here"),
+                        );
+                    }
+                    return t;
                 }
                 let lit = match right.kind {
                     ExprKind::Int(v) => Some(v),
@@ -603,6 +921,9 @@ impl Ctx<'_, '_> {
             }
             ExprKind::Unary { op, operand } => {
                 let t = self.expr(operand)?;
+                if t.is_never() {
+                    return Some(Ty::never());
+                }
                 if t == Ty::Obj {
                     return Some(if *op == UnaryOp::Not { Ty::Bool } else { Ty::Obj });
                 }
@@ -614,10 +935,14 @@ impl Ctx<'_, '_> {
             }
             ExprKind::Compare { first, rest } => {
                 let mut l = self.expr(first);
+                let mut prev = &**first;
                 for (op, c) in rest {
                     let r = self.expr(c);
                     if let (Some(a), Some(b)) = (l, r) {
-                        if !ops::compare(*op, a, b) {
+                        if a == Ty::Obj || b == Ty::Obj {
+                            self.escape(prev);
+                            self.escape(c);
+                        } else if !a.is_never() && !b.is_never() && !ops::compare(*op, a, b) {
                             self.report(
                                 Diagnostic::error("P301", c.span, format!("comparison not supported between instances of '{a}' and '{b}'"))
                                     .note("CPython would raise TypeError here"),
@@ -625,6 +950,7 @@ impl Ctx<'_, '_> {
                         }
                     }
                     l = r;
+                    prev = c;
                 }
                 // A single rich comparison on an object returns whatever the
                 // object returns (e.g. a numpy array); chains reduce to bool.
@@ -703,23 +1029,187 @@ impl Ctx<'_, '_> {
                 }
                 Some(Ty::exc())
             }
-            ExprKind::GetAttr { obj, .. } => self.all_obj([&**obj]),
-            ExprKind::CallObj { func, args, kwargs } => {
-                let all: Vec<&Expr> = std::iter::once(&**func).chain(args.iter()).chain(kwargs.iter().map(|(_, v)| v)).collect();
-                self.all_obj(all)
+            ExprKind::GetAttr { obj, name } => {
+                let t = self.expr(obj)?;
+                if t == Ty::Obj {
+                    return Some(Ty::Obj);
+                }
+                if !t.has_mutable() {
+                    return Some(Ty::Obj); // e.g. `x.real`: boxed copy of an immutable value
+                }
+                self.report(
+                    Diagnostic::error("P301", e.span, format!("attribute `{name}` of a native {t} used as a value"))
+                        .note("call the method directly (`xs.append(v)`); bound methods are not first-class natively"),
+                );
+                None
             }
-            ExprKind::List(items) | ExprKind::Tuple(items) => self.all_obj(items.iter()),
+            ExprKind::CallObj { func, args, kwargs } => self.call_obj(e, func, args, kwargs),
+            ExprKind::List(items) => {
+                let j = self.elements(items, e, "list literal")?;
+                Some(Ty::list(j))
+            }
+            ExprKind::Tuple(items) => {
+                let tys: Vec<Option<Ty>> = items.iter().map(|x| self.expr(x)).collect();
+                Some(Ty::tuple(tys.into_iter().collect::<Option<_>>()?))
+            }
+            ExprKind::Set(items) => {
+                let j = self.elements(items, e, "set literal")?;
+                if j.is_hashable() {
+                    Some(Ty::set(j))
+                } else if self.boxing() {
+                    Some(Ty::Obj)
+                } else {
+                    self.report(Diagnostic::error("P302", e.span, format!("set of {j} is not native (elements must be hashable natively)")));
+                    None
+                }
+            }
             ExprKind::Dict(pairs) => {
-                let all: Vec<&Expr> = pairs.iter().flat_map(|(k, v)| [k, v]).collect();
-                self.all_obj(all)
+                let keys: Vec<Expr> = pairs.iter().map(|(k, _)| k.clone()).collect();
+                let vals: Vec<Expr> = pairs.iter().map(|(_, v)| v.clone()).collect();
+                let k = self.elements(&keys, e, "dict literal keys")?;
+                let v = self.elements(&vals, e, "dict literal values")?;
+                if k.is_hashable() {
+                    Some(Ty::dict(k, v))
+                } else if self.boxing() {
+                    for x in &vals {
+                        self.escape(x);
+                    }
+                    Some(Ty::Obj)
+                } else {
+                    self.report(Diagnostic::error("P302", e.span, format!("dict with {k} keys is not native (keys must be hashable natively)")));
+                    None
+                }
             }
-            ExprKind::Subscript { obj, index } => self.all_obj([&**obj, &**index]),
+            ExprKind::Slice { lo, hi, step } => {
+                for p in [lo, hi, step].into_iter().flatten() {
+                    self.expr(p)?;
+                }
+                Some(Ty::Obj)
+            }
+            ExprKind::Unpack { value, n, star } => {
+                let vt = self.expr(value)?;
+                let n = *n;
+                let unpack_err = |got: usize| -> String {
+                    match star {
+                        Some(_) => format!("not enough values to unpack (expected at least {}, got {got})", n - 1),
+                        None if got > n => format!("too many values to unpack (expected {n})"),
+                        None => format!("not enough values to unpack (expected {n}, got {got})"),
+                    }
+                };
+                if let Some(ts) = vt.tuple_items() {
+                    let ok = match star {
+                        None => ts.len() == n,
+                        Some(_) => ts.len() + 1 >= n,
+                    };
+                    if !ok {
+                        self.report(Diagnostic::error("P301", e.span, unpack_err(ts.len())).note("CPython would raise ValueError here"));
+                        return None;
+                    }
+                    return Some(match star {
+                        None => vt,
+                        Some(k) => {
+                            let after = n - 1 - k;
+                            let mid = &ts[*k..ts.len() - after];
+                            let me = native::join_all(mid.iter().copied(), self.boxing())?;
+                            let mut items: Vec<Ty> = ts[..*k].to_vec();
+                            items.push(Ty::list(me));
+                            items.extend_from_slice(&ts[ts.len() - after..]);
+                            Ty::tuple(items)
+                        }
+                    });
+                }
+                let Some(el) = native::iter_elem(vt) else {
+                    self.report(Diagnostic::error("P301", e.span, format!("cannot unpack non-iterable {vt} object")).note("CPython would raise TypeError here"));
+                    return None;
+                };
+                let items: Vec<Ty> = (0..n).map(|i| if Some(i) == *star { Ty::list(el) } else { el }).collect();
+                Some(Ty::tuple(items))
+            }
+            ExprKind::Comp { kind, elt, val, gens } => {
+                for g in gens {
+                    let it = self.expr(&g.iter)?;
+                    match native::iter_elem(it) {
+                        Some(el) => self.widens.push((g.var.clone(), el)),
+                        None => {
+                            self.report(Diagnostic::error("P301", g.iter.span, format!("'{it}' object is not iterable")).note("CPython would raise TypeError here"));
+                            return None;
+                        }
+                    }
+                    let mut assigns = Vec::new();
+                    let mut ret = Slot::Unknown;
+                    for st in &g.unpack {
+                        self.stmt(st, &mut assigns, &mut ret);
+                    }
+                    self.widens.append(&mut assigns);
+                    for c in &g.ifs {
+                        self.expr(c);
+                    }
+                }
+                let et = self.expr(elt)?;
+                match kind {
+                    CompKind::List | CompKind::Gen => Some(Ty::list(et)),
+                    CompKind::Set if et.is_hashable() => Some(Ty::set(et)),
+                    CompKind::Dict => {
+                        let vt = self.expr(val.as_deref().unwrap())?;
+                        if et.is_hashable() {
+                            Some(Ty::dict(et, vt))
+                        } else {
+                            self.report(Diagnostic::error("P302", e.span, format!("dict comprehension with {et} keys is not native")));
+                            None
+                        }
+                    }
+                    CompKind::Set => {
+                        self.report(Diagnostic::error("P302", e.span, format!("set comprehension of {et} is not native")));
+                        None
+                    }
+                }
+            }
+            ExprKind::Subscript { obj, index } => {
+                let ot = self.expr(obj)?;
+                if ot.is_never() {
+                    return Some(Ty::never());
+                }
+                if ot == Ty::Obj {
+                    self.index_types(index);
+                    self.escape(index);
+                    return Some(Ty::Obj);
+                }
+                let lit = |x: &Option<Box<Expr>>| -> Option<Option<i64>> {
+                    match x.as_deref().map(|e| &e.kind) {
+                        None => Some(None),
+                        Some(ExprKind::Int(v)) => Some(Some(*v)),
+                        _ => None,
+                    }
+                };
+                let (idx, it, ilit, slits) = match &index.kind {
+                    ExprKind::Slice { lo, hi, step } => {
+                        self.index_types(index);
+                        let sl = match (lit(lo), lit(hi), lit(step)) {
+                            (Some(a), Some(b), Some(c)) => Some([a, b, c]),
+                            _ => None,
+                        };
+                        (native::Index::Slice, None, None, sl)
+                    }
+                    k => {
+                        let it = self.expr(index);
+                        let ilit = if let ExprKind::Int(v) = k { Some(*v) } else { None };
+                        (native::Index::Item, it, ilit, None)
+                    }
+                };
+                match native::subscript(ops::base(ot), idx, it, ilit, slits) {
+                    Ok(t) => Some(t),
+                    Err(msg) => {
+                        self.report(Diagnostic::error("P301", e.span, msg).note("CPython would raise TypeError/IndexError here"));
+                        None
+                    }
+                }
+            }
             ExprKind::Call { callee, args, .. } => {
                 let tys: Vec<Option<Ty>> = args.iter().map(|a| self.expr(a)).collect();
                 let tys: Option<Vec<Ty>> = tys.into_iter().collect();
                 let tys = tys?;
                 match callee {
-                    Callee::Builtin(b) => match ops::builtin(*b, &tys, self.prog.boxing()) {
+                    Callee::Builtin(b) => match ops::builtin(*b, &tys, self.boxing()) {
                         Ok(t) => Some(t),
                         Err(msg) => {
                             self.report(Diagnostic::error("P303", e.span, msg).note("CPython would raise TypeError here"));
@@ -736,8 +1226,19 @@ impl Ctx<'_, '_> {
                             ));
                             return None;
                         }
-                        let key = SpecKey { func: *fid, args: tys };
-                        let r = self.prog.spec(&key).and_then(|s| self.prog.call_result(s));
+                        let key = SpecKey { func: *fid, args: tys.clone() };
+                        let callee = self.prog.spec(&key);
+                        let r = callee.and_then(|s| self.prog.call_result(s));
+                        // A callee that widens a parameter (appends to it, lets it
+                        // escape) widens the caller's argument place too.
+                        if let Some(s) = callee.filter(|s| s.analyzed) {
+                            let params: Vec<Option<Ty>> = f.params.iter().map(|p| s.locals.get(p).and_then(|x| x.known())).collect();
+                            for ((a, t), pt) in args.iter().zip(&tys).zip(params) {
+                                if let Some(pt) = pt {
+                                    self.flow(a, *t, pt);
+                                }
+                            }
+                        }
                         if let Some(req) = self.requests.as_deref_mut() {
                             req.push((key, e.span));
                         }
@@ -745,6 +1246,97 @@ impl Ctx<'_, '_> {
                     }
                 }
             }
+        }
+    }
+
+    fn call_obj(&mut self, e: &Expr, func: &Expr, args: &[Expr], kwargs: &[(String, Expr)]) -> Option<Ty> {
+        match self.classify(func, args, kwargs) {
+            CallClass::Pending => {
+                // Evaluate the parts (requests, flows) without deciding yet.
+                for a in args.iter().chain(kwargs.iter().map(|(_, v)| v)) {
+                    self.expr(a);
+                }
+                None
+            }
+            CallClass::StaticBool(_) => Some(Ty::Bool),
+            CallClass::Method { recv, name } => {
+                let ExprKind::GetAttr { obj, .. } = &func.kind else { unreachable!() };
+                let a: Vec<Ty> = args.iter().map(|x| self.expr(x)).collect::<Option<_>>()?;
+                let k: Vec<(String, Ty)> = kwargs.iter().map(|(n, v)| self.expr(v).map(|t| (n.clone(), t))).collect::<Option<_>>()?;
+                match native::method(recv, &name, &a, &k, self.boxing())? {
+                    Ok(m) => {
+                        if let Some(w) = m.widen {
+                            self.widen(obj, w);
+                            // Values stored into the container share its element type.
+                            let elem = w.list_elem().or(w.set_elem()).or(w.dict_kv().map(|kv| kv.1));
+                            if let Some(el) = elem {
+                                if let Some((x, t)) = args.iter().zip(&a).last() {
+                                    self.flow(x, *t, el);
+                                }
+                            }
+                        }
+                        Some(m.ret)
+                    }
+                    Err(msg) => {
+                        self.report(Diagnostic::error("P301", e.span, msg).note("CPython would raise AttributeError/TypeError here"));
+                        None
+                    }
+                }
+            }
+            CallClass::Builtin(name) => {
+                let a: Vec<Ty> = args.iter().map(|x| self.expr(x)).collect::<Option<_>>()?;
+                let k: Vec<(String, Ty)> = kwargs.iter().map(|(n, v)| self.expr(v).map(|t| (n.clone(), t))).collect::<Option<_>>()?;
+                match native::builtin(&name, &a, &k, self.boxing())? {
+                    Ok(t) => Some(t),
+                    Err(msg) => {
+                        self.report(Diagnostic::error("P303", e.span, msg).note("CPython would raise TypeError/ValueError here"));
+                        None
+                    }
+                }
+            }
+            CallClass::Bridge => {
+                // A native receiver whose method has no native version is boxed (immutable only).
+                if let ExprKind::GetAttr { obj, .. } = &func.kind {
+                    let t = self.expr(obj)?;
+                    if t != Ty::Obj && t.has_mutable() {
+                        self.escape(obj);
+                    }
+                } else {
+                    self.expr(func)?;
+                }
+                let read_only = callee_qualname(self.prog, func).is_some_and(|q| native::READ_ONLY_CALLS.contains(&q.as_str()));
+                let mut ok = true;
+                for a in args.iter().chain(kwargs.iter().map(|(_, v)| v)) {
+                    if read_only {
+                        ok &= self.expr(a).is_some();
+                    } else {
+                        self.escape(a);
+                        ok &= self.expr(a).is_some();
+                    }
+                }
+                ok.then_some(Ty::Obj)
+            }
+        }
+    }
+}
+
+impl<'m> Program<'m> {
+    /// How a `CallObj` node executes in `spec` (shared by analysis and codegen).
+    pub fn classify_call(&self, spec: &Spec, func: &Expr, args: &[Expr], kwargs: &[(String, Expr)]) -> CallClass {
+        let mut ctx = self.ctx_for(spec);
+        ctx.classify(func, args, kwargs)
+    }
+
+    fn ctx_for<'a>(&'a self, spec: &'a Spec) -> Ctx<'a, 'm> {
+        Ctx {
+            prog: self,
+            locals: &spec.locals,
+            requests: None,
+            diags: None,
+            gassigns: vec![],
+            widens: vec![],
+            ret_widen: vec![],
+            cur_ret: None,
         }
     }
 }
