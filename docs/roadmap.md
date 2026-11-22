@@ -23,8 +23,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] **Parametric types.** `Ty` becomes an interned, `Copy` handle that can express
       `list[T]`, `dict[K, V]`, `tuple[...]`, `set[T]`, class instances, functions and
       `Optional[T]`. Gate: behaviour-preserving, every golden snapshot unchanged.
-- [ ] `try` / `except` / `else` / `finally`, `raise`, exception hierarchy for builtin types
-- [ ] `with` (CPython context managers; native ones once classes land)
+- [x] `try` / `except` / `else` / `finally`, `raise`, `assert`, exception hierarchy for builtin types
+- [x] `with` (CPython context managers; native ones once classes land), `__file__`
 - [ ] Default parameter values, keyword arguments to native functions
 - [ ] Tuple unpacking (`a, b = f()`, `for k, v in ...`)
 - [ ] Module-level constants readable inside functions (today P140)
@@ -95,3 +95,26 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 * Codegen routes composites through generic runtime entry points (`rt::truthy`,
   `rt::conv::str_of`, `rt::py::to_py`, `rt::ops::*`) that phase 2 implements.
 * Gate met: `cargo test --workspace` passes with every golden snapshot unchanged.
+
+### Phase 1.2: exceptions and `with` (2026-11-22)
+
+* HIR: `StmtKind::Try { body, handlers, orelse, finalbody }`, `Raise`, `With`, and
+  `ExprKind::NewExc` for `ValueError(...)`-style calls (0 or 1 argument; more go through
+  CPython). `assert` lowers to `if not c: raise AssertionError(msg)`.
+* Codegen: the `try` body runs in an immediately-called closure returning
+  `PyResult<rt::Flow<R>>`, so `?` inside it is intercepted. `return`/`break`/`continue` that
+  leave the closure become `Flow` values and are re-issued after `finally`. Functions with
+  closures initialise their locals (closures cannot capture uninitialised bindings).
+* Runtime: `rt::Exc` keeps the original Python exception (`origin`) when it came from
+  CPython, so matching uses `isinstance` and re-raising preserves identity. Native matching
+  uses a table of CPython's builtin hierarchy (`rt::exc::HIERARCHY`). New traits:
+  `rt::conv::PyFmt` (str/repr), `rt::Truthy`, `rt::py::ToPy`.
+* `with` uses CPython's context-manager protocol (`__enter__`/`__exit__`, suppression
+  honoured) and is reported as boundary P216.
+* `__file__` is supported (path as given for the entry file, absolute for imports).
+* Tests: `tests/differential/exceptions.py` (hierarchy matching, tuples of types, `as e`,
+  else/finally ordering, break/continue through finally, bare re-raise, JSON errors from
+  CPython, `assert`, an uncaught exception at the end). The fallback fixture now uses a
+  metaclass, because its `try` compiles natively now.
+* Effect: `.ignore/samples/rust-http/client.py` (uses `try`/`with`) now compiles natively
+  instead of falling back. `samples/run_all.sh` 21/21, `scripts/readme_check.sh` 11/11.

@@ -244,6 +244,14 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
         StmtKind::ForIter { .. } => push("P214", st.span, "for-loop over a Python iterable".into(), "CPython iterator protocol"),
         StmtKind::SetItem { .. } => push("P212", st.span, "item assignment".into(), "CPython __setitem__"),
         StmtKind::SetAttr { name, .. } => push("P210", st.span, format!("attribute assignment `.{name}`"), "CPython __setattr__"),
+        StmtKind::With { .. } => push("P216", st.span, "`with` statement".into(), "CPython context manager protocol (__enter__/__exit__)"),
+        StmtKind::Try { handlers, .. } => {
+            for h in handlers {
+                if h.types.iter().any(|t| matches!(t, ExcType::Obj(_))) {
+                    push("P216", h.span, "`except` with a Python exception class".into(), "matched with isinstance through CPython");
+                }
+            }
+        }
         _ => {}
     });
     let ty = |e: &Expr| prog.type_of(s, e);
@@ -320,7 +328,17 @@ pub fn walk_stmts(stmts: &[Stmt], f: &mut impl FnMut(&Stmt)) {
                 walk_stmts(body, f);
                 walk_stmts(orelse, f);
             }
-            StmtKind::While { body, .. } | StmtKind::ForRange { body, .. } | StmtKind::ForIter { body, .. } => walk_stmts(body, f),
+            StmtKind::While { body, .. } | StmtKind::ForRange { body, .. } | StmtKind::ForIter { body, .. } | StmtKind::With { body, .. } => {
+                walk_stmts(body, f)
+            }
+            StmtKind::Try { body, handlers, orelse, finalbody } => {
+                walk_stmts(body, f);
+                for h in handlers {
+                    walk_stmts(&h.body, f);
+                }
+                walk_stmts(orelse, f);
+                walk_stmts(finalbody, f);
+            }
             _ => {}
         }
     }
@@ -335,6 +353,13 @@ fn stmt_exprs(s: &Stmt) -> Vec<&Expr> {
         StmtKind::ForIter { iter, .. } => vec![iter],
         StmtKind::SetItem { obj, index, value } => vec![obj, index, value],
         StmtKind::SetAttr { obj, value, .. } => vec![obj, value],
+        StmtKind::Raise(Some(e)) => vec![e],
+        StmtKind::With { ctx, .. } => vec![ctx],
+        StmtKind::Try { handlers, .. } => handlers
+            .iter()
+            .flat_map(|h| h.types.iter())
+            .filter_map(|t| if let ExcType::Obj(e) = t { Some(e) } else { None })
+            .collect(),
         _ => vec![],
     }
 }
@@ -377,7 +402,7 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr), skip_callee: bool) {
             walk_expr(body, f, skip_callee);
             walk_expr(orelse, f, skip_callee);
         }
-        ExprKind::Call { args, .. } | ExprKind::ExternCall { args, .. } | ExprKind::List(args) | ExprKind::Tuple(args) => {
+        ExprKind::Call { args, .. } | ExprKind::ExternCall { args, .. } | ExprKind::List(args) | ExprKind::Tuple(args) | ExprKind::NewExc { args, .. } => {
             args.iter().for_each(|a| walk_expr(a, f, skip_callee))
         }
         ExprKind::GetAttr { obj, .. } | ExprKind::Annotated { value: obj, .. } => walk_expr(obj, f, skip_callee),

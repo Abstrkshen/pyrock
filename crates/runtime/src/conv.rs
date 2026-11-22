@@ -75,3 +75,92 @@ pub fn str_bool(v: bool) -> Str {
 pub fn str_none() -> Str {
     Str::from("None")
 }
+
+/// Python `str()` / `repr()` for every native value type. Collections use
+/// `py_repr` for their elements, as CPython does.
+pub trait PyFmt {
+    fn py_repr(&self) -> Str;
+    fn py_str(&self) -> Str {
+        self.py_repr()
+    }
+}
+
+/// `str(x)`
+pub fn str_of<T: PyFmt + ?Sized>(v: &T) -> Str {
+    v.py_str()
+}
+
+/// `repr(x)`
+pub fn repr_of<T: PyFmt + ?Sized>(v: &T) -> Str {
+    v.py_repr()
+}
+
+impl PyFmt for i64 {
+    fn py_repr(&self) -> Str {
+        str_int(*self)
+    }
+}
+
+impl PyFmt for f64 {
+    fn py_repr(&self) -> Str {
+        str_float(*self)
+    }
+}
+
+impl PyFmt for bool {
+    fn py_repr(&self) -> Str {
+        str_bool(*self)
+    }
+}
+
+impl PyFmt for () {
+    fn py_repr(&self) -> Str {
+        str_none()
+    }
+}
+
+impl PyFmt for Str {
+    fn py_repr(&self) -> Str {
+        Str::from(string::repr(self))
+    }
+    fn py_str(&self) -> Str {
+        self.clone()
+    }
+}
+
+impl<T: PyFmt> PyFmt for Option<T> {
+    fn py_repr(&self) -> Str {
+        match self {
+            Some(v) => v.py_repr(),
+            None => str_none(),
+        }
+    }
+    fn py_str(&self) -> Str {
+        match self {
+            Some(v) => v.py_str(),
+            None => str_none(),
+        }
+    }
+}
+
+impl PyFmt for Exc {
+    fn py_repr(&self) -> Str {
+        #[cfg(feature = "python")]
+        if self.origin.is_some() {
+            if let Ok(o) = crate::py::exc_obj(self) {
+                return o.py_repr();
+            }
+        }
+        // KeyError keeps its argument's repr as the message already.
+        if self.msg.is_empty() {
+            Str::from(format!("{}()", self.name()))
+        } else if self.name() == "KeyError" {
+            Str::from(format!("{}({})", self.name(), self.msg))
+        } else {
+            Str::from(format!("{}({})", self.name(), string::repr(&self.msg)))
+        }
+    }
+    fn py_str(&self) -> Str {
+        Str::from(self.msg.as_str())
+    }
+}

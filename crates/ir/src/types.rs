@@ -51,6 +51,8 @@ pub enum Comp {
     Func(Vec<Ty>, Ty),
     /// `T | None` (`Option<T>`).
     Opt(Ty),
+    /// An exception instance of a builtin exception type (`rt::Exc`).
+    Exc,
 }
 
 struct Entry {
@@ -106,6 +108,7 @@ impl Ty {
                 format!("fn{}_{}_{}", ps.len(), join(ps, Ty::mangle, "_"), r.mangle()),
             ),
             Comp::Opt(t) => (format!("{} | None", t.py_name()), format!("Option<{}>", t.rust()), format!("opt_{}", t.mangle())),
+            Comp::Exc => ("BaseException".to_string(), "rt::Exc".to_string(), "exc".to_string()),
         };
         let mut i = interner().lock().unwrap();
         if let Some(&id) = i.index.get(&c) {
@@ -131,6 +134,11 @@ impl Ty {
 
     pub fn tuple(items: Vec<Ty>) -> Ty {
         Ty::comp(Comp::Tuple(items))
+    }
+
+    /// A caught or constructed exception.
+    pub fn exc() -> Ty {
+        Ty::comp(Comp::Exc)
     }
 
     pub fn opt(t: Ty) -> Ty {

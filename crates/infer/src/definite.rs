@@ -75,6 +75,48 @@ fn stmt(s: &Stmt, mut cur: Set, out: &mut HashSet<String>) -> Option<Set> {
             expr(test, &cur, out);
             block(body, cur.clone(), out);
         }
+        StmtKind::Raise(e) => {
+            if let Some(e) = e {
+                expr(e, &cur, out);
+            }
+            return None;
+        }
+        StmtKind::With { ctx, var, body } => {
+            expr(ctx, &cur, out);
+            let mut inner = cur.clone();
+            if let Some(v) = var {
+                inner.insert(v.clone());
+            }
+            // The body may be cut short by an exception that __exit__ suppresses.
+            block(body, inner, out);
+        }
+        StmtKind::Try { body, handlers, orelse, finalbody } => {
+            // Any statement of the body may raise: handlers start from the
+            // state before the `try`.
+            let mut outs = Vec::new();
+            if let Some(b) = block(body, cur.clone(), out) {
+                outs.extend(block(orelse, b, out));
+            }
+            for h in handlers {
+                for t in &h.types {
+                    if let ExcType::Obj(e) = t {
+                        expr(e, &cur, out);
+                    }
+                }
+                let mut inner = cur.clone();
+                if let Some(n) = &h.name {
+                    inner.insert(n.clone());
+                }
+                outs.extend(block(&h.body, inner, out));
+            }
+            // `finally` also runs on the exceptional path: assume only `cur`.
+            block(finalbody, cur.clone(), out)?;
+            let mut it = outs.into_iter();
+            let first = it.next()?;
+            let merged = it.fold(first, |a, b| a.intersection(&b).cloned().collect());
+            let fin = block(finalbody, merged, out)?;
+            return Some(fin);
+        }
         StmtKind::ForRange { var, start, stop, step, body } => {
             for b in [start.as_ref(), Some(stop), step.as_ref()].into_iter().flatten() {
                 expr(b, &cur, out);
@@ -128,6 +170,7 @@ fn expr(e: &Expr, cur: &Set, out: &mut HashSet<String>) {
             expr(obj, cur, out);
             expr(index, cur, out);
         }
+        ExprKind::NewExc { args, .. } => args.iter().for_each(|a| expr(a, cur, out)),
         _ => {}
     }
 }

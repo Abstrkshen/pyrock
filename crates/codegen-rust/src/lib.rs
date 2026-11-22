@@ -134,6 +134,22 @@ struct FnEmitter<'a, 'p> {
     spec: &'a Spec,
     func: &'a Function,
     tmp: usize,
+    /// Number of enclosing `try`/`with` closures.
+    try_depth: usize,
+    /// For each enclosing loop, the `try_depth` at which it was opened.
+    loops: Vec<usize>,
+    /// Rust names of the exceptions being handled (innermost last), for bare `raise`.
+    handling: Vec<String>,
+}
+
+/// Whether a block contains a statement compiled into a closure.
+fn has_closure_stmt(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match &s.kind {
+        StmtKind::Try { .. } | StmtKind::With { .. } => true,
+        StmtKind::If { body, orelse, .. } => has_closure_stmt(body) || has_closure_stmt(orelse),
+        StmtKind::While { body, .. } | StmtKind::ForRange { body, .. } | StmtKind::ForIter { body, .. } => has_closure_stmt(body),
+        _ => false,
+    })
 }
 
 fn ret_ty(s: &Spec) -> Ty {
@@ -281,7 +297,7 @@ fn py_iop(op: BinOp) -> String {
 impl<'a, 'p> FnEmitter<'a, 'p> {
     fn new(prog: &'a Program<'p>, plan: &'a Plan, spec: &'a Spec) -> Self {
         let func = &prog.module.funcs[spec.key.func];
-        FnEmitter { prog, plan, spec, func, tmp: 0 }
+        FnEmitter { prog, plan, spec, func, tmp: 0, try_depth: 0, loops: vec![], handling: vec![] }
     }
 
     fn fresh(&mut self) -> String {
@@ -325,6 +341,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 writeln!(out, "    let _frame = rt::enter()?; // recursive: enforce the recursion limit").unwrap();
             }
         }
+        let captured = has_closure_stmt(&f.body);
         for name in &f.locals {
             if f.params.contains(name) {
                 continue;
@@ -332,6 +349,9 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             let Some(t) = self.local_ty(name) else { continue };
             if s.maybe_unbound.contains(name) {
                 writeln!(out, "    let mut {}: Option<{}> = None;", rid(name), t.rust()).unwrap();
+            } else if captured {
+                // Closures (try/with bodies) cannot capture uninitialised locals.
+                writeln!(out, "    let mut {}: {} = {};", rid(name), t.rust(), t.rust_placeholder()).unwrap();
             } else {
                 writeln!(out, "    let mut {}: {};", rid(name), t.rust()).unwrap();
             }
@@ -345,6 +365,10 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             } else {
                 writeln!(out, "    Ok(())").unwrap();
             }
+        } else if captured {
+            // Inference proved control never reaches the end; a trailing
+            // `match` on a try result still needs a diverging tail.
+            writeln!(out, "    unreachable!(\"control cannot reach the end of {}\")", f.name).unwrap();
         }
         writeln!(out, "}}").unwrap();
     }
@@ -411,6 +435,10 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     None => ("()".into(), Ty::None),
                 };
                 let code = coerce(code, t, ret);
+                if self.try_depth > 0 {
+                    writeln!(out, "{ind}return Ok(rt::Flow::Return({code}));").unwrap();
+                    return;
+                }
                 // `return Ok(f(x)?)` is just `return f(x)`.
                 match code.strip_suffix('?') {
                     Some(inner) if !code.starts_with('{') && !inner.contains("?") => writeln!(out, "{ind}return {inner};").unwrap(),
@@ -454,7 +482,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     let (c, t) = self.expr(test);
                     writeln!(out, "{ind}while {} {{", unparen(&truthy(&c, t))).unwrap();
                 }
-                self.block(body, depth + 1, out);
+                self.loop_body(body, depth + 1, out);
                 writeln!(out, "{ind}}}").unwrap();
             }
             StmtKind::ForRange { var, start, stop, step, body } => {
@@ -486,7 +514,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 };
                 writeln!(out, "{ind}for {v} in {iter} {{").unwrap();
                 self.assign(var, v.clone(), Ty::Int, depth + 1, out);
-                self.block(body, depth + 1, out);
+                self.loop_body(body, depth + 1, out);
                 writeln!(out, "{ind}}}").unwrap();
             }
             StmtKind::ForIter { var, iter, body } => {
@@ -495,7 +523,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 writeln!(out, "{ind}let mut {it} = rt::py::iter(&{})?;", borrow(&src)).unwrap();
                 writeln!(out, "{ind}while let Some(__v) = {it}.next()? {{").unwrap();
                 self.assign(var, "__v".into(), Ty::Obj, depth + 1, out);
-                self.block(body, depth + 1, out);
+                self.loop_body(body, depth + 1, out);
                 writeln!(out, "{ind}}}").unwrap();
             }
             StmtKind::SetItem { obj, index, value } => {
@@ -524,10 +552,135 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     writeln!(out, "{ind}{}()?;", sp.mangled).unwrap();
                 }
             }
-            StmtKind::Break => writeln!(out, "{ind}break;").unwrap(),
-            StmtKind::Continue => writeln!(out, "{ind}continue;").unwrap(),
+            StmtKind::Break => writeln!(out, "{ind}{}", self.jump("break", "Break")).unwrap(),
+            StmtKind::Continue => writeln!(out, "{ind}{}", self.jump("continue", "Continue")).unwrap(),
             StmtKind::Pass => {}
+            StmtKind::Raise(e) => {
+                let err = match e {
+                    None => match self.handling.last() {
+                        Some(v) => format!("{v}.clone()"),
+                        None => "rt::exc::no_active()".into(),
+                    },
+                    Some(e) => {
+                        let (c, t) = self.expr(e);
+                        if t == Ty::Obj { format!("rt::py::raise(&{})", borrow(&c)) } else { c }
+                    }
+                };
+                writeln!(out, "{ind}return Err({err});").unwrap();
+            }
+            StmtKind::Try { body, handlers, orelse, finalbody } => self.try_stmt(body, handlers, orelse, finalbody, depth, out),
+            StmtKind::With { ctx, var, body } => {
+                let n = self.fresh();
+                let cm = self.obj(ctx);
+                writeln!(out, "{ind}let __cm{n} = {cm};").unwrap();
+                writeln!(out, "{ind}let __v{n} = rt::py::enter(&__cm{n})?;").unwrap();
+                if let Some(v) = var {
+                    self.assign(v, format!("__v{n}"), Ty::Obj, depth, out);
+                }
+                let r = format!("__r{n}");
+                self.closure(&r, body, depth, out);
+                writeln!(out, "{ind}let {r} = match {r} {{").unwrap();
+                writeln!(out, "{ind}    Err(e) => if rt::py::exit(&__cm{n}, Some(&e))? {{ Ok(rt::Flow::Normal) }} else {{ Err(e) }},").unwrap();
+                writeln!(out, "{ind}    ok => {{ rt::py::exit(&__cm{n}, None)?; ok }}").unwrap();
+                writeln!(out, "{ind}}};").unwrap();
+                self.propagate(&r, depth, out);
+            }
         }
+    }
+
+    fn loop_body(&mut self, body: &[Stmt], depth: usize, out: &mut String) {
+        self.loops.push(self.try_depth);
+        self.block(body, depth, out);
+        self.loops.pop();
+    }
+
+    /// `break`/`continue`: a plain jump when the loop is inside the current
+    /// closure, otherwise a `Flow` value re-issued after the `try`.
+    fn jump(&self, kw: &str, flow: &str) -> String {
+        if self.loops.last() == Some(&self.try_depth) {
+            format!("{kw};")
+        } else {
+            format!("return Ok(rt::Flow::{flow});")
+        }
+    }
+
+    fn flow_ty(&self) -> String {
+        format!("PyResult<rt::Flow<{}>>", ret_ty(self.spec).rust())
+    }
+
+    /// `let r = (|| -> PyResult<Flow<R>> { body; Ok(Flow::Normal) })();`
+    fn closure(&mut self, r: &str, body: &[Stmt], depth: usize, out: &mut String) {
+        let ind = "    ".repeat(depth);
+        let ft = self.flow_ty();
+        writeln!(out, "{ind}let {r}: {ft} = (|| -> {ft} {{").unwrap();
+        self.try_depth += 1;
+        self.block(body, depth + 1, out);
+        self.try_depth -= 1;
+        writeln!(out, "{ind}    Ok(rt::Flow::Normal)\n{ind}}})();").unwrap();
+    }
+
+    /// Re-issue how a closure body ended, in the current context.
+    fn propagate(&mut self, r: &str, depth: usize, out: &mut String) {
+        let ind = "    ".repeat(depth);
+        let ret = if self.try_depth > 0 { "return Ok(rt::Flow::Return(v))".to_string() } else { "return Ok(v)".to_string() };
+        writeln!(out, "{ind}match {r} {{").unwrap();
+        writeln!(out, "{ind}    Ok(rt::Flow::Normal) => {{}}").unwrap();
+        writeln!(out, "{ind}    Ok(rt::Flow::Return(v)) => {ret},").unwrap();
+        if self.loops.is_empty() {
+            writeln!(out, "{ind}    Ok(_) => unreachable!(),").unwrap();
+        } else {
+            writeln!(out, "{ind}    Ok(rt::Flow::Break) => {{ {} }}", self.jump("break", "Break")).unwrap();
+            writeln!(out, "{ind}    Ok(rt::Flow::Continue) => {{ {} }}", self.jump("continue", "Continue")).unwrap();
+        }
+        writeln!(out, "{ind}    Err(e) => return Err(e),").unwrap();
+        writeln!(out, "{ind}}}").unwrap();
+    }
+
+    fn try_stmt(&mut self, body: &[Stmt], handlers: &[Handler], orelse: &[Stmt], finalbody: &[Stmt], depth: usize, out: &mut String) {
+        let ind = "    ".repeat(depth);
+        let n = self.fresh();
+        let r = format!("__r{n}");
+        let e = format!("__e{n}");
+        self.closure(&r, body, depth, out);
+        if !handlers.is_empty() || !orelse.is_empty() {
+            writeln!(out, "{ind}let {r} = match {r} {{").unwrap();
+            if !orelse.is_empty() {
+                let tmp = format!("{r}_else");
+                writeln!(out, "{ind}    Ok(rt::Flow::Normal) => {{").unwrap();
+                self.closure(&tmp, orelse, depth + 2, out);
+                writeln!(out, "{ind}        {tmp}\n{ind}    }}").unwrap();
+            }
+            for h in handlers {
+                let mut conds = Vec::new();
+                for t in &h.types {
+                    conds.push(match t {
+                        ExcType::Builtin(k) => format!("rt::exc::matches(&{e}, {k:?})"),
+                        ExcType::Obj(x) => {
+                            let o = self.obj(x);
+                            format!("rt::py::exc_matches(&{e}, &{})?", borrow(&o))
+                        }
+                    });
+                }
+                let guard = if conds.is_empty() { String::new() } else { format!(" if {}", conds.join(" || ")) };
+                writeln!(out, "{ind}    Err({e}){guard} => {{").unwrap();
+                let tmp = format!("{r}_h");
+                let ft = self.flow_ty();
+                writeln!(out, "{ind}        let {tmp}: {ft} = (|| -> {ft} {{").unwrap();
+                self.try_depth += 1;
+                if let Some(name) = &h.name {
+                    self.assign(name, format!("{e}.clone()"), Ty::exc(), depth + 3, out);
+                }
+                self.handling.push(e.clone());
+                self.block(&h.body, depth + 3, out);
+                self.handling.pop();
+                self.try_depth -= 1;
+                writeln!(out, "{ind}            Ok(rt::Flow::Normal)\n{ind}        }})();").unwrap();
+                writeln!(out, "{ind}        {tmp}\n{ind}    }}").unwrap();
+            }
+            writeln!(out, "{ind}    other => other,\n{ind}}};").unwrap();
+        }
+        self.block(finalbody, depth, out);
+        self.propagate(&r, depth, out);
     }
 
     /// Returns Rust code for the expression (already unwrapped from
@@ -673,6 +826,19 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 c
             }
             ExprKind::ExternCall { ext, func, args } => self.extern_call(*ext, *func, args),
+            ExprKind::NewExc { kind, args } => match args.first() {
+                None => format!("rt::Exc::new({kind:?}, \"\")"),
+                Some(a) => {
+                    let (c, at) = self.expr(a);
+                    if kind == "KeyError" {
+                        let v = if at == Ty::Obj { c } else { format!("&{}", borrow(&c)) };
+                        let v = if at == Ty::Obj { format!("&{}", borrow(&v)) } else { v };
+                        format!("rt::Exc::new(\"KeyError\", rt::conv::repr_of({v}).to_string())")
+                    } else {
+                        format!("rt::Exc::new({kind:?}, {}.to_string())", to_str(&c, at))
+                    }
+                }
+            },
             ExprKind::Slot(i) => format!("SLOT_{i}_{}.get()?", ident(&self.prog.module.slots[*i].binding)),
             ExprKind::PyBuiltin(n) => format!("rt::py::builtin({n:?})?"),
             ExprKind::GetAttr { obj, name } => {

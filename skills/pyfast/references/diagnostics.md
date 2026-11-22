@@ -10,7 +10,7 @@ Format: `file.py:LINE:COL  CODE  error|warning: message`, followed by indented
 | P001 | Python syntax error (from CPython's parser) | Fix the syntax. Check that the `--python` interpreter version supports it |
 | P002 | Frontend failure (python3 missing, protocol mismatch) | Make sure `python3` (or `--python`) runs |
 | P003 | An imported `.rs` file doesn't parse | Fix the Rust syntax |
-| P100 | Unsupported statement or expression (`class`, `try`, `with`, `raise`, `global` reads, relative import, `import *`, import inside a function, `module.CONST`, a function used as a value, tuple unpacking, ...) | Rewrite (see language.md), or move that code into an imported `.py` so hybrid mode falls back to CPython for it |
+| P100 | Unsupported statement or expression (`class`, `global` reads, relative import, `import *`, import inside a function, `module.CONST`, a function used as a value, tuple unpacking, ...) | Rewrite (see language.md), or move that code into an imported `.py` so hybrid mode falls back to CPython for it |
 | P101 | Decorators, or parameters with defaults, `*args`, `**kwargs`, `/`, `*` | Use plain positional parameters and pass every argument explicitly |
 | P110 | Integer literal outside i64 | Use a float, or compute it in a CPython module |
 | P120 | Comprehension, generator or lambda | Use a `for` loop with `.append(...)`, or a named top-level function |
@@ -36,6 +36,7 @@ In hybrid mode these aren't printed by `check`. They're listed under "CPython bo
 | P213 | Operator or comparison on a Python object | Keep operands native |
 | P214 | `for x in <non-range iterable>` | `for i in range(n)` |
 | P215 | Value boxed (no single native type) | Make the variable or return single-typed |
+| P216 | `with` statement, or `except` naming a Python exception class | Native exception classes; manage the resource explicitly |
 | P220 | Warning: local `.py` imported through CPython because it can't be compiled. The note shows the first blocker | Fix that blocker in the module |
 
 ## Types (P3xx)

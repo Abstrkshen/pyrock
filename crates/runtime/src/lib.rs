@@ -18,7 +18,7 @@ pub mod io;
 pub mod py;
 pub mod string;
 
-pub use exc::{Exc, PyResult};
+pub use exc::{Exc, Flow, PyResult};
 pub use io::{print, run_main};
 
 /// Immutable Python `str` value; cheap clones preserve value semantics.
@@ -78,4 +78,56 @@ pub fn first_import(flag: &std::sync::atomic::AtomicBool) -> bool {
 
 pub fn unbound_global(name: &str) -> Exc {
     Exc::new("NameError", format!("name '{name}' is not defined"))
+}
+
+/// Python truthiness for native values (`if x:`, `not x`, `bool(x)`).
+pub trait Truthy {
+    fn truthy(&self) -> bool;
+}
+
+impl Truthy for i64 {
+    fn truthy(&self) -> bool {
+        *self != 0
+    }
+}
+
+impl Truthy for f64 {
+    fn truthy(&self) -> bool {
+        *self != 0.0
+    }
+}
+
+impl Truthy for bool {
+    fn truthy(&self) -> bool {
+        *self
+    }
+}
+
+impl Truthy for Str {
+    fn truthy(&self) -> bool {
+        !self.is_empty()
+    }
+}
+
+impl Truthy for () {
+    fn truthy(&self) -> bool {
+        false
+    }
+}
+
+impl<T: Truthy> Truthy for Option<T> {
+    fn truthy(&self) -> bool {
+        self.as_ref().is_some_and(|v| v.truthy())
+    }
+}
+
+impl Truthy for Exc {
+    fn truthy(&self) -> bool {
+        true
+    }
+}
+
+/// `bool(x)` for a native value.
+pub fn truthy<T: Truthy + ?Sized>(v: &T) -> bool {
+    v.truthy()
 }

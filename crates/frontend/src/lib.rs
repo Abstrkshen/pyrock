@@ -259,6 +259,25 @@ fn collect_bindings(body: &[Value], out: &mut Vec<String>, top: bool) {
                 collect_bindings(arr(st, "body"), out, top);
                 collect_bindings(arr(st, "orelse"), out, top);
             }
+            "Try" => {
+                collect_bindings(arr(st, "body"), out, top);
+                for h in arr(st, "handlers") {
+                    if let Some(n) = h["name"].as_str() {
+                        push(n, out);
+                    }
+                    collect_bindings(arr(h, "body"), out, top);
+                }
+                collect_bindings(arr(st, "orelse"), out, top);
+                collect_bindings(arr(st, "finalbody"), out, top);
+            }
+            "With" => {
+                for item in arr(st, "items") {
+                    if ty(&item["optional_vars"]) == "Name" {
+                        push(sstr(&item["optional_vars"], "id"), out);
+                    }
+                }
+                collect_bindings(arr(st, "body"), out, top);
+            }
             "FunctionDef" if !top => push(sstr(st, "name"), out),
             _ => {}
         }
@@ -400,7 +419,10 @@ impl<'l> Lowerer<'l> {
     }
 
     fn reject_nested_imports(&mut self, st: &Value) {
-        for key in ["body", "orelse"] {
+        for h in arr(st, "handlers") {
+            self.reject_nested_imports(h);
+        }
+        for key in ["body", "orelse", "finalbody"] {
             for s in arr(st, key) {
                 if matches!(ty(s), "Import" | "ImportFrom") {
                     let sp = self.span(s);
@@ -706,6 +728,69 @@ impl<'l> Lowerer<'l> {
                     _ => Some(Stmt { kind: StmtKind::If { test: Expr { kind: ExprKind::Bool(true), span: sp }, body: stmts, orelse: vec![] }, span: sp }),
                 };
             }
+            "Try" => {
+                let body = self.lower_block(arr(st, "body"));
+                let mut handlers = Vec::new();
+                for h in arr(st, "handlers") {
+                    let hsp = self.span(h);
+                    let types = match ty(&h["type"]) {
+                        "" => vec![],
+                        "Tuple" => {
+                            let mut v = Vec::new();
+                            for t in arr(&h["type"], "elts") {
+                                v.push(self.exc_type(t)?);
+                            }
+                            v
+                        }
+                        _ => vec![self.exc_type(&h["type"])?],
+                    };
+                    let name = h["name"].as_str().map(String::from);
+                    handlers.push(Handler { types, name, body: self.lower_block(arr(h, "body")), span: hsp });
+                }
+                StmtKind::Try { body, handlers, orelse: self.lower_block(arr(st, "orelse")), finalbody: self.lower_block(arr(st, "finalbody")) }
+            }
+            "TryStar" => {
+                self.unsupported(sp, "`except*`", "exception groups are not compiled; use plain `except`");
+                return None;
+            }
+            "Raise" => {
+                if st["exc"].is_null() {
+                    StmtKind::Raise(None)
+                } else {
+                    let e = &st["exc"];
+                    // `raise ValueError` raises an instance of the class.
+                    if ty(e) == "Name" && self.builtin_exc(sstr(e, "id")) {
+                        StmtKind::Raise(Some(Expr { kind: ExprKind::NewExc { kind: sstr(e, "id").to_string(), args: vec![] }, span: sp }))
+                    } else {
+                        StmtKind::Raise(Some(self.lower_expr(e)?))
+                    }
+                }
+            }
+            "Assert" => {
+                let test = self.lower_expr(&st["test"])?;
+                let args = if st["msg"].is_null() { vec![] } else { vec![self.lower_expr(&st["msg"])?] };
+                let raise = Stmt { kind: StmtKind::Raise(Some(Expr { kind: ExprKind::NewExc { kind: "AssertionError".into(), args }, span: sp })), span: sp };
+                let not = Expr { kind: ExprKind::Unary { op: UnaryOp::Not, operand: Box::new(test) }, span: sp };
+                StmtKind::If { test: not, body: vec![raise], orelse: vec![] }
+            }
+            "With" => {
+                let items = arr(st, "items");
+                let mut body = self.lower_block(arr(st, "body"));
+                for item in items.iter().rev() {
+                    let ctx = self.lower_expr(&item["context_expr"])?;
+                    let var = match ty(&item["optional_vars"]) {
+                        "" => None,
+                        "Name" => Some(sstr(&item["optional_vars"], "id").to_string()),
+                        _ => {
+                            let vsp = self.span(&item["optional_vars"]);
+                            self.unsupported(vsp, "unpacking in a `with` target", "bind one name and unpack it in the body");
+                            return None;
+                        }
+                    };
+                    body = vec![Stmt { kind: StmtKind::With { ctx, var, body }, span: sp }];
+                }
+                return body.into_iter().next();
+            }
             "Global" | "Nonlocal" => {
                 self.err("P142", sp, "`global`/`nonlocal` rebinding is never lowered into a native assumption");
                 return None;
@@ -970,6 +1055,19 @@ impl<'l> Lowerer<'l> {
         Some(Expr { kind, span: sp })
     }
 
+    /// `name` refers to a builtin exception class (not shadowed by anything local).
+    fn builtin_exc(&self, name: &str) -> bool {
+        is_builtin_exception(name) && !self.locals.contains(name) && !self.bindings.contains_key(name) && !self.module_vars.contains(name)
+    }
+
+    /// The type in an `except` clause.
+    fn exc_type(&mut self, t: &Value) -> Option<ExcType> {
+        if ty(t) == "Name" && self.builtin_exc(sstr(t, "id")) {
+            return Some(ExcType::Builtin(sstr(t, "id").to_string()));
+        }
+        Some(ExcType::Obj(self.lower_expr(t)?))
+    }
+
     /// If `v` names a natively compiled module or extern, return its binding.
     fn module_binding(&self, v: &Value) -> Option<Binding> {
         if ty(v) != "Name" || self.locals.contains(sstr(v, "id")) {
@@ -986,6 +1084,9 @@ impl<'l> Lowerer<'l> {
             ExprKind::Local(id.to_string())
         } else if id == "__name__" {
             ExprKind::Str(if self.unit == 0 { "__main__".into() } else { self.ld.units[self.unit].name.clone() })
+        } else if id == "__file__" {
+            // CPython: the path as given for the entry script, absolute for imports.
+            ExprKind::Str(self.ld.units[self.unit].path.clone())
         } else if let Some(b) = self.bindings.get(id).copied() {
             match b {
                 Binding::Slot(s) => {
@@ -1058,6 +1159,9 @@ impl<'l> Lowerer<'l> {
                     return None;
                 }
                 Some(Binding::Slot(_)) | None => {}
+            }
+            if self.builtin_exc(id) && kwargs.is_empty() && args.len() <= 1 {
+                return Some(Expr { kind: ExprKind::NewExc { kind: id.to_string(), args }, span: sp });
             }
             if !self.bindings.contains_key(id) && !self.module_vars.contains(id) {
                 if let Some(b) = Builtin::from_name(id) {

@@ -13,7 +13,10 @@
 * Builtins: `print(*args)`, `abs`, `int`, `float`, `str`, `bool`, `len(str)`, and
   `min`/`max` with 2+ arguments of compatible types.
 * f-strings: `{expr}` is native. Format specs (`{x:.3f}`, `{x!r}`) use CPython's `format`.
-* `if __name__ == "__main__":` works.
+* `if __name__ == "__main__":` works, and `__file__`.
+* `try`/`except`/`else`/`finally`, `except (A, B) as e`, bare `except:` and `raise`,
+  `raise E(msg)`, `assert`. `except` follows CPython's exception hierarchy; exceptions from
+  CPython code keep their object (`except json.JSONDecodeError` works, as a P216 boundary).
 * Type annotations on parameters, returns and `x: T = v`. `int`, `float`, `str`, `bool`,
   `None`, `object`/`Any` and string forward refs are understood. Others (`list[int]`,
   `Optional`) are accepted and ignored.
@@ -48,7 +51,8 @@ None → `()`, other → `rt::py::Obj`.
 Lists, dicts, tuples, sets, subscripts and slices, item and attribute assignment, method
 calls and attributes, keyword arguments, calls of Python objects, `for x in <iterable>` other
 than range, builtins without a native version (`sorted`, `sum`, `round`, `isinstance`,
-`repr`, `enumerate`, `zip`, `range` used as a value, ...), `print(sep=, end=)`, and boxed
+`repr`, `enumerate`, `zip`, `range` used as a value, ...), `with` (context managers),
+`print(sep=, end=)`, and boxed
 values (mixed types). These keep exact Python semantics, including aliasing.
 
 ## Not supported in any mode → how to rewrite
@@ -56,7 +60,6 @@ values (mixed types). These keep exact Python semantics, including aliasing.
 | Construct | Rewrite |
 |---|---|
 | `class` in the entry file | Move it into a separate `.py` module (it falls back to CPython, with P220), or use functions plus separate values |
-| `try`/`except`, `raise`, `with` | Validate up front, or put that code in a CPython-imported module |
 | `[f(x) for x in xs]`, generators | `out = []` + `for` + `out.append(...)` |
 | `lambda`, nested `def`, closures | A top-level function |
 | `def f(a, b=1)`, `*args`, `**kwargs` | Plain positional parameters, and pass every argument |

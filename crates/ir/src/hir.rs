@@ -199,9 +199,33 @@ pub enum StmtKind {
     SetAttr { obj: Expr, name: String, value: Expr },
     /// Execute an import at its original position (preserves import order).
     Import(ImportAction),
+    /// `try` / `except` / `else` / `finally`.
+    Try { body: Vec<Stmt>, handlers: Vec<Handler>, orelse: Vec<Stmt>, finalbody: Vec<Stmt> },
+    /// `raise`, `raise e`, `raise e from cause` (the cause only affects the traceback body).
+    Raise(Option<Expr>),
+    /// `with a as x, b as y: body` (one item per statement after lowering).
+    With { ctx: Expr, var: Option<String>, body: Vec<Stmt> },
     Break,
     Continue,
     Pass,
+}
+
+/// One `except` clause.
+#[derive(Clone, Debug)]
+pub struct Handler {
+    /// Exception types matched; empty for a bare `except:`.
+    pub types: Vec<ExcType>,
+    pub name: Option<String>,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum ExcType {
+    /// A builtin exception class by name (`ValueError`, `OSError`, ...).
+    Builtin(String),
+    /// Any other expression: a Python exception class, matched with `isinstance`.
+    Obj(Expr),
 }
 
 #[derive(Clone, Debug)]
@@ -250,6 +274,8 @@ pub enum ExprKind {
     Tuple(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
     Subscript { obj: Box<Expr>, index: Box<Expr> },
+    /// `ValueError(...)`: a builtin exception instance (native `rt::Exc`).
+    NewExc { kind: String, args: Vec<Expr> },
 }
 
 impl ExprKind {
@@ -433,4 +459,25 @@ impl CmpOp {
 pub enum BoolOpKind {
     And,
     Or,
+}
+
+/// Builtin exception classes (CPython 3.12+), including the `IOError` /
+/// `EnvironmentError` aliases. Kept in sync with `pyfast_runtime::exc::HIERARCHY`.
+pub const BUILTIN_EXCEPTIONS: &[&str] = &[
+    "BaseException", "Exception", "BaseExceptionGroup", "GeneratorExit", "KeyboardInterrupt", "SystemExit",
+    "ArithmeticError", "FloatingPointError", "OverflowError", "ZeroDivisionError", "AssertionError", "AttributeError",
+    "BufferError", "EOFError", "ExceptionGroup", "ImportError", "ModuleNotFoundError", "LookupError", "IndexError",
+    "KeyError", "MemoryError", "NameError", "UnboundLocalError", "OSError", "IOError", "EnvironmentError",
+    "BlockingIOError", "ChildProcessError", "ConnectionError", "BrokenPipeError", "ConnectionAbortedError",
+    "ConnectionRefusedError", "ConnectionResetError", "FileExistsError", "FileNotFoundError", "InterruptedError",
+    "IsADirectoryError", "NotADirectoryError", "PermissionError", "ProcessLookupError", "TimeoutError",
+    "ReferenceError", "RuntimeError", "NotImplementedError", "PythonFinalizationError", "RecursionError",
+    "StopAsyncIteration", "StopIteration", "SyntaxError", "IndentationError", "TabError", "SystemError", "TypeError",
+    "ValueError", "UnicodeError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeTranslateError", "Warning",
+    "BytesWarning", "DeprecationWarning", "EncodingWarning", "FutureWarning", "ImportWarning",
+    "PendingDeprecationWarning", "ResourceWarning", "RuntimeWarning", "SyntaxWarning", "UnicodeWarning", "UserWarning",
+];
+
+pub fn is_builtin_exception(name: &str) -> bool {
+    BUILTIN_EXCEPTIONS.contains(&name)
 }

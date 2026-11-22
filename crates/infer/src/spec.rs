@@ -387,6 +387,48 @@ impl Ctx<'_, '_> {
             }
             StmtKind::Import(ImportAction::Py(_)) => {}
             StmtKind::Break | StmtKind::Continue | StmtKind::Pass => {}
+            StmtKind::Try { body, handlers, orelse, finalbody } => {
+                let mut falls = self.block(body, assigns, ret) && self.block(orelse, assigns, ret);
+                for h in handlers {
+                    for t in &h.types {
+                        if let ExcType::Obj(e) = t {
+                            self.expr(e);
+                        }
+                    }
+                    if let Some(n) = &h.name {
+                        assigns.push((n.clone(), Ty::exc()));
+                    }
+                    falls |= self.block(&h.body, assigns, ret);
+                }
+                // A body that may raise reaches the handlers; one that never
+                // raises still falls through when its own end is reachable.
+                return self.block(finalbody, assigns, ret) && falls;
+            }
+            StmtKind::Raise(e) => {
+                if let Some(e) = e {
+                    if let Some(t) = self.expr(e) {
+                        if t != Ty::Obj && t != Ty::exc() {
+                            self.report(Diagnostic::error("P301", e.span, "exceptions must derive from BaseException").note("CPython would raise TypeError here"));
+                        }
+                    }
+                }
+                return false;
+            }
+            StmtKind::With { ctx, var, body } => {
+                if let Some(t) = self.expr(ctx) {
+                    if t != Ty::Obj {
+                        self.report(
+                            Diagnostic::error("P301", ctx.span, format!("'{t}' object does not support the context manager protocol"))
+                                .note("CPython would raise TypeError here"),
+                        );
+                    }
+                }
+                if let Some(v) = var {
+                    assigns.push((v.clone(), Ty::Obj));
+                }
+                // `__exit__` may suppress an exception and continue after the block.
+                self.block(body, assigns, ret);
+            }
         }
         true
     }
@@ -531,6 +573,12 @@ impl Ctx<'_, '_> {
                 Some(v)
             }
             ExprKind::Slot(_) | ExprKind::PyBuiltin(_) => Some(Ty::Obj),
+            ExprKind::NewExc { args, .. } => {
+                for a in args {
+                    self.expr(a)?;
+                }
+                Some(Ty::exc())
+            }
             ExprKind::GetAttr { obj, .. } => self.all_obj([&**obj]),
             ExprKind::CallObj { func, args, kwargs } => {
                 let all: Vec<&Expr> = std::iter::once(&**func).chain(args.iter()).chain(kwargs.iter().map(|(_, v)| v)).collect();
@@ -581,6 +629,10 @@ fn contains_break(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match &s.kind {
         StmtKind::Break => true,
         StmtKind::If { body, orelse, .. } => contains_break(body) || contains_break(orelse),
+        StmtKind::Try { body, handlers, orelse, finalbody } => {
+            contains_break(body) || contains_break(orelse) || contains_break(finalbody) || handlers.iter().any(|h| contains_break(&h.body))
+        }
+        StmtKind::With { body, .. } => contains_break(body),
         _ => false, // breaks inside nested loops belong to those loops
     })
 }

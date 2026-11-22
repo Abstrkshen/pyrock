@@ -30,7 +30,89 @@ fn to_exc(py: Python<'_>, e: PyErr) -> Exc {
     let module = ty.module().map(|s| s.to_string()).unwrap_or_default();
     let kind = if module.is_empty() || module == "builtins" { name } else { format!("{module}.{name}") };
     let msg = e.value(py).str().map(|s| s.to_string()).unwrap_or_default();
-    Exc::new(kind, msg)
+    let mut x = Exc::new(kind, msg);
+    x.origin = Some(std::rc::Rc::new(Obj(e.value(py).clone().into_any().unbind())));
+    x
+}
+
+/// The Python exception object carried by `e`, if it came from CPython.
+fn origin(e: &Exc) -> Option<&Obj> {
+    e.origin.as_ref().and_then(|o| o.downcast_ref::<Obj>())
+}
+
+/// `except <builtin name>` for an exception that came from CPython:
+/// decided by `isinstance` (None when `e` is native or `base` is not a builtin).
+pub(crate) fn exc_matches_builtin(e: &Exc, base: &str) -> Option<bool> {
+    let o = origin(e)?;
+    Python::attach(|py| {
+        let cls = py.import("builtins").ok()?.getattr(base).ok()?;
+        o.bind(py).is_instance(&cls).ok()
+    })
+}
+
+/// Python exception instance for `e` (the original object, or a new
+/// instance of the builtin class named by `e.kind`).
+pub fn exc_obj(e: &Exc) -> PyResult<Obj> {
+    if let Some(o) = origin(e) {
+        return Ok(o.clone());
+    }
+    with(|py| {
+        let builtins = py.import("builtins")?;
+        let cls = match builtins.getattr(e.name()) {
+            Ok(c) if crate::exc::is_builtin(e.name()) => c,
+            _ => builtins.getattr("Exception")?,
+        };
+        if e.msg.is_empty() {
+            return cls.call0().map(own);
+        }
+        // KeyError's message is the key's repr: recover the key itself.
+        if e.name() == "KeyError" {
+            if let Ok(k) = py.import("ast")?.getattr("literal_eval")?.call1((e.msg.as_str(),)) {
+                return cls.call1((k,)).map(own);
+            }
+        }
+        cls.call1((e.msg.as_str(),)).map(own)
+    })
+}
+
+/// `except <python class or tuple>` (e.g. `json.JSONDecodeError`).
+pub fn exc_matches(e: &Exc, cls: &Obj) -> PyResult<bool> {
+    let o = exc_obj(e)?;
+    with(|py| o.bind(py).is_instance(cls.bind(py)))
+}
+
+/// `raise <python object>`: an exception instance or class.
+pub fn raise(o: &Obj) -> Exc {
+    Python::attach(|py| to_exc(py, PyErr::from_value(o.bind(py).clone())))
+}
+
+/// `with` statement: `type(cm).__enter__(cm)`.
+pub fn enter(cm: &Obj) -> PyResult<Obj> {
+    with(|py| {
+        let b = cm.bind(py);
+        b.get_type().getattr("__enter__")?.call1((b,)).map(own)
+    })
+}
+
+/// `with` statement exit. `err` is the exception leaving the body, if any;
+/// returns whether `__exit__` suppressed it.
+pub fn exit(cm: &Obj, err: Option<&Exc>) -> PyResult<bool> {
+    let exc = match err {
+        Some(e) => Some(exc_obj(e)?),
+        None => None,
+    };
+    with(|py| {
+        let b = cm.bind(py);
+        let exit = b.get_type().getattr("__exit__")?;
+        let r = match exc {
+            None => exit.call1((b, py.None(), py.None(), py.None()))?,
+            Some(x) => {
+                let v = x.bind(py);
+                exit.call1((b, v.get_type(), v, v.getattr("__traceback__")?))?
+            }
+        };
+        r.is_truthy()
+    })
 }
 
 /// Run `f` attached to the interpreter, mapping Python errors to `Exc`.
@@ -366,5 +448,75 @@ impl Slot {
             Some(o) => Ok(o.clone()),
             None => Err(Exc::new("NameError", format!("name '{}' is not defined", self.binding))),
         }
+    }
+}
+
+impl crate::conv::PyFmt for Obj {
+    fn py_repr(&self) -> Str {
+        Python::attach(|py| self.bind(py).repr().map(|s| Str::from(s.to_string())).unwrap_or_else(|_| Str::from("<repr failed>")))
+    }
+    fn py_str(&self) -> Str {
+        Python::attach(|py| self.bind(py).str().map(|s| Str::from(s.to_string())).unwrap_or_else(|_| Str::from("<str failed>")))
+    }
+}
+
+impl crate::Truthy for Obj {
+    fn truthy(&self) -> bool {
+        Python::attach(|py| self.bind(py).is_truthy().unwrap_or(true))
+    }
+}
+
+/// Native value -> Python object (copies for immutable values; mutable
+/// native collections never reach here: escape analysis keeps them boxed).
+pub trait ToPy {
+    fn to_py(&self) -> PyResult<Obj>;
+}
+
+/// Box a native value as a Python object.
+pub fn to_py<T: ToPy + ?Sized>(v: &T) -> PyResult<Obj> {
+    v.to_py()
+}
+
+impl ToPy for Obj {
+    fn to_py(&self) -> PyResult<Obj> {
+        Ok(self.clone())
+    }
+}
+impl ToPy for i64 {
+    fn to_py(&self) -> PyResult<Obj> {
+        Ok(int(*self))
+    }
+}
+impl ToPy for f64 {
+    fn to_py(&self) -> PyResult<Obj> {
+        Ok(float(*self))
+    }
+}
+impl ToPy for bool {
+    fn to_py(&self) -> PyResult<Obj> {
+        Ok(bool_(*self))
+    }
+}
+impl ToPy for Str {
+    fn to_py(&self) -> PyResult<Obj> {
+        Ok(str_(self))
+    }
+}
+impl ToPy for () {
+    fn to_py(&self) -> PyResult<Obj> {
+        Ok(none())
+    }
+}
+impl<T: ToPy> ToPy for Option<T> {
+    fn to_py(&self) -> PyResult<Obj> {
+        match self {
+            Some(v) => v.to_py(),
+            None => Ok(none()),
+        }
+    }
+}
+impl ToPy for Exc {
+    fn to_py(&self) -> PyResult<Obj> {
+        exc_obj(self)
     }
 }

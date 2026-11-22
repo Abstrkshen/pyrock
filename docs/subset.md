@@ -15,6 +15,13 @@ These constructs become plain Rust with no Python objects involved:
 * Builtins: `print(*args)`, `abs`, `int`, `float`, `str`, `bool`, `len(str)`, and
   `min`/`max` with 2 or more arguments of the same type.
 * f-strings with plain `{expr}` placeholders.
+* Exceptions: `try`/`except`/`else`/`finally` (including `except (A, B) as e`, bare `except:`
+  and bare `raise`), `raise E`, `raise E(msg)`, `raise e`, `assert cond[, msg]`, and builtin
+  exception values such as `ValueError("x")`. `except` matches through CPython's builtin
+  exception hierarchy (`except LookupError` catches `KeyError`); exceptions that come from
+  CPython keep their original object, so `except json.JSONDecodeError` works through
+  `isinstance`. `return`/`break`/`continue` inside `try` run `finally` first.
+* `__name__` and `__file__`.
 
 ## Semantics that are preserved
 
@@ -50,6 +57,8 @@ under `--mode native-only`.
 * List, dict, tuple and set literals, subscripts and slices, item and attribute assignment (P212)
 * Operators and comparisons involving a Python object (P213), and `for x in <iterable>` (P214)
 * Variables or returns with no single native type (P215: boxed)
+* `with` statements (CPython context-manager protocol, P216), and `except` clauses naming a
+  Python exception class such as `json.JSONDecodeError` (P216)
 * `print(..., sep=, end=)` and f-string format specs (`{x:.3f}`, `{x!r}`) use CPython's
   `print` and `format`
 
@@ -72,6 +81,7 @@ variadic functions, `static` C functions) are listed in `explain`. Calling one g
 | P140/P141/P142 | Module globals read in functions, function rebinding, `global`/`nonlocal` |
 | P143/P144 | Undefined name; call before definition |
 | P2xx | A CPython boundary, in `--mode native-only` only (see above). P220 is a warning: a local `.py` was imported through CPython |
+| P301 (raise) | `raise` of a value that is not an exception |
 | P301 | Operator or builtin applied to types where CPython raises `TypeError` |
 | P302/P304/P305 | Value-dependent type in native-only mode (hybrid mode boxes these instead) |
 | P306 | No return type could be inferred |
@@ -80,5 +90,5 @@ variadic functions, `static` C functions) are listed in `explain`. Calling one g
 
 Not yet supported in either mode: classes defined in natively compiled files (an imported
 `.py` that defines a class falls back to CPython; a class in the entry file is rejected),
-`try`/`raise`/`with`, comprehensions, lambdas, closures, `*args`/`**kwargs` definitions,
+comprehensions, lambdas, closures, `*args`/`**kwargs` definitions,
 tuple unpacking, and reading module-level variables from functions.

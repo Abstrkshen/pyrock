@@ -279,6 +279,34 @@ impl State<'_> {
                 self.assign(var, Sym::Con(Ty::Int), cx);
                 self.block(body, cx);
             }
+            StmtKind::Try { body, handlers, orelse, finalbody } => {
+                let mut falls = self.block(body, cx) && self.block(orelse, cx);
+                for h in handlers {
+                    for t in &h.types {
+                        if let ExcType::Obj(e) = t {
+                            self.expr(e, cx);
+                        }
+                    }
+                    if let Some(n) = &h.name {
+                        self.assign(n, Sym::Con(Ty::exc()), cx);
+                    }
+                    falls |= self.block(&h.body, cx);
+                }
+                return self.block(finalbody, cx) && falls;
+            }
+            StmtKind::Raise(e) => {
+                if let Some(e) = e {
+                    self.expr(e, cx);
+                }
+                return false;
+            }
+            StmtKind::With { ctx, var, body } => {
+                self.expr(ctx, cx);
+                if let Some(v) = var {
+                    self.assign(v, Sym::Con(Ty::Obj), cx);
+                }
+                return self.block(body, cx);
+            }
             _ => {}
         }
         true
@@ -373,6 +401,12 @@ impl State<'_> {
                 Sym::Con(*ty)
             }
             ExprKind::Slot(_) | ExprKind::PyBuiltin(_) => Sym::Con(Ty::Obj),
+            ExprKind::NewExc { args, .. } => {
+                for a in args {
+                    self.expr(a, cx);
+                }
+                Sym::Con(Ty::exc())
+            }
             ExprKind::GetAttr { obj, .. } => {
                 self.expr(obj, cx);
                 Sym::Con(Ty::Obj)
