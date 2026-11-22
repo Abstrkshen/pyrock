@@ -74,8 +74,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] `async def` / `await` bridged to asyncio (`async with`, `async for`)
 - [x] Generators (`yield`, `yield from`) on the same stackful coroutines
 - [x] Lazy generator expressions
-- [ ] Generator `send`/`throw`/`close`, `return value`, `finally` on abandoned generators
-- [ ] Async generators
+- [x] Generator `send`/`throw`/`close`, `return value`, `finally` on abandoned generators
+- [x] Async generators
 
 ## Phase 7: speed of mixed code
 
@@ -577,3 +577,30 @@ Each bridged operation cost ~400 ns.
 * `raylib-breakout`: CPython operators 103 → 33, 55 native functions (the rest is mostly
   ctypes code in `svgload.py` and the raylib API).
 * Test: `tests/differential/int_or_float.py`.
+
+### Phase 6.4: the generator protocol and async generators (2026-11-22)
+
+* Generators are `Gen<T, S, R>`: yield `T`, receive `S` (`x = yield v`; `None` from
+  `next`), return `R` (`return v`). The send type is widened by `g.send(v)` calls on the
+  generator's values, like a list's element type by `append`, and flows back to the
+  generator function's specialization. A suspended body is resumed with a value or an
+  exception: `throw(e)` raises at the `yield`, so the body's `try`/`except`/`finally` apply;
+  `close()` throws `GeneratorExit` (`RuntimeError` if the generator yields again). Sending a
+  non-`None` value to a just-started generator and a `StopIteration` escaping the body
+  (PEP 479) raise as in CPython.
+* `r = yield from sub()` delegates: values, sends and throws are forwarded and `r` is
+  `sub`'s return value; `yield from` any other iterable yields its items.
+* A generator that is dropped unfinished is closed (its `finally` blocks run), and a `for`
+  loop owns the generator it iterates, so `break` closes it immediately, as CPython's
+  reference counting does. (This also replaces the reset-without-cleanup of abandoned
+  generators in release builds.) Divergence: generators still suspended in module globals
+  at exit are not finalized.
+* Async generators (`async def` with `yield`): the body runs as a generator yielding either
+  a value or an awaitable; the consumer (`async for`, `__anext__`) awaits awaitables on its
+  own coroutine stack and resumes the body with the result. `await` inside an async
+  generator body, or inside a native coroutine it awaits inline, is routed to the right body
+  through one stack of await targets. `aclose()`, `break` + `aclose()` running `finally`,
+  and use from CPython (`anext()`, `gather`) work.
+* Not supported yet: async comprehensions; `asend`/`athrow`.
+* Tests: `tests/differential/generator_protocol.py`, `tests/differential/async_generators.py`
+  (both also identical with `--release`).

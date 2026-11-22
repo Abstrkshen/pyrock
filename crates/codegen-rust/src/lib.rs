@@ -464,7 +464,13 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             // `async def` / generator: the body is `<name>__body`; `<name>`
             // makes the coroutine / generator object around it.
             if f.is_async || f.is_generator {
-                let (kind, item) = if f.is_generator { ("rt::gen::Gen", ret_ty(s)) } else { ("rt::aio::Coro", ret) };
+                let (kind, item) = match (f.is_async, f.is_generator) {
+                    (true, true) => ("rt::agen::AGen", ret_ty(s)),
+                    (false, true) => ("rt::gen::Gen", ret_ty(s)),
+                    _ => ("rt::aio::Coro", ret),
+                };
+                // A generator's Rust type also names what it receives and returns.
+                let item_ty = if f.is_generator && !f.is_async { format!("{}, {}, {}", item.rust(), pyfast_infer::spec::gen_send_ty(s).rust(), pyfast_infer::spec::gen_ret_ty(s).rust()) } else { item.rust().to_string() };
                 let names: Vec<String> = params.iter().map(|p| p.trim_start_matches("mut ").split(':').next().unwrap().to_string()).collect();
                 let wparams: Vec<String> = params.iter().map(|p| p.trim_start_matches("mut ").to_string()).collect();
                 writeln!(
@@ -474,7 +480,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     f.name.rsplit('.').next().unwrap_or(&f.name),
                     names.join(", "),
                     m = s.mangled,
-                    r = item.rust()
+                    r = item_ty
                 )
                 .unwrap();
             }
@@ -522,7 +528,9 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
         let mut body = String::new();
         self.block(&f.body, 1, &mut body);
         out.push_str(&body);
-        if s.falls_through || f.is_module {
+        // (A generator's own slot says nothing about its body falling through.)
+        let falls = if f.is_generator { s.gen_falls } else { s.falls_through };
+        if falls || f.is_module {
             if ret == Ty::Obj {
                 writeln!(out, "    Ok(rt::py::none())").unwrap();
             } else if ret.as_opt().is_some() {
@@ -763,6 +771,17 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 self.loop_body(body, depth + 1, out);
                 writeln!(out, "{ind}}}").unwrap();
             }
+            // `async for` over a native async generator.
+            StmtKind::ForIter { var, iter, body, is_async: true } if self.ty(iter).as_agen().is_some() => {
+                let y = self.ty(iter).as_agen().unwrap();
+                let it = self.fresh();
+                let (src, _) = self.expr(iter);
+                writeln!(out, "{ind}let {it} = {src};").unwrap();
+                writeln!(out, "{ind}while let Some(__v) = {it}.anext()? {{").unwrap();
+                self.assign(var, "__v".into(), y, depth + 1, out);
+                self.loop_body(body, depth + 1, out);
+                writeln!(out, "{ind}}}").unwrap();
+            }
             StmtKind::ForIter { var, iter, body, is_async } => {
                 let it = self.fresh();
                 let src = self.obj(iter);
@@ -902,8 +921,10 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
     /// What the emitted body returns: the function's return type, or `()`
     /// for a generator body (its slot type is what it yields).
     fn body_ret(&self) -> Ty {
-        if self.func.is_generator {
+        if self.func.is_generator && self.func.is_async {
             Ty::None
+        } else if self.func.is_generator {
+            pyfast_infer::spec::gen_ret_ty(self.spec)
         } else {
             ret_ty(self.spec)
         }
@@ -1105,9 +1126,15 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     // Never reached (`if False: yield x`): nothing is ever yielded.
                     format!("{{ let _ = {c}; }}")
                 } else {
-                    format!("rt::gen::yield_::<{}>({})", item.rust(), coerce(c, vt, item))
+                    let sent = pyfast_infer::spec::gen_send_ty(self.spec);
+                    if self.func.is_async {
+                        format!("rt::agen::yield_::<{}>({})?", item.rust(), coerce(c, vt, item))
+                    } else {
+                        format!("rt::gen::yield_::<{}, {}>({})?", item.rust(), sent.rust(), coerce(c, vt, item))
+                    }
                 }
             }
+            ExprKind::YieldFrom(v) => self.yield_from(v),
             ExprKind::Await(v) => {
                 let (c, vt) = self.expr(v);
                 if vt.as_coro().is_some() {
@@ -1818,4 +1845,53 @@ impl FnEmitter<'_, '_> {
 
 fn ops_base(t: Ty) -> Ty {
     t.as_opt().unwrap_or(t)
+}
+
+impl FnEmitter<'_, '_> {
+    /// `yield from v`: a native generator is delegated to (values, sends,
+    /// throws; its return value is the result); any other iterable is
+    /// iterated and each item yielded.
+    fn yield_from(&mut self, v: &Expr) -> String {
+        let item = ret_ty(self.spec);
+        let sent = pyfast_infer::spec::gen_send_ty(self.spec);
+        let (c, vt) = self.expr(v);
+        if let Some((y2, s2, _)) = vt.as_gen() {
+            let conv = coll::convert("__e", y2, item);
+            let conv_send = coll::convert("__s", sent, s2);
+            return format!(
+                "{{ let __g = {c}; rt::gen::yield_from::<{}, {}, _, _, _>(&__g, |__e| -> PyResult<{}> {{ Ok({conv}) }}, |__s: {}| -> PyResult<{}> {{ Ok({conv_send}) }})? }}",
+                item.rust(),
+                sent.rust(),
+                item.rust(),
+                sent.rust(),
+                s2.rust()
+            );
+        }
+        let el = pyfast_infer::native::iter_elem(vt).unwrap_or(Ty::Obj);
+        let one = format!("let _ = rt::gen::yield_::<{}, {}>({})?;", item.rust(), sent.rust(), coll::convert("__x", el, item));
+        if vt == Ty::Obj {
+            format!("{{ let mut __it = rt::py::iter(&{})?; while let Some(__x) = __it.next()? {{ {one} }} rt::py::none() }}", borrow(&c))
+        } else {
+            format!("{{ for __x in {} {{ {one} }} }}", coll::iter_vec(&c, vt))
+        }
+    }
+
+    /// `gen.send(v)` / `gen.throw(e)` / `gen.close()` on a native generator.
+    pub(crate) fn gen_method(&mut self, o: &str, (_, s, _): (Ty, Ty, Ty), name: &str, vals: &[(String, Ty)]) -> String {
+        match name {
+            "send" => format!("{o}.send({})?", coll::convert(&vals[0].0, vals[0].1, s)),
+            "throw" => {
+                let (c, t) = &vals[0];
+                let e = if *t == Ty::Obj {
+                    format!("rt::py::raise(&{})", borrow(c))
+                } else if t.class_id().is_some() {
+                    format!("{c}.into_exc()")
+                } else {
+                    c.clone()
+                };
+                format!("{o}.throw({e})?")
+            }
+            _ => format!("{o}.close()?"),
+        }
+    }
 }

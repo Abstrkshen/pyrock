@@ -82,6 +82,12 @@ pub struct Spec {
     pub maybe_unbound: HashSet<String>,
     /// Lower bound on the return type requested by callers.
     pub ret_floor: Slot,
+    /// Generators: what `send` passes (from `.send(v)` calls on its values).
+    pub gen_send: Slot,
+    /// Generators: what the body returns (`return v`; `None` falling off the end).
+    pub gen_ret: Slot,
+    /// Generators: whether the body can fall off its end.
+    pub gen_falls: bool,
 }
 
 /// A module-level variable kept in a global cell: (unit, name).
@@ -122,11 +128,15 @@ impl<'m> Program<'m> {
         }
         // A generator: its slot holds the join of what it yields.
         if self.module.funcs[s.key.func].is_generator {
-            return Some(Ty::gen(match s.ret {
+            let y = match s.ret {
                 Slot::Known(t) | Slot::Conflict(t, _) => t,
                 Slot::Boxed(..) => Ty::Obj,
                 Slot::Unknown => Ty::never(),
-            }));
+            };
+            if self.module.funcs[s.key.func].is_async {
+                return Some(Ty::agen(y));
+            }
+            return Some(Ty::gen3(y, gen_send_ty(s), gen_ret_ty(s)));
         }
         let r = match (s.ret, s.falls_through) {
             (Slot::Known(Ty::None), _) | (Slot::Unknown, true) => Some(Ty::None),
@@ -295,7 +305,21 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
         let mut i = 0;
         while i < prog.specs.len() {
             let mut requests = Vec::new();
-            let (locals, ret, falls, gassigns, ret_widen, (fassigns, news)) = analyze(&prog, i, &mut requests, None);
+            let (locals, ret, falls, gassigns, ret_widen, Extra { fassigns, news, gen_ret, send_widen, gen_falls }) = analyze(&prog, i, &mut requests, None);
+            prog.specs[i].gen_falls = gen_falls;
+            for (key, t) in send_widen {
+                if let Some(&j) = prog.index.get(&key) {
+                    let floor = prog.specs[j].gen_send.join(t, prog.boxing());
+                    if floor != prog.specs[j].gen_send {
+                        prog.specs[j].gen_send = floor;
+                        changed = true;
+                    }
+                }
+            }
+            if prog.specs[i].gen_ret != gen_ret {
+                prog.specs[i].gen_ret = gen_ret;
+                changed = true;
+            }
             for (key, t) in fassigns {
                 let boxing = prog.boxing();
                 let slot = prog.fields.entry(key).or_insert(Slot::Unknown);
@@ -523,7 +547,7 @@ fn add_spec(prog: &mut Program, key: SpecKey) {
     let maybe_unbound = definite::maybe_unbound(f);
     let id = prog.specs.len();
     prog.index.insert(key.clone(), id);
-    prog.specs.push(Spec { id, key, mangled, ret: Slot::Unknown, falls_through: true, analyzed: false, locals, maybe_unbound, ret_floor: Slot::Unknown });
+    prog.specs.push(Spec { id, key, mangled, ret: Slot::Unknown, falls_through: true, analyzed: false, locals, maybe_unbound, ret_floor: Slot::Unknown, gen_send: Slot::Unknown, gen_ret: Slot::Unknown, gen_falls: true });
 }
 
 type Requests = Vec<(SpecKey, Span)>;
@@ -535,7 +559,7 @@ fn analyze(
     idx: usize,
     requests: &mut Requests,
     diags: Option<&mut Vec<Diagnostic>>,
-) -> (BTreeMap<String, Slot>, Slot, bool, Vec<(GlobalKey, Ty)>, Vec<(SpecKey, Ty)>, (Vec<((ClassId, String), Ty)>, Vec<(ClassId, Option<Ty>)>)) {
+) -> (BTreeMap<String, Slot>, Slot, bool, Vec<(GlobalKey, Ty)>, Vec<(SpecKey, Ty)>, Extra) {
     let spec = &prog.specs[idx];
     let mut gassigns;
     let mut ret_widen;
@@ -551,19 +575,33 @@ fn analyze(
     let mut ret;
     let mut falls;
     let mut guard = 0;
+    let cur_send = gen_send_ty(spec);
+    let mut gen_ret;
+    let mut send_widen;
+    let mut gen_falls = true;
     loop {
         let before = locals.clone();
         ret = spec.ret_floor;
-        let mut ctx = Ctx { prog, locals: &locals, requests: Some(requests), diags: None, gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![], generator: f.is_generator, yields: vec![] };
+        gen_ret = Slot::Unknown;
+        let mut ctx = Ctx { prog, locals: &locals, requests: Some(requests), diags: None, gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![], generator: f.is_generator, yields: vec![], cur_send, gen_returns: vec![], send_widen: vec![] };
         let mut assigns = Vec::new();
         falls = ctx.block(&f.body, &mut assigns, &mut ret);
-        // A generator's "return type" is what it yields.
+        // A generator's "return type" is what it yields; what it returns is
+        // `gen_ret` (`None` when it can fall off the end).
         if f.is_generator {
             for t in std::mem::take(&mut ctx.yields) {
                 ret = ret.join(t, prog.boxing());
             }
+            gen_falls = falls;
+            if falls {
+                ctx.gen_returns.push(Ty::None);
+            }
+            for t in std::mem::take(&mut ctx.gen_returns) {
+                gen_ret = gen_ret.join(t, prog.boxing());
+            }
             falls = true;
         }
+        send_widen = std::mem::take(&mut ctx.send_widen);
         gassigns = std::mem::take(&mut ctx.gassigns);
         ret_widen = std::mem::take(&mut ctx.ret_widen);
         fassigns = std::mem::take(&mut ctx.fassigns);
@@ -583,10 +621,39 @@ fn analyze(
     if let Some(d) = diags {
         let mut ret2 = Slot::Unknown;
         let mut sink = Vec::new();
-        let mut ctx = Ctx { prog, locals: &locals, requests: None, diags: Some(d), gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![], generator: f.is_generator, yields: vec![] };
+        let mut ctx = Ctx { prog, locals: &locals, requests: None, diags: Some(d), gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![], generator: f.is_generator, yields: vec![], cur_send, gen_returns: vec![], send_widen: vec![] };
         ctx.block(&f.body, &mut sink, &mut ret2);
     }
-    (locals, ret, falls, gassigns, ret_widen, (fassigns, news_acc))
+    (locals, ret, falls, gassigns, ret_widen, Extra { fassigns, news: news_acc, gen_ret, send_widen, gen_falls })
+}
+
+/// More results of `analyze`.
+struct Extra {
+    fassigns: Vec<((ClassId, String), Ty)>,
+    news: Vec<(ClassId, Option<Ty>)>,
+    gen_ret: Slot,
+    send_widen: Vec<(SpecKey, Ty)>,
+    gen_falls: bool,
+}
+
+/// What a generator's `yield` expressions evaluate to: `None` (from `next`)
+/// or what `send` passes.
+pub fn gen_send_ty(s: &Spec) -> Ty {
+    match s.gen_send {
+        Slot::Known(t) => native::ty_join(Ty::None, t, true).unwrap_or(Ty::Obj),
+        Slot::Boxed(..) => Ty::Obj,
+        _ => Ty::None,
+    }
+}
+
+/// What a generator returns (`return v`; `None` when it falls off the end).
+pub fn gen_ret_ty(s: &Spec) -> Ty {
+    match s.gen_ret {
+        Slot::Known(t) => t,
+        Slot::Boxed(..) => Ty::Obj,
+        // Not known yet (or never returns): the bottom type, absorbed by joins.
+        _ => Ty::never(),
+    }
 }
 
 struct Ctx<'a, 'p> {
@@ -611,6 +678,12 @@ struct Ctx<'a, 'p> {
     generator: bool,
     /// Types of the values yielded in this pass.
     yields: Vec<Ty>,
+    /// The type of `yield` expressions in this generator (what `send` passes).
+    cur_send: Ty,
+    /// Types of `return` values in this generator.
+    gen_returns: Vec<Ty>,
+    /// Send types callers need from generator functions (`g.send(v)`).
+    send_widen: Vec<(SpecKey, Ty)>,
 }
 
 /// How a `CallObj` node executes.
@@ -835,9 +908,22 @@ impl Ctx<'_, '_> {
                 // An `async def` call is a coroutine (a generator call a
                 // generator): widen what its body returns (yields).
                 let callee = &self.prog.module.funcs[*fid];
-                let t = if callee.is_generator {
-                    match t.iter_elem().filter(|_| t.as_comp().is_some_and(|c| matches!(c, Comp::Gen(_)))) {
-                        Some(r) => r,
+                let t = if callee.is_generator && callee.is_async {
+                    match t.as_agen() {
+                        Some(y) => y,
+                        None => return,
+                    }
+                } else if callee.is_generator {
+                    match t.as_gen() {
+                        Some((y, s, _)) => {
+                            // What callers send to it (`g.send(v)`).
+                            if let Some(args) = tys.clone() {
+                                if s != Ty::None {
+                                    self.send_widen.push((SpecKey { func: *fid, args }, s));
+                                }
+                            }
+                            y
+                        }
                         None => return,
                     }
                 } else if callee.is_async {
@@ -988,11 +1074,14 @@ impl Ctx<'_, '_> {
             StmtKind::Expr(e) => {
                 self.expr(e);
             }
+            // `return v` ends a generator; `v` is what `yield from` produces.
             StmtKind::Return(v) if self.generator => {
-                if let Some(e) = v {
-                    if self.expr(e) != Some(Ty::None) {
-                        self.report(Diagnostic::error("P100", e.span, "`return <value>` in a generator is not supported yet").note("the value would be StopIteration.value; return without a value"));
-                    }
+                let t = match v {
+                    Some(e) => self.expr(e),
+                    None => Some(Ty::None),
+                };
+                if let Some(t) = t {
+                    self.gen_returns.push(t);
                 }
                 return false;
             }
@@ -1043,6 +1132,11 @@ impl Ctx<'_, '_> {
                     }
                 }
                 assigns.push((var.clone(), Ty::Int));
+                self.block(body, assigns, ret);
+            }
+            StmtKind::ForIter { var, iter, body, is_async: true } if self.expr(iter).is_some_and(|t| t.as_agen().is_some()) => {
+                let y = self.expr(iter).and_then(|t| t.as_agen()).unwrap();
+                assigns.push((var.clone(), y));
                 self.block(body, assigns, ret);
             }
             StmtKind::ForIter { var, iter, body, is_async: true } => {
@@ -1969,7 +2063,22 @@ impl Ctx<'_, '_> {
                     None => Ty::None,
                 };
                 self.yields.push(t);
-                Some(Ty::None)
+                Some(self.cur_send)
+            }
+            ExprKind::YieldFrom(v) => {
+                let t = self.expr(v)?;
+                if let Some((y, s, r)) = t.as_gen() {
+                    self.yields.push(y);
+                    // Values sent to this generator are forwarded to `v`.
+                    if self.cur_send != Ty::None && native::ty_join(s, self.cur_send, self.boxing()) != Some(s) {
+                        let joined = native::ty_join(s, self.cur_send, self.boxing()).unwrap_or(Ty::Obj);
+                        self.widen(v, Ty::gen3(y, joined, r));
+                    }
+                    return Some(r);
+                }
+                let el = native::iter_elem(t)?;
+                self.yields.push(el);
+                Some(if t == Ty::Obj { Ty::Obj } else { Ty::None })
             }
             // `math.pi`, `from math import tau`: native float constants.
             ExprKind::GetAttr { .. } | ExprKind::Slot(_) if self.prog.math_const_of(e).is_some() => Some(Ty::Float),
@@ -2704,6 +2813,9 @@ impl<'m> Program<'m> {
             news: vec![],
             generator: self.module.funcs[spec.key.func].is_generator,
             yields: vec![],
+            cur_send: gen_send_ty(spec),
+            gen_returns: vec![],
+            send_widen: vec![],
         }
     }
 }

@@ -80,6 +80,8 @@ impl<T> crate::coll::PyEq for Coro<T> {
 
 #[cfg(feature = "python")]
 pub use bridge::{aenter, aexit, aiter, await_obj, AIter};
+#[cfg(feature = "python")]
+pub(crate) use bridge::{pop_agen, push_agen};
 
 #[cfg(not(feature = "python"))]
 pub fn await_obj<O>(_: O) -> PyResult<O> {
@@ -103,7 +105,10 @@ mod bridge {
 
     thread_local! {
         /// Yielders of the coroutine bodies currently running (innermost last).
-        static CUR: RefCell<Vec<*const Yielder<In, Obj>>> = const { RefCell::new(Vec::new()) };
+        /// Where `await` of a Python object goes, innermost last: a coroutine
+        /// body to suspend (`Some`), or an async generator body (`None`),
+        /// which yields the awaitable to its consumer instead.
+        static CUR: RefCell<Vec<Option<*const Yielder<In, Obj>>>> = const { RefCell::new(Vec::new()) };
         static DRIVER: RefCell<Option<Obj>> = const { RefCell::new(None) };
     }
 
@@ -123,16 +128,28 @@ async def _drive(step):
     /// `await obj` inside a compiled coroutine: suspend the body until the
     /// event loop has awaited `obj`.
     pub fn await_obj(o: Obj) -> PyResult<Obj> {
-        let Some(y) = CUR.with(|c| c.borrow_mut().pop()) else {
+        let Some(target) = CUR.with(|c| c.borrow_mut().pop()) else {
             return Err(Exc::new("RuntimeError", "pyfast: `await` of a Python object outside a coroutine run by an event loop"));
         };
         crate::io::flush();
-        // SAFETY: the yielder belongs to the body running on this stack; it
-        // lives until that body returns, which cannot happen before this call
-        // does.
-        let r = unsafe { &*y }.suspend(o);
-        CUR.with(|c| c.borrow_mut().push(y));
+        let r = match target {
+            // SAFETY: the yielder belongs to the body running on this stack; it
+            // lives until that body returns, which cannot happen before this
+            // call does.
+            Some(y) => unsafe { &*y }.suspend(o),
+            None => crate::agen::await_in_body(o),
+        };
+        CUR.with(|c| c.borrow_mut().push(target));
         r
+    }
+
+    /// An async generator body starts or resumes running: its awaits yield.
+    pub(crate) fn push_agen() {
+        CUR.with(|c| c.borrow_mut().push(None));
+    }
+
+    pub(crate) fn pop_agen() {
+        CUR.with(|c| c.borrow_mut().pop());
     }
 
     /// `async with cm`: await `__aenter__`.
@@ -203,7 +220,7 @@ async def _drive(step):
         fn to_py(&self) -> PyResult<Obj> {
             let c = self.clone();
             let co: Co = Stackful::new(move |y: &Yielder<In, Obj>, _start: In| {
-                CUR.with(|s| s.borrow_mut().push(y as *const _));
+                CUR.with(|s| s.borrow_mut().push(Some(y as *const _)));
                 let r = c.run().and_then(|v| v.to_py());
                 CUR.with(|s| s.borrow_mut().pop());
                 r

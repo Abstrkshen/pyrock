@@ -82,7 +82,7 @@ pub fn ty_join(a: Ty, b: Ty, boxing: bool) -> Option<Ty> {
             Some(Ty::tuple_var(join_all(xs.iter().copied().chain([y]), boxing)?))
         }
         (Comp::TupleVar(x), Comp::TupleVar(y)) => Some(Ty::tuple_var(elem(x, y)?)),
-        (Comp::Gen(x), Comp::Gen(y)) => Some(Ty::gen(elem(x, y)?)),
+        (Comp::Gen(x, sx, rx), Comp::Gen(y, sy, ry)) => Some(Ty::gen3(elem(x, y)?, elem(sx, sy)?, elem(rx, ry)?)),
         // Two records join key by key. The keys both literals start with (the
         // common prefix) stay required; every other key is optional, filled
         // in each value's own insertion order, so printing and iteration
@@ -159,7 +159,7 @@ pub fn record_field_ok(t: Ty) -> bool {
 }
 
 pub fn is_gen(t: Ty) -> bool {
-    matches!(t.as_comp(), Some(Comp::Gen(_)))
+    matches!(t.as_comp(), Some(Comp::Gen(..)))
 }
 
 fn int_like(t: Ty) -> bool {
@@ -308,6 +308,25 @@ pub fn method(recv: Ty, name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing
         return err(format!("{name}() takes no keyword arguments natively"));
     }
     let elem_join = |e: Ty, t: Ty| ty_join(e, t, boxing).or(boxing.then_some(Ty::Obj));
+    // Generator methods: `send` joins what it passes into the generator's send type.
+    if let Some((y, sent, r)) = recv.as_gen() {
+        return match name {
+            "send" => {
+                check!(arity(1, 1));
+                let s2 = ty_join(sent, args[0], boxing).or(boxing.then_some(Ty::Obj))?;
+                Some(Ok(Method { ret: y, widen: (s2 != sent).then(|| Ty::gen3(y, s2, r)) }))
+            }
+            "throw" => {
+                check!(arity(1, 1));
+                m(y)
+            }
+            "close" => {
+                check!(arity(0, 0));
+                m(Ty::None)
+            }
+            _ => None,
+        };
+    }
     if recv == Ty::Str {
         let str_args = |k: usize| args.iter().take(k).all(|t| base(*t) == Ty::Str || *t == Ty::Obj);
         return match name {

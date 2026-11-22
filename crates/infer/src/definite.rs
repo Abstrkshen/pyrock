@@ -145,7 +145,7 @@ fn expr(e: &Expr, cur: &Set, out: &mut HashSet<String>) {
             expr(left, cur, out);
             expr(right, cur, out);
         }
-        ExprKind::Unary { operand, .. } | ExprKind::Await(operand) | ExprKind::Yield(Some(operand)) => expr(operand, cur, out),
+        ExprKind::Unary { operand, .. } | ExprKind::Await(operand) | ExprKind::Yield(Some(operand)) | ExprKind::YieldFrom(operand) => expr(operand, cur, out),
         ExprKind::Compare { first, rest } => {
             expr(first, cur, out);
             for (_, c) in rest {

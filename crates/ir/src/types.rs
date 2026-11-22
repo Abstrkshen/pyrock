@@ -71,8 +71,11 @@ pub enum Comp {
     ExtStruct(u32, u32, &'static str),
     /// A coroutine of a compiled `async def` returning `T` (`rt::aio::Coro<T>`).
     Coro(Ty),
-    /// A generator yielding `T` (`rt::gen::Gen<T>`).
-    Gen(Ty),
+    /// A generator yielding `T`, receiving `S` from `send` (always includes
+    /// `None`: `next` sends it) and returning `R` (`rt::gen::Gen<T, S, R>`).
+    Gen(Ty, Ty, Ty),
+    /// An async generator yielding `T` (`rt::agen::AGen<T>`).
+    AGen(Ty),
     /// `int | float`: a number that is an int on some paths and a float on
     /// others (`rt::Num`).
     Num,
@@ -168,8 +171,13 @@ impl Ty {
             Comp::Union(ts) => (join(ts, Ty::py_name, " | "), format!("U_{}", join(ts, Ty::mangle, "_")), format!("u_{}", join(ts, Ty::mangle, "_"))),
             Comp::ExtStruct(_, _, name) => (name.to_string(), name.to_string(), name.to_string()),
             Comp::Coro(t) => (format!("Coroutine[{}]", t.py_name()), format!("rt::aio::Coro<{}>", t.rust()), format!("coro_{}", t.mangle())),
-            Comp::Gen(t) => (format!("Generator[{}]", t.py_name()), format!("rt::gen::Gen<{}>", t.rust()), format!("gen_{}", t.mangle())),
+            Comp::Gen(t, s, r) => (
+                if *s == Ty::None && *r == Ty::None { format!("Generator[{}]", t.py_name()) } else { format!("Generator[{}, {}, {}]", t.py_name(), s.py_name(), r.py_name()) },
+                format!("rt::gen::Gen<{}, {}, {}>", t.rust(), s.rust(), r.rust()),
+                format!("gen_{}_{}_{}", t.mangle(), s.mangle(), r.mangle()),
+            ),
             Comp::Num => ("int | float".to_string(), "rt::Num".to_string(), "num".to_string()),
+            Comp::AGen(t) => (format!("AsyncGenerator[{}]", t.py_name()), format!("rt::agen::AGen<{}>", t.rust()), format!("agen_{}", t.mangle())),
             Comp::Record(fs) => {
                 let mangle = format!("rec_{}", fs.iter().map(|f| format!("{}{}_{}", f.key.len(), if f.optional { "o" } else { "" }, f.ty.mangle())).collect::<Vec<_>>().join("_"));
                 // Keys can be any text: the Rust name is a hash of keys and types.
@@ -269,6 +277,17 @@ impl Ty {
         i.entries.iter().enumerate().filter(|(_, e)| matches!(e.comp, Comp::Record(_))).map(|(k, _)| Ty::C(TyId(k as u32))).collect()
     }
 
+    pub fn agen(t: Ty) -> Ty {
+        Ty::comp(Comp::AGen(t))
+    }
+
+    pub fn as_agen(self) -> Option<Ty> {
+        match self.as_comp() {
+            Some(Comp::AGen(t)) => Some(t),
+            _ => None,
+        }
+    }
+
     pub fn num() -> Ty {
         Ty::comp(Comp::Num)
     }
@@ -283,7 +302,20 @@ impl Ty {
     }
 
     pub fn gen(t: Ty) -> Ty {
-        Ty::comp(Comp::Gen(t))
+        Ty::comp(Comp::Gen(t, Ty::None, Ty::None))
+    }
+
+    /// A generator yielding `t`, receiving `s` and returning `r`.
+    pub fn gen3(t: Ty, s: Ty, r: Ty) -> Ty {
+        Ty::comp(Comp::Gen(t, s, r))
+    }
+
+    /// (yield, send, return) types of a generator.
+    pub fn as_gen(self) -> Option<(Ty, Ty, Ty)> {
+        match self.as_comp() {
+            Some(Comp::Gen(t, s, r)) => Some((t, s, r)),
+            _ => None,
+        }
     }
 
     pub fn coro(t: Ty) -> Ty {
@@ -352,7 +384,7 @@ impl Ty {
         match self.as_comp()? {
             Comp::List(e) | Comp::Set(e) | Comp::TupleVar(e) => Some(e),
             Comp::Dict(k, _) | Comp::View(ViewKind::Keys, k, _) => Some(k),
-            Comp::Gen(e) => Some(e),
+            Comp::Gen(e, _, _) => Some(e),
             Comp::Record(_) => Some(Ty::Str),
             Comp::View(ViewKind::Values, _, v) => Some(v),
             Comp::View(ViewKind::Items, k, v) => Some(Ty::tuple(vec![k, v])),
@@ -376,7 +408,7 @@ impl Ty {
             Some(Comp::List(_) | Comp::Dict(..) | Comp::Set(_) | Comp::Class(..)) => true,
             Some(Comp::Tuple(ts)) => ts.iter().any(|t| t.has_mutable()),
             Some(Comp::TupleVar(t) | Comp::Opt(t)) => t.has_mutable(),
-            Some(Comp::View(..) | Comp::Union(_) | Comp::ExtStruct(..) | Comp::Coro(_) | Comp::Gen(_) | Comp::Record(_)) => true,
+            Some(Comp::View(..) | Comp::Union(_) | Comp::ExtStruct(..) | Comp::Coro(_) | Comp::Gen(..) | Comp::AGen(_) | Comp::Record(_)) => true,
             _ => false,
         }
     }

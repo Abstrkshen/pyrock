@@ -71,8 +71,7 @@ turns them into errors.
 | Construct | Rewrite |
 |---|---|
 | Class with a CPython base class, a metaclass or a class decorator other than `@dataclass` | Keep it in an imported `.py` (the module falls back to CPython, P220) |
-| Generator `send`/`throw`, `x = yield`, `return value` in a generator | Pass state through an object or a closure |
-| Async generators (`async def` with `yield`) | A class with `__aiter__`/`__anext__`, or collect into a list |
+| Async comprehensions (`[x async for x in g]`) | An `async for` loop |
 | Non-literal default of a top-level function (`def f(x=[])`) | `def f(x=None): if x is None: x = []` |
 | Relative imports, `import *`, imports inside functions | Absolute top-level imports |
 

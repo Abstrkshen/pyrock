@@ -411,8 +411,11 @@ pub enum ExprKind {
     Unary { op: UnaryOp, operand: Box<Expr> },
     /// `await e`: runs a native coroutine inline, or suspends on a Python awaitable.
     Await(Box<Expr>),
-    /// `yield [e]` in a generator body (its value is `None`: `send` is not supported).
+    /// `yield [e]` in a generator body: the value sent by `send` (`None` for `next`).
     Yield(Option<Box<Expr>>),
+    /// `yield from e`: yields what `e` yields (forwarding `send`/`throw` to a
+    /// generator); its value is the generator's return value.
+    YieldFrom(Box<Expr>),
     /// Chained comparison `a < b <= c`; each middle operand is evaluated once.
     Compare { first: Box<Expr>, rest: Vec<(CmpOp, Expr)> },
     BoolOp { op: BoolOpKind, values: Vec<Expr> },

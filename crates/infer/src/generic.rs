@@ -404,7 +404,7 @@ impl State<'_> {
                 Sym::Con(*ty)
             }
             ExprKind::Slot(_) | ExprKind::PyBuiltin(_) => Sym::Con(Ty::Obj),
-            ExprKind::Await(v) | ExprKind::Yield(Some(v)) => {
+            ExprKind::Await(v) | ExprKind::Yield(Some(v)) | ExprKind::YieldFrom(v) => {
                 self.expr(v, cx);
                 Sym::Con(Ty::Obj)
             }

@@ -1034,3 +1034,8 @@ fn call_special<'py>(b: &Bound<'py, PyAny>, name: &str, args: Vec<Bound<'py, PyA
         Err(_) => b.getattr(name)?.call1(PyTuple::new(py, args)?),
     }
 }
+
+/// `o is None`
+pub fn is_none(o: &Obj) -> bool {
+    Python::attach(|py| o.bind(py).is_none())
+}

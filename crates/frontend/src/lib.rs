@@ -1056,9 +1056,6 @@ impl<'l> Lowerer<'l> {
         let class = self.cur_class.as_ref().map(|c| c.0);
         let is_async = st["is_async"].as_bool().unwrap_or(false);
         let is_generator = arr(st, "body").iter().any(contains_yield);
-        if is_async && is_generator {
-            self.unsupported(sp, "async generator", "collect the items in a list, or write a class with `__aiter__`/`__anext__`");
-        }
         Function { id, name: self.qual(&name), params, locals, body, span: sp, is_module: false, unit: self.unit, param_ann, ret_ann, class, sig, parent: None, captures: vec![], cells: vec![], is_async, is_generator }
     }
 
@@ -1073,14 +1070,6 @@ impl<'l> Lowerer<'l> {
     fn lower_stmt(&mut self, st: &Value) -> Option<Stmt> {
         let sp = self.span(st);
         let kind = match ty(st) {
-            // `yield from it` (as a statement): `for x in it: yield x`.
-            "Expr" if ty(&st["value"]) == "YieldFrom" => {
-                let iter = self.lower_expr(&st["value"]["value"])?;
-                let var = self.fresh_local();
-                let item = Expr { kind: ExprKind::Local(var.clone()), span: sp };
-                let body = vec![Stmt { kind: StmtKind::Expr(Expr { kind: ExprKind::Yield(Some(Box::new(item))), span: sp }), span: sp }];
-                StmtKind::ForIter { var, iter, body, is_async: false }
-            }
             "Expr" => StmtKind::Expr(self.lower_expr(&st["value"])?),
             "Assign" => {
                 let targets = arr(st, "targets");
@@ -1582,6 +1571,7 @@ impl<'l> Lowerer<'l> {
                 ExprKind::BinOp { op, left: Box::new(left), right: Box::new(right) }
             }
             "Await" => ExprKind::Await(Box::new(self.lower_expr(&e["value"])?)),
+            "YieldFrom" => ExprKind::YieldFrom(Box::new(self.lower_expr(&e["value"])?)),
             "Yield" => ExprKind::Yield(match e["value"].is_null() {
                 true => None,
                 false => Some(Box::new(self.lower_expr(&e["value"])?)),

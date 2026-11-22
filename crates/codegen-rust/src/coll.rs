@@ -80,7 +80,9 @@ pub(crate) fn convert(code: &str, from: Ty, to: Ty) -> String {
             code_out
         }
         // Generators and coroutines convert lazily (a wrapper converting each value).
-        (Some(Comp::Gen(a)), Some(Comp::Gen(b))) => format!("{code}.map(|__e| -> PyResult<{}> {{ Ok({}) }})", b.rust(), convert("__e", a, b)),
+        // (Generators of different send/return types do not meet: joins only
+        // change what they yield.)
+        (Some(Comp::Gen(a, _, _)), Some(Comp::Gen(b, _, _))) => format!("{code}.map(|__e| -> PyResult<{}> {{ Ok({}) }})", b.rust(), convert("__e", a, b)),
         (Some(Comp::Coro(a)), Some(Comp::Coro(b))) => format!("{code}.map(|__e| -> PyResult<{}> {{ Ok({}) }})", b.rust(), convert("__e", a, b)),
         (Some(Comp::List(a)), Some(Comp::List(b))) => {
             format!("rt::List::from_vec({code}.to_vec().into_iter().map(|__e| {}).collect())", convert("__e", a, b))
@@ -135,7 +137,7 @@ pub(crate) fn iter_vec(code: &str, t: Ty) -> String {
         Ty::Obj => format!("rt::py::to_vec(&{})?", borrow(code)),
         _ => match t.as_comp() {
             Some(Comp::Dict(..)) => format!("{}.keys_vec()", code),
-            Some(Comp::Gen(_)) => format!("{}.to_vec()?", code),
+            Some(Comp::Gen(..)) => format!("{}.to_vec()?", code),
             Some(Comp::Tuple(ts)) => {
                 if ts.is_empty() {
                     return "Vec::<rt::Never>::new()".into();
@@ -457,9 +459,10 @@ impl FnEmitter<'_, '_> {
                 (format!("while let Some(__v) = __c{n}.next()?"), "__v".into())
             }
             // Lazily: a generator may be infinite.
-            Some(Comp::Gen(_)) => {
-                writeln!(out, "{ind}let __c{n} = {src};").unwrap();
-                (format!("while let Some(__v) = __c{n}.next()?"), "__v".into())
+            // The loop owns the generator: leaving it (also by `break`) closes it.
+            Some(Comp::Gen(..)) => {
+                let _ = n;
+                (format!("for __v in rt::gen::GenIter({src})"), "__v?".into())
             }
             _ => {
                 writeln!(out, "{ind}let __c{n} = {};", iter_vec(&src, it)).unwrap();
@@ -478,6 +481,9 @@ impl FnEmitter<'_, '_> {
         let vals: Vec<(String, Ty)> = args.iter().map(|a| self.expr(a)).collect();
         let kw = |k: &str| kwargs.iter().position(|(n, _)| n == k);
         let kwv: Vec<(String, Ty)> = kwargs.iter().map(|(_, v)| self.expr(v)).collect();
+        if let Some(g) = ot.as_gen() {
+            return self.gen_method(&o, g, name, &vals);
+        }
         let b = |c: &str| borrow(c).to_string();
         let int = |v: &(String, Ty)| crate::as_int(&v.0, v.1);
         if recv == Ty::Str {

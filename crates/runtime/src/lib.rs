@@ -8,6 +8,8 @@
 //! whose exact result does not fit raises `OverflowError` instead of
 //! wrapping or silently changing type. Arbitrary precision is milestone M4.
 
+#[cfg(feature = "python")]
+pub mod agen;
 pub mod aio;
 pub mod coll;
 pub mod conv;
