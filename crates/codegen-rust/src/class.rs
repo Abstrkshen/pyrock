@@ -57,6 +57,15 @@ pub(crate) fn emit_classes(prog: &Program, plan: &Plan, out: &mut String) {
         writeln!(out, "    pub fn is(&self, o: &Self) -> bool {{\n        std::rc::Rc::ptr_eq(&self.0, &o.0)\n    }}").unwrap();
         writeln!(out, "}}\n").unwrap();
         writeln!(out, "impl Default for {r} {{\n    fn default() -> Self {{\n        Self::new()\n    }}\n}}\n").unwrap();
+        if m.exception_base(c).is_some() {
+            writeln!(
+                out,
+                "impl {r} {{\n    /// Raise this instance as a Python exception.\n    pub fn into_exc(&self) -> rt::Exc {{\n        let mut x = rt::Exc::new({:?}, rt::conv::str_of(self).to_string());\n        x.origin = Some(std::rc::Rc::new(self.clone()));\n        x\n    }}\n}}\n",
+                // CPython prints `__main__` classes without the module.
+                if cd.unit == 0 { short.to_string() } else { format!("{module_name}.{short}") }
+            )
+            .unwrap();
+        }
 
         // repr / str
         let default_repr = format!("rt::Str::from(format!(\"<{module_name}.{short} object at {{:#x}}>\", std::rc::Rc::as_ptr(&self.0) as usize))");
@@ -165,6 +174,35 @@ impl FnEmitter<'_, '_> {
         let t = self.class_ty(c);
         let rust = t.rust();
         match self.prog.module.find_method(c, "__init__").cloned() {
+            Some(m) if self.prog.module.exception_base(c).is_some() && kwargs.is_empty() => {
+                // BaseException.__new__ keeps the arguments: str(e) is '' for none,
+                // str(a) for one, the tuple's repr for several -- unless __init__
+                // calls super().__init__ with another message.
+                let (bound, _) = self.prog.bound_args(m.func, true, args, kwargs, e.span).expect("binding checked by inference");
+                let vals: Vec<(String, Ty)> = bound.iter().map(|b| self.expr(b)).collect();
+                let key = SpecKey { func: m.func, args: std::iter::once(t).chain(vals.iter().map(|v| v.1)).collect() };
+                let callee = self.prog.spec(&key).expect("init spec").mangled.clone();
+                let mut lets = String::new();
+                for (i, (c, _)) in vals.iter().enumerate() {
+                    write!(lets, "let __a{i} = {c}; ").unwrap();
+                }
+                let read = |i: usize| if vals[i].1.is_clone() { format!("__a{i}.clone()") } else { format!("__a{i}") };
+                let n = args.len();
+                let msg = match n {
+                    0 => "rt::Str::from(\"\")".to_string(),
+                    1 => crate::to_str(&read(0), vals[0].1),
+                    _ => {
+                        let parts: Vec<String> = (0..n).map(|i| format!("rt::conv::repr_of(&{}).to_string()", read(i))).collect();
+                        format!("rt::Str::from(format!(\"({{}})\", [{}].join(\", \")))", parts.join(", "))
+                    }
+                };
+                let call_args: Vec<String> = (0..vals.len()).map(|i| format!("__a{i}")).collect();
+                format!(
+                    "{{ let __o = {rust}::new(); {lets}__o.0.borrow_mut().exc_msg = Some({msg}); let _ = {callee}(__o.clone(){}{})?; __o }}",
+                    if call_args.is_empty() { "" } else { ", " },
+                    call_args.join(", ")
+                )
+            }
             Some(m) => {
                 let (bound, order) = self.prog.bound_args(m.func, true, args, kwargs, e.span).expect("binding checked by inference");
                 let init = self.call_bound(m.func, vec![("__o.clone()".into(), t)], &bound, &order);

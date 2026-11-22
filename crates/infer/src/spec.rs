@@ -473,6 +473,14 @@ pub enum CallClass {
     Construct(ClassId),
 }
 
+/// `x` in `type(x)`.
+pub fn type_call_arg(e: &Expr) -> Option<&Expr> {
+    match &e.kind {
+        ExprKind::CallObj { func, args, kwargs } if matches!(&func.kind, ExprKind::PyBuiltin(n) if n == "type") && args.len() == 1 && kwargs.is_empty() => Some(&args[0]),
+        _ => None,
+    }
+}
+
 /// Whether a type contains an instance of a native class.
 pub fn has_class(t: Ty) -> bool {
     match t.as_comp() {
@@ -801,7 +809,12 @@ impl Ctx<'_, '_> {
                         }
                     }
                     if let Some(n) = &h.name {
-                        assigns.push((n.clone(), Ty::exc()));
+                        // `except MyError as e` binds the native instance.
+                        let t = match h.types.as_slice() {
+                            [ExcType::Native(c)] => self.class_ty(*c),
+                            _ => Ty::exc(),
+                        };
+                        assigns.push((n.clone(), t));
                     }
                     falls |= self.block(&h.body, assigns, ret);
                 }
@@ -820,7 +833,8 @@ impl Ctx<'_, '_> {
             StmtKind::Raise(e) => {
                 if let Some(e) = e {
                     if let Some(t) = self.expr(e) {
-                        if t != Ty::Obj && t != Ty::exc() {
+                        let native_exc = t.class_id().is_some_and(|c| self.prog.module.exception_base(c).is_some());
+                        if t != Ty::Obj && t != Ty::exc() && !native_exc {
                             self.report(Diagnostic::error("P301", e.span, "exceptions must derive from BaseException").note("CPython would raise TypeError here"));
                         }
                     }
@@ -1009,6 +1023,21 @@ impl Ctx<'_, '_> {
                 let kwtys: Option<Vec<(String, Ty)>> = kwargs.iter().map(|(k, v)| self.expr(v).map(|t| (k.clone(), t))).collect();
                 let (Some(a), Some(k)) = (argtys, kwtys) else { return CallClass::Pending };
                 if name == "isinstance" && a.len() == 2 {
+                    // Native classes: decided by the class hierarchy.
+                    let natives: Option<Vec<ClassId>> = match &args[1].kind {
+                        ExprKind::ClassRef(c) => Some(vec![*c]),
+                        ExprKind::Tuple(items) if items.iter().all(|i| matches!(i.kind, ExprKind::ClassRef(_))) => {
+                            Some(items.iter().map(|i| if let ExprKind::ClassRef(c) = i.kind { c } else { unreachable!() }).collect())
+                        }
+                        _ => None,
+                    };
+                    if let Some(cs) = natives {
+                        if a[0] == Ty::Obj {
+                            return CallClass::Bridge;
+                        }
+                        let v = a[0].class_id().is_some_and(|c| cs.iter().any(|k| self.prog.module.is_subclass(c, *k)));
+                        return CallClass::StaticBool(v);
+                    }
                     let classes: Option<Vec<&str>> = match &args[1].kind {
                         ExprKind::PyBuiltin(c) => Some(vec![c.as_str()]),
                         ExprKind::Tuple(items) => items.iter().map(|i| if let ExprKind::PyBuiltin(c) = &i.kind { Some(c.as_str()) } else { None }).collect(),
@@ -1445,6 +1474,15 @@ impl Ctx<'_, '_> {
                     self.expr(a)?;
                 }
                 Some(Ty::exc())
+            }
+            ExprKind::GetAttr { obj, name } if name == "__name__" && type_call_arg(obj).is_some() => {
+                // `type(x).__name__` of a native value is known statically.
+                let t = self.expr(type_call_arg(obj).unwrap())?;
+                if t == Ty::Obj {
+                    self.expr(obj);
+                    return Some(Ty::Obj);
+                }
+                Some(Ty::Str)
             }
             ExprKind::GetAttr { obj, name } => {
                 let t = self.expr(obj)?;

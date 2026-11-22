@@ -47,9 +47,9 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 
 - [x] Classes with `__init__`, fields inferred from `self.x = ...`, methods, class attributes,
       `@property`/setters, `@staticmethod`, `@classmethod`, operator and builtin dunders
-- [ ] `@dataclass`
-- [ ] Single inheritance and `super()`
-- [ ] User-defined exception classes
+- [x] `@dataclass` (fields, literal defaults, `field(default_factory=list/dict/set)`, `__post_init__`, repr, ==)
+- [x] Single inheritance, method overriding, `super()`, `isinstance` with native classes
+- [x] User-defined exception classes (raise, `except MyError as e` with attributes, hierarchy matching)
 - [ ] Dynamic classes (metaclasses, `__getattr__`, `setattr`) fall back to CPython
 
 ## Phase 4: Closures and callbacks
@@ -248,3 +248,26 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
   `AttributeError` (warning P308).
 * A native instance passed to CPython code is error P230 until phase 4.
 * Test: `tests/differential/classes.py` (passes `--mode native-only`, no libpython).
+
+### Phase 3.2: dataclasses, inheritance, user exceptions (2026-11-22)
+
+* `@dataclass`: the frontend synthesizes `__init__(self, <annotated fields>)` (literal
+  defaults; `field(default_factory=list|dict|set)` becomes a fresh literal inserted at each
+  call, which is exactly the factory's semantics), calling `__post_init__` if defined.
+  Generated `repr` is `Item(name='pen', price=1.5, ...)` and `==` compares fields. The
+  `dataclasses` import is dropped when nothing uses it at run time.
+* Inheritance: subclasses get their own struct; inherited methods are specialized for the
+  subclass; `super().m(...)` resolves statically along the MRO; `isinstance(x, Shape)` is
+  decided from the class hierarchy.
+* Exceptions: a class deriving (directly or not) from a builtin exception raises as a
+  native `rt::Exc` whose `kind` is the class name (CPython prints `__main__` classes
+  unqualified) and whose `origin` holds the instance. `except MyError as e` binds the
+  typed instance back (`e.key`); matching uses `rt::exc::register`ed (class, base) pairs.
+  `str(e)` follows `BaseException`: the constructor's arguments (`''`, `str(a)`, or the
+  tuple's repr), replaced by `super().__init__(msg)`.
+* Each `except ... as e` binds its own local (CPython deletes the name after the handler),
+  so handlers with different exception types do not box `e`.
+* `type(x).__name__` of a native value is a native string. The planner skips code that a
+  specialization's types decide is dead (`if False`, `x is None` with `x: None`), so dead
+  branches no longer add boundaries or link libpython.
+* Test: `tests/differential/classes2.py` (passes `--mode native-only`).

@@ -307,7 +307,7 @@ struct Lowerer<'l> {
 }
 
 /// Modules whose imports only matter to type checkers.
-const ANNOTATION_ONLY_MODULES: &[&str] = &["typing", "typing_extensions", "__future__"];
+const ANNOTATION_ONLY_MODULES: &[&str] = &["typing", "typing_extensions", "__future__", "dataclasses"];
 
 /// Map an annotation to a type pyfast can use. Anything else (generics,
 /// unions, user classes) is accepted but does not constrain the value.
@@ -1054,14 +1054,30 @@ impl<'l> Lowerer<'l> {
                         }
                         _ => vec![self.exc_type(&h["type"])?],
                     };
-                    let (name, prefix) = match h["name"].as_str() {
-                        Some(n) => {
+                    // CPython deletes the `as` name when the handler ends, so each
+                    // handler's binding is its own local (its type can differ).
+                    let renamed = h["name"].as_str().filter(|n| self.locals.contains(*n) && !self.globals.contains(*n)).map(|n| {
+                        self.tmp += 1;
+                        let r = format!("__h{}_{n}", self.tmp);
+                        self.locals.insert(r.clone());
+                        self.extra_locals.push(r.clone());
+                        (n.to_string(), r)
+                    });
+                    let (name, prefix) = match (&renamed, h["name"].as_str()) {
+                        (Some((_, r)), _) => (Some(r.clone()), None),
+                        (None, Some(n)) => {
                             let (n, p) = self.local_target(n.to_string(), hsp);
                             (Some(n), p)
                         }
-                        None => (None, None),
+                        (None, None) => (None, None),
                     };
+                    if let Some((orig, r)) = &renamed {
+                        self.comp_scopes.push(HashMap::from([(orig.clone(), r.clone())]));
+                    }
                     let mut hbody = self.lower_block(arr(h, "body"));
+                    if renamed.is_some() {
+                        self.comp_scopes.pop();
+                    }
                     if let Some(p) = prefix {
                         hbody.insert(0, p);
                     }
@@ -1081,6 +1097,8 @@ impl<'l> Lowerer<'l> {
                     // `raise ValueError` raises an instance of the class.
                     if ty(e) == "Name" && self.builtin_exc(sstr(e, "id")) {
                         StmtKind::Raise(Some(Expr { kind: ExprKind::NewExc { kind: sstr(e, "id").to_string(), args: vec![] }, span: sp }))
+                    } else if let (true, Some(Binding::Class(c))) = (ty(e) == "Name" && !self.locals.contains(sstr(e, "id")), self.bindings.get(sstr(e, "id")).cloned()) {
+                        StmtKind::Raise(Some(Expr { kind: ExprKind::New { class: c, args: vec![], kwargs: vec![] }, span: sp }))
                     } else {
                         StmtKind::Raise(Some(self.lower_expr(e)?))
                     }
@@ -1523,6 +1541,9 @@ impl<'l> Lowerer<'l> {
         match base {
             Some(ClassBase::Native(b)) => {
                 let Some(m) = self.method_of(b, name) else {
+                    if name == "__init__" && self.exception_root(b).is_some() {
+                        return self.exc_super_init(self_name, args, sp);
+                    }
                     if name == "__init__" {
                         // object.__init__: nothing to do (arguments are still evaluated).
                         return Some(Expr { kind: ExprKind::Tuple(args), span: sp });
@@ -1546,18 +1567,8 @@ impl<'l> Lowerer<'l> {
                 Some(Expr { kind: ExprKind::Call { callee: Callee::Func(m.func), args, order }, span: sp })
             }
             Some(ClassBase::Exception(_)) if name == "__init__" => {
-                // BaseException.__init__(self, *args): the message is str(args[0]).
-                let Some(sn) = self_name else { return None };
-                let msg = match args.len() {
-                    0 => Expr { kind: ExprKind::Str(String::new()), span: sp },
-                    _ => Expr { kind: ExprKind::Call { callee: Callee::Builtin(Builtin::Str), args: vec![args[0].clone()], order: vec![] }, span: sp },
-                };
                 let _ = kwargs;
-                Some(Expr { kind: ExprKind::CallObj {
-                    func: Box::new(Expr { kind: ExprKind::GetAttr { obj: Box::new(Expr { kind: ExprKind::Local(sn), span: sp }), name: "__exc_init__".into() }, span: sp }),
-                    args: vec![msg],
-                    kwargs: vec![],
-                }, span: sp })
+                self.exc_super_init(self_name, args, sp)
             }
             _ if name == "__init__" => Some(Expr { kind: ExprKind::Tuple(args), span: sp }),
             _ => {
@@ -1565,6 +1576,40 @@ impl<'l> Lowerer<'l> {
                 None
             }
         }
+    }
+
+    /// The builtin exception at the root of `c`'s bases, if any.
+    fn exception_root(&self, c: ClassId) -> Option<String> {
+        let mut cur = Some(c);
+        while let Some(k) = cur {
+            match &self.ld.classes[k as usize].base {
+                Some(ClassBase::Exception(e)) => return Some(e.clone()),
+                Some(ClassBase::Native(b)) => cur = Some(*b),
+                None => return None,
+            }
+        }
+        None
+    }
+
+    /// `BaseException.__init__(self, *args)`: sets the message (`str(e)`).
+    fn exc_super_init(&mut self, self_name: Option<String>, args: Vec<Expr>, sp: Span) -> Option<Expr> {
+        let sn = self_name?;
+        let msg = match args.len() {
+            0 => Expr { kind: ExprKind::Str(String::new()), span: sp },
+            1 => Expr { kind: ExprKind::Call { callee: Callee::Builtin(Builtin::Str), args: vec![args[0].clone()], order: vec![] }, span: sp },
+            _ => {
+                let t = Expr { kind: ExprKind::Tuple(args), span: sp };
+                Expr { kind: ExprKind::CallObj { func: Box::new(self.py_builtin("repr", sp)), args: vec![t], kwargs: vec![] }, span: sp }
+            }
+        };
+        Some(Expr {
+            kind: ExprKind::CallObj {
+                func: Box::new(Expr { kind: ExprKind::GetAttr { obj: Box::new(Expr { kind: ExprKind::Local(sn), span: sp }), name: "__exc_init__".into() }, span: sp }),
+                args: vec![msg],
+                kwargs: vec![],
+            },
+            span: sp,
+        })
     }
 
     /// Pass 1: a class statement's shape (methods, fields, class attributes).
@@ -1662,11 +1707,9 @@ impl<'l> Lowerer<'l> {
                 "AnnAssign" if ty(&item["target"]) == "Name" => {
                     let v = sstr(&item["target"], "id").to_string();
                     if dataclass {
+                        // A dataclass field (its __init__ always assigns it).
                         if !fields.contains(&v) {
                             fields.push(v.clone());
-                        }
-                        if !item["value"].is_null() && !class_vars.contains(&v) {
-                            class_vars.push(v);
                         }
                     } else if !item["value"].is_null() && !class_vars.contains(&v) {
                         class_vars.push(v);
@@ -1697,6 +1740,9 @@ impl<'l> Lowerer<'l> {
         }
         let methods = self.ld.classes[cid as usize].methods.clone();
         let mut out = Vec::new();
+        if self.ld.classes[cid as usize].dataclass && !methods.iter().any(|m| m.name == "__init__") {
+            self.synthesize_dataclass_init(cid, st);
+        }
         let mut mi = 0;
         for item in arr(st, "body") {
             match ty(item) {
@@ -1714,7 +1760,7 @@ impl<'l> Lowerer<'l> {
                     self.ld.funcs[m.func] = Some(f);
                 }
                 "Assign" | "AnnAssign" => {
-                    if item["value"].is_null() {
+                    if item["value"].is_null() || (ty(item) == "AnnAssign" && self.ld.classes[cid as usize].dataclass) {
                         continue;
                     }
                     self.locals = self.module_vars.difference(&self.globals).cloned().collect();
@@ -1732,6 +1778,98 @@ impl<'l> Lowerer<'l> {
             }
         }
         out
+    }
+
+    /// `@dataclass`: `__init__(self, <fields in order>)` assigning each field,
+    /// then calling `__post_init__` if defined.
+    fn synthesize_dataclass_init(&mut self, cid: ClassId, st: &Value) {
+        let sp = self.span(st);
+        let mut names = Vec::new();
+        let mut defaults = Vec::new();
+        for item in arr(st, "body") {
+            if ty(item) != "AnnAssign" || ty(&item["target"]) != "Name" {
+                continue;
+            }
+            let ann = &item["annotation"];
+            let is_classvar = (ty(ann) == "Subscript" && (sstr(&ann["value"], "id") == "ClassVar" || sstr(&ann["value"], "attr") == "ClassVar")) || sstr(ann, "id") == "ClassVar";
+            if is_classvar {
+                continue;
+            }
+            let name = sstr(&item["target"], "id").to_string();
+            let v = &item["value"];
+            let default = if v.is_null() {
+                None
+            } else if ty(v) == "Call" && (sstr(&v["func"], "id") == "field" || sstr(&v["func"], "attr") == "field") {
+                let mut d = None;
+                for k in arr(v, "keywords") {
+                    let vsp = self.span(&k["value"]);
+                    match (sstr(k, "arg"), ty(&k["value"]), sstr(&k["value"], "id")) {
+                        // A fresh container per call, like default_factory.
+                        ("default_factory", "Name", "list") => d = Some(Expr { kind: ExprKind::List(vec![]), span: vsp }),
+                        ("default_factory", "Name", "dict") => d = Some(Expr { kind: ExprKind::Dict(vec![]), span: vsp }),
+                        ("default_factory", "Name", "set") => d = Some(Expr { kind: ExprKind::Set(vec![]), span: vsp }),
+                        ("default", _, _) => d = lower_literal(&k["value"], self.unit),
+                        _ => self.unsupported(vsp, "this `field(...)` option", "use `default=` with a literal or `default_factory=list/dict/set`"),
+                    }
+                }
+                d
+            } else {
+                match lower_literal(v, self.unit) {
+                    Some(d) => Some(d),
+                    None => {
+                        let vsp = self.span(v);
+                        self.unsupported(vsp, "a non-literal dataclass default", "use `field(default_factory=...)`");
+                        None
+                    }
+                }
+            };
+            names.push(name);
+            defaults.push(default);
+        }
+        let id = self.ld.alloc_func();
+        let self_name = "self".to_string();
+        let mut params = vec![self_name.clone()];
+        params.extend(names.iter().cloned());
+        let mut sig_defaults = vec![None];
+        sig_defaults.extend(defaults);
+        let sig = CallSig { names: params.clone(), n_posonly: 0, n_pos: params.len(), defaults: sig_defaults, vararg: None, kwarg: None };
+        let local = |n: &str| Expr { kind: ExprKind::Local(n.to_string()), span: sp };
+        let mut body: Vec<Stmt> = names
+            .iter()
+            .map(|n| Stmt { kind: StmtKind::SetAttr { obj: local(&self_name), name: n.clone(), value: local(n) }, span: sp })
+            .collect();
+        if self.method_of(cid, "__post_init__").is_some() {
+            let call = Expr {
+                kind: ExprKind::CallObj { func: Box::new(Expr { kind: ExprKind::GetAttr { obj: Box::new(local(&self_name)), name: "__post_init__".into() }, span: sp }), args: vec![], kwargs: vec![] },
+                span: sp,
+            };
+            body.push(Stmt { kind: StmtKind::Expr(call), span: sp });
+        }
+        let cname = self.ld.classes[cid as usize].name.rsplit('.').next().unwrap_or("").to_string();
+        let n = params.len();
+        self.ld.func_sigs.insert(id, sig.clone());
+        self.ld.func_anns.insert(id, (vec![None; n], None));
+        self.ld.funcs[id] = Some(Function {
+            id,
+            name: self.qual(&format!("{cname}.__init__")),
+            params: params.clone(),
+            locals: params,
+            body,
+            span: sp,
+            is_module: false,
+            unit: self.unit,
+            param_ann: vec![None; n],
+            ret_ann: None,
+            class: Some(cid),
+            sig,
+        });
+        self.ld.classes[cid as usize].methods.push(Method { name: "__init__".into(), func: id, kind: MethodKind::Instance });
+        let fields = &mut self.ld.classes[cid as usize].fields;
+        for nm in names {
+            if !fields.contains(&nm) {
+                fields.push(nm);
+            }
+        }
     }
 
     /// A fresh synthetic local of the current function.
@@ -1884,6 +2022,11 @@ impl<'l> Lowerer<'l> {
     fn exc_type(&mut self, t: &Value) -> Option<ExcType> {
         if ty(t) == "Name" && self.builtin_exc(sstr(t, "id")) {
             return Some(ExcType::Builtin(sstr(t, "id").to_string()));
+        }
+        if ty(t) == "Name" && !self.locals.contains(sstr(t, "id")) {
+            if let Some(Binding::Class(c)) = self.bindings.get(sstr(t, "id")).cloned() {
+                return Some(ExcType::Native(c));
+            }
         }
         Some(ExcType::Obj(self.lower_expr(t)?))
     }

@@ -194,6 +194,11 @@ pub fn matches(e: &Exc, base: &str) -> bool {
     is_subclass(e.name(), base)
 }
 
+/// The native instance carried by an exception of a compiled exception class.
+pub fn downcast<T: Clone + 'static>(e: &Exc) -> Option<T> {
+    e.origin.as_ref().and_then(|o| o.downcast_ref::<T>()).cloned()
+}
+
 /// `ValueError(arg)` / `KeyError(arg)`: the message `str(exc)` produces.
 /// `KeyError` shows the key's repr; the others show `str(arg)`.
 pub fn new1(kind: &'static str, arg: crate::Str, arg_repr: crate::Str) -> Exc {

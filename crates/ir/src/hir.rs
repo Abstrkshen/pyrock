@@ -258,6 +258,8 @@ pub enum ExcType {
     Builtin(String),
     /// Any other expression: a Python exception class, matched with `isinstance`.
     Obj(Expr),
+    /// A natively compiled exception class (`class MyError(ValueError)`).
+    Native(ClassId),
 }
 
 #[derive(Clone, Debug)]

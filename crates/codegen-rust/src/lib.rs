@@ -61,7 +61,7 @@ pub fn emit(prog: &Program, plan: &Plan, file_name: &str, py_paths: &[String]) -
     }
 
     // CPython import slots and once-flags for natively compiled modules.
-    if !m.slots.is_empty() {
+    if !m.slots.is_empty() && plan.uses_python {
         out.push('\n');
         for (i, s) in m.slots.iter().enumerate() {
             writeln!(out, "static SLOT_{i}_{}: rt::py::Slot = rt::py::Slot::new({:?});", ident(&s.binding), s.binding).unwrap();
@@ -100,6 +100,22 @@ pub fn emit(prog: &Program, plan: &Plan, file_name: &str, py_paths: &[String]) -
     if plan.uses_python {
         let paths: Vec<String> = py_paths.iter().map(|p| format!("{p:?}")).collect();
         writeln!(out, "    rt::py::init({file_name:?}, &[{}]);", paths.join(", ")).unwrap();
+    }
+    // The program's exception classes, for `except` matching.
+    let mut excs = Vec::new();
+    for cd in &m.classes {
+        let short = cd.name.rsplit('.').next().unwrap_or("").to_string();
+        match &cd.base {
+            Some(ClassBase::Exception(b)) => excs.push(format!("({short:?}, {b:?})")),
+            Some(ClassBase::Native(b)) if m.exception_base(cd.id).is_some() => {
+                let bs = m.class(*b).name.rsplit('.').next().unwrap_or("").to_string();
+                excs.push(format!("({short:?}, {bs:?})"));
+            }
+            _ => {}
+        }
+    }
+    if !excs.is_empty() {
+        writeln!(out, "    rt::exc::register(&[{}]);", excs.join(", ")).unwrap();
     }
     writeln!(out, "    rt::run_main({file_name:?}, module_body)\n}}").unwrap();
 
@@ -741,7 +757,13 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     },
                     Some(e) => {
                         let (c, t) = self.expr(e);
-                        if t == Ty::Obj { format!("rt::py::raise(&{})", borrow(&c)) } else { c }
+                        if t == Ty::Obj {
+                            format!("rt::py::raise(&{})", borrow(&c))
+                        } else if t.class_id().is_some() {
+                            format!("{c}.into_exc()")
+                        } else {
+                            c
+                        }
                     }
                 };
                 writeln!(out, "{ind}return Err({err});").unwrap();
@@ -833,6 +855,10 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 for t in &h.types {
                     conds.push(match t {
                         ExcType::Builtin(k) => format!("rt::exc::matches(&{e}, {k:?})"),
+                        ExcType::Native(c) => {
+                            let short = self.prog.module.class(*c).name.rsplit('.').next().unwrap_or("").to_string();
+                            format!("rt::exc::matches(&{e}, {short:?})")
+                        }
                         ExcType::Obj(x) => {
                             let o = self.obj(x);
                             format!("rt::py::exc_matches(&{e}, &{})?", borrow(&o))
@@ -846,7 +872,15 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 writeln!(out, "{ind}        let {tmp}: {ft} = (|| -> {ft} {{").unwrap();
                 self.try_depth += 1;
                 if let Some(name) = &h.name {
-                    self.assign(name, format!("{e}.clone()"), Ty::exc(), depth + 3, out);
+                    match h.types.as_slice() {
+                        [ExcType::Native(c)] => {
+                            let r = self.prog.module.class(*c).rust.clone();
+                            let t = Ty::class(*c, &r);
+                            let code = format!("match rt::exc::downcast::<{r}>(&{e}) {{ Some(__x) => __x, None => {{ let __x = {r}::new(); __x.0.borrow_mut().exc_msg = Some(rt::Str::from({e}.msg.as_str())); __x }} }}");
+                            self.assign(name, code, t, depth + 3, out);
+                        }
+                        _ => self.assign(name, format!("{e}.clone()"), Ty::exc(), depth + 3, out),
+                    }
                 }
                 self.handling.push(e.clone());
                 self.block(&h.body, depth + 3, out);
@@ -879,6 +913,32 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
         let code = match &e.kind {
             ExprKind::New { class, args, kwargs } => self.new_instance(e, *class, args, kwargs),
             ExprKind::ClassRef(_) => "()".into(),
+            ExprKind::GetAttr { obj, name } if name == "__name__" && t == Ty::Str && pyfast_infer::spec::type_call_arg(obj).is_some() => {
+                let x = pyfast_infer::spec::type_call_arg(obj).unwrap();
+                let (c, xt) = self.expr(x);
+                match xt {
+                    t if t == Ty::exc() => format!("rt::Str::from({c}.name())"),
+                    t if t.class_id().is_some() => {
+                        let n = self.prog.module.class(t.class_id().unwrap()).name.rsplit('.').next().unwrap_or("").to_string();
+                        format!("{{ let _ = {c}; rt::Str::from({n:?}) }}")
+                    }
+                    t => {
+                        let n = match t {
+                            Ty::None => "NoneType",
+                            t => match t.as_opt() {
+                                Some(_) => "",
+                                None => t.py_name().split('[').next().unwrap_or("object"),
+                            },
+                        };
+                        if n.is_empty() {
+                            let inner = t.as_opt().unwrap().py_name().split('[').next().unwrap_or("object").to_string();
+                            format!("match {c} {{ Some(_) => rt::Str::from({inner:?}), None => rt::Str::from(\"NoneType\") }}")
+                        } else {
+                            format!("{{ let _ = {c}; rt::Str::from({n:?}) }}")
+                        }
+                    }
+                }
+            }
             ExprKind::GetAttr { obj, name } if is_class(self.ty(obj)) || matches!(self.ty(obj).as_comp(), Some(Comp::Type(..))) => self.attr(obj, name, t),
             ExprKind::BinOp { op, left, right } if is_class(self.ty(left)) || is_class(self.ty(right)) => {
                 let n = pyfast_infer::spec::dunder_name(*op);
@@ -1387,8 +1447,8 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                         return format!("!{}", truthy_of(code, self, "__eq__", lt, rt));
                     }
                 }
-                // Default: identity.
-                let same = if lt == rt { format!("{l}.is(&{})", borrow(r)) } else { format!("{{ let _ = {l}; let _ = {r}; false }}") };
+                // Default: identity (field-wise for dataclasses, via PyEq).
+                let same = if lt == rt { format!("rt::coll::eq(&{}, &{})", borrow(l), borrow(r)) } else { format!("{{ let _ = {l}; let _ = {r}; false }}") };
                 if op == CmpOp::NotEq { format!("!{same}") } else { same }
             }
         }

@@ -243,7 +243,7 @@ pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
         holds_obj |= s.key.args.iter().any(|t| t.mentions_obj());
         let f = &prog.module.funcs[s.key.func];
         // Callee positions (`s.split`) and slice nodes are not values at run time.
-        walk_block_skip_callees(&f.body, &mut |e| {
+        walk_live(prog, s, &f.body, &mut |e| {
             if !holds_obj && !matches!(e.kind, ExprKind::Slice { .. } | ExprKind::GetAttr { .. }) && prog.type_of(s, e).is_some_and(|t| t.mentions_obj()) {
                 holds_obj = true;
             }
@@ -320,7 +320,7 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
         _ => {}
     });
     let ty = |e: &Expr| prog.type_of(s, e);
-    walk_block_skip_callees(&f.body, &mut |e| match &e.kind {
+    walk_live(prog, s, &f.body, &mut |e| match &e.kind {
         // Untyped expressions are in code this specialization never runs.
         _ if ty(e).is_none() => {}
         ExprKind::CallObj { func, args, kwargs } if !matches!(prog.classify_call(s, func, args, kwargs), CallClass::Bridge | CallClass::Pending) => {}
@@ -446,14 +446,129 @@ pub fn walk_block(stmts: &[Stmt], f: &mut impl FnMut(&Expr)) {
     });
 }
 
-/// Like `walk_block`, but the callee of a `CallObj` is not visited itself
-/// (the call is reported as one boundary).
-fn walk_block_skip_callees(stmts: &[Stmt], f: &mut impl FnMut(&Expr)) {
-    walk_stmts(stmts, &mut |s| {
-        for e in stmt_exprs(s) {
-            walk_expr(e, f, true);
+/// Statements and expressions the specialization can execute: branches
+/// decided by its types (`x is None` with `x: None`, `if False`) are skipped.
+fn walk_live(prog: &Program, s: &Spec, stmts: &[Stmt], f: &mut impl FnMut(&Expr)) {
+    for st in stmts {
+        match &st.kind {
+            StmtKind::If { test, body, orelse } => match prog.static_truth(s, test) {
+                Some(true) => walk_live(prog, s, body, f),
+                Some(false) => walk_live(prog, s, orelse, f),
+                None => {
+                    walk_expr_live(prog, s, test, f);
+                    walk_live(prog, s, body, f);
+                    walk_live(prog, s, orelse, f);
+                }
+            },
+            StmtKind::While { test, body } => {
+                walk_expr_live(prog, s, test, f);
+                if prog.static_truth(s, test) != Some(false) {
+                    walk_live(prog, s, body, f);
+                }
+            }
+            _ => {
+                for e in stmt_exprs(st) {
+                    walk_expr_live(prog, s, e, f);
+                }
+                match &st.kind {
+                    StmtKind::ForRange { body, .. } | StmtKind::ForIter { body, .. } | StmtKind::With { body, .. } => walk_live(prog, s, body, f),
+                    StmtKind::Try { body, handlers, orelse, finalbody } => {
+                        walk_live(prog, s, body, f);
+                        for h in handlers {
+                            walk_live(prog, s, &h.body, f);
+                        }
+                        walk_live(prog, s, orelse, f);
+                        walk_live(prog, s, finalbody, f);
+                    }
+                    _ => {}
+                }
+            }
         }
-    });
+    }
+}
+
+fn walk_expr_live(prog: &Program, s: &Spec, e: &Expr, f: &mut impl FnMut(&Expr)) {
+    match &e.kind {
+        ExprKind::IfExp { test, body, orelse } => match prog.static_truth(s, test) {
+            Some(true) => walk_expr_live(prog, s, body, f),
+            Some(false) => walk_expr_live(prog, s, orelse, f),
+            None => {
+                f(e);
+                for c in [test, body, orelse] {
+                    walk_expr_live(prog, s, c, f);
+                }
+            }
+        },
+        ExprKind::BoolOp { op, values } => {
+            f(e);
+            let n = prog.short_circuit(s, *op, values).unwrap_or(values.len());
+            values[..n].iter().for_each(|v| walk_expr_live(prog, s, v, f));
+        }
+        // `type(x).__name__` of a native value is a plain string.
+        ExprKind::GetAttr { obj, name } if name == "__name__" && prog.type_of(s, e) == Some(Ty::Str) && pyfast_infer::spec::type_call_arg(obj).is_some() => {
+            walk_expr_live(prog, s, pyfast_infer::spec::type_call_arg(obj).unwrap(), f);
+        }
+        _ => {
+            f(e);
+            for c in children(e, true) {
+                walk_expr_live(prog, s, c, f);
+            }
+        }
+    }
+}
+
+/// Direct sub-expressions (without the callee lookup of a `CallObj` when
+/// `skip_callee`, but with the receiver of `recv.method(...)`).
+fn children(e: &Expr, skip_callee: bool) -> Vec<&Expr> {
+    match &e.kind {
+        ExprKind::BinOp { left, right, .. } => vec![left, right],
+        ExprKind::Unary { operand, .. } => vec![operand],
+        ExprKind::Compare { first, rest } => std::iter::once(&**first).chain(rest.iter().map(|r| &r.1)).collect(),
+        ExprKind::BoolOp { values, .. } => values.iter().collect(),
+        ExprKind::IfExp { test, body, orelse } => vec![test, body, orelse],
+        ExprKind::Call { args, .. } | ExprKind::ExternCall { args, .. } | ExprKind::List(args) | ExprKind::Tuple(args) | ExprKind::NewExc { args, .. } | ExprKind::Set(args) => args.iter().collect(),
+        ExprKind::GetAttr { obj, .. } | ExprKind::Annotated { value: obj, .. } | ExprKind::Unpack { value: obj, .. } | ExprKind::Starred(obj) => vec![obj],
+        ExprKind::CallObj { func, args, kwargs } => {
+            let mut v: Vec<&Expr> = Vec::new();
+            if skip_callee {
+                if let ExprKind::GetAttr { obj, .. } = &func.kind {
+                    if !matches!(obj.kind, ExprKind::Slot(_)) {
+                        v.push(obj);
+                    }
+                }
+            } else {
+                v.push(func);
+            }
+            v.extend(args.iter());
+            v.extend(kwargs.iter().map(|(_, x)| x));
+            v
+        }
+        ExprKind::New { args, kwargs, .. } => args.iter().chain(kwargs.iter().map(|(_, x)| x)).collect(),
+        ExprKind::Dict(pairs) => pairs.iter().flat_map(|(k, v)| [k, v]).collect(),
+        ExprKind::Subscript { obj, index } => vec![obj, index],
+        ExprKind::Slice { lo, hi, step } => [lo, hi, step].into_iter().flatten().map(|b| &**b).collect(),
+        ExprKind::Comp { elt, val, gens, .. } => {
+            let mut v: Vec<&Expr> = Vec::new();
+            for g in gens {
+                v.push(&g.iter);
+                for st in &g.unpack {
+                    v.extend(stmt_exprs(st));
+                    if let StmtKind::If { body, .. } = &st.kind {
+                        for b in body {
+                            v.extend(stmt_exprs(b));
+                        }
+                    }
+                }
+                v.extend(g.ifs.iter());
+            }
+            v.push(elt);
+            if let Some(x) = val {
+                v.push(x);
+            }
+            v
+        }
+        _ => vec![],
+    }
 }
 
 pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr), skip_callee: bool) {
