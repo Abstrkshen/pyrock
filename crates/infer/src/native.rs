@@ -104,6 +104,12 @@ fn int_like(t: Ty) -> bool {
     matches!(t, Ty::Int | Ty::Bool)
 }
 
+/// A valid sequence index: int, bool, or a CPython object (unboxed with a
+/// runtime check).
+fn index_like(t: Ty) -> bool {
+    matches!(t, Ty::Int | Ty::Bool | Ty::Obj)
+}
+
 fn base(t: Ty) -> Ty {
     t.as_opt().unwrap_or(t)
 }
@@ -120,18 +126,18 @@ pub fn subscript(obj: Ty, idx: Index, index_ty: Option<Ty>, index_lit: Option<i6
     match (obj.as_comp(), &idx) {
         _ if obj == Ty::Str => match idx {
             Index::Slice => Ok(Ty::Str),
-            Index::Item if index_ty.map(base).is_some_and(int_like) => Ok(Ty::Str),
+            Index::Item if index_ty.map(base).is_some_and(index_like) => Ok(Ty::Str),
             Index::Item => Err(format!("string indices must be integers, not '{}'", index_ty.map(|t| t.py_name()).unwrap_or("?"))),
         },
         (Some(Comp::List(e)), Index::Item) => {
-            if index_ty.map(base).is_some_and(int_like) {
+            if index_ty.map(base).is_some_and(index_like) {
                 Ok(e)
             } else {
                 Err(format!("list indices must be integers or slices, not {}", index_ty.map(|t| t.py_name()).unwrap_or("?")))
             }
         }
         (Some(Comp::List(_)), Index::Slice) => Ok(obj),
-        (Some(Comp::TupleVar(e)), Index::Item) if index_ty.map(base).is_some_and(int_like) => Ok(e),
+        (Some(Comp::TupleVar(e)), Index::Item) if index_ty.map(base).is_some_and(index_like) => Ok(e),
         (Some(Comp::TupleVar(_)), Index::Slice) => Ok(obj),
         (Some(Comp::Tuple(ts)), Index::Item) if index_ty.map(base).is_some_and(int_like) => match index_lit {
             Some(i) => {

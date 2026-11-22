@@ -73,6 +73,11 @@ These constructs become plain Rust with no Python objects involved:
   Instances are `Rc<RefCell<..>>` newtypes, so identity and shared mutation match Python.
   Values of different classes in one place (a list of shapes) form a closed union (a Rust
   enum) with per-variant method dispatch.
+* `async def` / `await`: native coroutines run by asyncio (`asyncio.run(main())`,
+  `gather`, `create_task`, `wait_for`, queues, ...). Awaiting a native coroutine runs it
+  inline; awaiting a Python awaitable suspends the coroutine's own stack until the event
+  loop has the result (P217 boundary). `async with` and `async for` work on Python objects
+  and on native classes defining `__aenter__`/`__aexit__` or `__aiter__`/`__anext__`.
 * Function values: lambdas, nested functions and closures (captured variables are shared
   cells, so late binding and `nonlocal` behave as in CPython; `lambda x, i=i:` defaults are
   evaluated when the function is created), top-level functions used as values, decorators
@@ -131,11 +136,17 @@ under `--mode native-only`.
 * `with` statements (CPython context-manager protocol, P216), and `except` clauses naming a
   Python exception class such as `json.JSONDecodeError` (P216)
 * `print(..., file=)` uses CPython's `print`
+* `bytes` literals (`b"..."`) are CPython `bytes` objects
 
 ## Imports of Rust and C
 
-See the README. Rejected signatures (generics, pointers other than `const char *`, structs,
-variadic functions, `static` C functions) are listed in `explain`. Calling one gives P150.
+See `skills/pyfast/references/imports.md` for the type tables. Rust: scalars, `&str`/`String`,
+`Vec<T>`/`&[T]`/`&mut [T]` (written back), `Vec<u8>` (bytes), `Option`, tuples, `HashMap`,
+`impl Fn`/`&dyn Fn` callbacks, `pub struct` handles with `impl` methods and fields, and
+`// pyfast: dep` crates. C: scalars, strings, pointer+length arrays (written back when not
+`const`), `typedef struct` values, function pointers, `// pyfast: link` / `pkg-config`.
+Rejected signatures (generics, unions, variadic functions, `static` C functions) are listed
+in `explain`. Calling one gives P150. A struct handle passed to CPython is P231.
 
 ## Rejected at compile time (diagnostic codes)
 
@@ -152,12 +163,14 @@ variadic functions, `static` C functions) are listed in `explain`. Calling one g
 | P141/P142 | Rebinding a module-level function or import name; `nonlocal` (closures are phase 4) |
 | P143/P144 | Undefined name; call before definition |
 | P2xx | A CPython boundary, in `--mode native-only` only (see above). P220 is a warning: a local `.py` was imported through CPython |
+| P231 | A Rust/C struct handle passed to CPython (both modes) |
+| P217 | `await` of a Python awaitable, `async with`, `async for` (native-only: error) |
 | P301 (raise) | `raise` of a value that is not an exception |
 | P301 | Operator or builtin applied to types where CPython raises `TypeError` |
 | P302/P304/P305 | Value-dependent type in native-only mode (hybrid mode boxes these instead) |
 | P306 | No return type could be inferred |
 | P307 | Warning: a native value contradicts an annotation (it keeps its runtime type, like CPython) |
-| P310/P311 | Specialization limit (16 per function) or inference did not converge |
+| P310/P311 | Specialization limit (16 per function; hybrid mode shares one `object` specialization instead) or inference did not converge |
 
 Not yet supported in either mode: classes with a CPython base class, metaclasses or
 class decorators other than `@dataclass` (in an imported `.py` the whole module falls back

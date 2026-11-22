@@ -66,6 +66,11 @@ pub enum Comp {
     /// A function value: which function (its id), the types of its captured
     /// variables, and its display name. Calls dispatch statically.
     Closure(u32, Vec<Ty>, &'static str),
+    /// A handle to a struct of a Rust/C module (extern index, struct index,
+    /// generated wrapper name).
+    ExtStruct(u32, u32, &'static str),
+    /// A coroutine of a compiled `async def` returning `T` (`rt::aio::Coro<T>`).
+    Coro(Ty),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -130,6 +135,8 @@ impl Ty {
             Comp::Class(_, rust) => (rust.to_string(), rust.to_string(), rust.to_string()),
             Comp::Type(_, rust) => (format!("type[{rust}]"), "()".to_string(), format!("type_{rust}")),
             Comp::Union(ts) => (join(ts, Ty::py_name, " | "), format!("U_{}", join(ts, Ty::mangle, "_")), format!("u_{}", join(ts, Ty::mangle, "_"))),
+            Comp::ExtStruct(_, _, name) => (name.to_string(), name.to_string(), name.to_string()),
+            Comp::Coro(t) => (format!("Coroutine[{}]", t.py_name()), format!("rt::aio::Coro<{}>", t.rust()), format!("coro_{}", t.mangle())),
             Comp::Closure(f, caps, name) => (
                 format!("function {name}"),
                 if caps.is_empty() { "rt::Env<()>".to_string() } else { format!("rt::Env<({},)>", caps.iter().map(|c| format!("rt::Cell<{}>", c.rust())).collect::<Vec<_>>().join(", ")) },
@@ -196,6 +203,18 @@ impl Ty {
         Ty::comp(Comp::Union(all))
     }
 
+    pub fn coro(t: Ty) -> Ty {
+        Ty::comp(Comp::Coro(t))
+    }
+
+    /// The result type of awaiting a coroutine type.
+    pub fn as_coro(self) -> Option<Ty> {
+        match self.as_comp() {
+            Some(Comp::Coro(t)) => Some(t),
+            _ => None,
+        }
+    }
+
     pub fn closure(func: u32, caps: Vec<Ty>, name: &str) -> Ty {
         Ty::comp(Comp::Closure(func, caps, Box::leak(name.to_string().into_boxed_str())))
     }
@@ -209,6 +228,14 @@ impl Ty {
     }
 
     /// Enum variant name of a union member (the class name, or the mangled type).
+    /// (extern module, struct) of a handle type.
+    pub fn as_ext_struct(self) -> Option<(usize, usize)> {
+        match self.as_comp() {
+            Some(Comp::ExtStruct(e, i, _)) => Some((e as usize, i as usize)),
+            _ => None,
+        }
+    }
+
     pub fn variant_name(self) -> String {
         match self.class_id() {
             Some(_) => self.rust().to_string(),
@@ -264,7 +291,7 @@ impl Ty {
             Some(Comp::List(_) | Comp::Dict(..) | Comp::Set(_) | Comp::Class(..)) => true,
             Some(Comp::Tuple(ts)) => ts.iter().any(|t| t.has_mutable()),
             Some(Comp::TupleVar(t) | Comp::Opt(t)) => t.has_mutable(),
-            Some(Comp::View(..) | Comp::Union(_)) => true,
+            Some(Comp::View(..) | Comp::Union(_) | Comp::ExtStruct(..) | Comp::Coro(_)) => true,
             _ => false,
         }
     }

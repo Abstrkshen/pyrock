@@ -256,7 +256,7 @@ impl State<'_> {
                 self.expr(test, cx);
                 self.block(body, cx);
             }
-            StmtKind::ForIter { var, iter, body } => {
+            StmtKind::ForIter { var, iter, body, .. } => {
                 self.expr(iter, cx);
                 self.assign(var, Sym::Con(Ty::Obj), cx);
                 self.block(body, cx);
@@ -303,7 +303,7 @@ impl State<'_> {
             StmtKind::AssignGlobal { value, .. } => {
                 self.expr(value, cx);
             }
-            StmtKind::With { ctx, var, body } => {
+            StmtKind::With { ctx, var, body, .. } => {
                 self.expr(ctx, cx);
                 if let Some(v) = var {
                     self.assign(v, Sym::Con(Ty::Obj), cx);
@@ -404,6 +404,10 @@ impl State<'_> {
                 Sym::Con(*ty)
             }
             ExprKind::Slot(_) | ExprKind::PyBuiltin(_) => Sym::Con(Ty::Obj),
+            ExprKind::Await(v) => {
+                self.expr(v, cx);
+                Sym::Con(Ty::Obj)
+            }
             ExprKind::Global { .. } => self.fresh(),
             ExprKind::Slice { lo, hi, step } => {
                 for p in [lo, hi, step].into_iter().flatten() {

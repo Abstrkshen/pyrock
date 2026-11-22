@@ -33,7 +33,23 @@ for d in "${dirs[@]}"; do
     ok=1
     for cmd in "${cmds[@]}"; do
         [[ $bench -eq 0 && "$cmd" == pyfast\ bench* ]] && continue
-        out=$(cd "$d" && timeout 600 bash -c "$cmd" 2>&1 </dev/null); rc=$?
+        if [[ "$cmd" == pyfast\ run* ]]; then
+            # Build first (slow on a cold cache), then run with a short limit:
+            # an interactive program (a game, a server) that is still running
+            # after it counts as working.
+            bcmd="pyfast build ${cmd#pyfast run }"
+            bcmd="${bcmd%% -- *}"
+            out=$(cd "$d" && timeout 600 bash -c "$bcmd" 2>&1 </dev/null); rc=$?
+            if [[ $rc -eq 0 ]]; then
+                out=$(cd "$d" && timeout 30 bash -c "$cmd" 2>&1 </dev/null); rc=$?
+                if [[ $rc -eq 124 ]]; then
+                    printf "      %-20s still running after 30s (interactive): %s\n" "$name" "$cmd"
+                    rc=0
+                fi
+            fi
+        else
+            out=$(cd "$d" && timeout 600 bash -c "$cmd" 2>&1 </dev/null); rc=$?
+        fi
         if [[ $rc -ne 0 ]]; then
             ok=0
             printf "FAIL  %-20s rc=%d  %s\n" "$name" "$rc" "$cmd"

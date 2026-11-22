@@ -21,12 +21,20 @@ def const(v):
         return {"kind": "float", "value": repr(v)}
     if isinstance(v, str):
         return {"kind": "str", "value": v}
+    if isinstance(v, bytes):
+        return {"kind": "bytes", "value": list(v)}
     return {"kind": "other", "type": type(v).__name__}
 
 
 def conv(node):
     if isinstance(node, ast.AST):
         out = {"_t": type(node).__name__}
+        # `async def` lowers like `def`, flagged (the HIR marks the function).
+        # `async def` / `async with` / `async for` lower like their plain
+        # forms, flagged.
+        if isinstance(node, (ast.AsyncFunctionDef, ast.AsyncWith, ast.AsyncFor)):
+            out["_t"] = type(node).__name__[5:]
+            out["is_async"] = True
         for name, value in ast.iter_fields(node):
             if isinstance(node, ast.Constant) and name == "value":
                 out["value"] = const(value)

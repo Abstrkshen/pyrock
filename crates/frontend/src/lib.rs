@@ -280,6 +280,8 @@ enum Binding {
     ExternFn(usize, usize),
     Slot(usize),
     Class(ClassId),
+    /// A struct of a Rust/C module (`from shapes import Counter`).
+    ExternStruct(usize, usize),
 }
 
 struct Lowerer<'l> {
@@ -410,6 +412,33 @@ fn scan_self_fields(body: &[Value], self_name: &str, out: &mut Vec<String>) {
         for h in arr(st, "handlers") {
             scan_self_fields(arr(h, "body"), self_name, out);
         }
+    }
+}
+
+/// Struct types in an extern module's signatures refer to it by index.
+fn fix_ext_index(m: &mut ExternModule, e: usize) {
+    fn fix(t: &mut ExtTy, e: usize) {
+        match t {
+            ExtTy::Struct { ext, .. } => *ext = e,
+            ExtTy::Vec(x) | ExtTy::Slice(x) | ExtTy::SliceMut(x, _) | ExtTy::Opt(x) | ExtTy::CArray(x, _, _) => fix(x, e),
+            ExtTy::Tuple(xs) => xs.iter_mut().for_each(|x| fix(x, e)),
+            ExtTy::Map(k, v, _) => {
+                fix(k, e);
+                fix(v, e);
+            }
+            ExtTy::Callback(ps, r, _) | ExtTy::CFn(ps, r) => {
+                ps.iter_mut().for_each(|x| fix(x, e));
+                fix(r, e);
+            }
+            _ => {}
+        }
+    }
+    for f in &mut m.funcs {
+        f.params.iter_mut().for_each(|p| fix(p, e));
+        fix(&mut f.ret, e);
+    }
+    for st in &mut m.structs {
+        st.fields.iter_mut().for_each(|(_, t)| fix(t, e));
     }
 }
 
@@ -778,6 +807,7 @@ impl<'l> Lowerer<'l> {
             parent: None,
             captures: vec![],
             cells: vec![],
+            is_async: false,
         });
         self.ld.units[self.unit].init = init;
     }
@@ -857,6 +887,8 @@ impl<'l> Lowerer<'l> {
                         if m.skipped.is_empty() { String::new() } else { format!(", {} skipped", m.skipped.len()) }
                     );
                     let e = self.ld.externs.len();
+                    let mut m = m;
+                    fix_ext_index(&mut m, e);
                     self.ld.externs.push(m);
                     self.ld.extern_by_path.insert(canon, e);
                     self.record(name, if lang == Lang::Rust { "rust" } else { "c" }, Some(&p), Some(note));
@@ -930,7 +962,12 @@ impl<'l> Lowerer<'l> {
                         Some(i) => {
                             self.bindings.insert(bind, Binding::ExternFn(e, i));
                         }
-                        None => self.extern_missing(e, &attr, sp),
+                        None => match self.ld.externs[e].structs.iter().position(|st| st.name == attr) {
+                            Some(si) => {
+                                self.bindings.insert(bind, Binding::ExternStruct(e, si));
+                            }
+                            None => self.extern_missing(e, &attr, sp),
+                        },
                     },
                     Some(_) => {}
                     None => {
@@ -1008,7 +1045,8 @@ impl<'l> Lowerer<'l> {
         locals.extend(std::mem::take(&mut self.extra_locals));
         let sig = self.ld.func_sigs.get(&id).cloned().unwrap_or_default();
         let class = self.cur_class.as_ref().map(|c| c.0);
-        Function { id, name: self.qual(&name), params, locals, body, span: sp, is_module: false, unit: self.unit, param_ann, ret_ann, class, sig, parent: None, captures: vec![], cells: vec![] }
+        let is_async = st["is_async"].as_bool().unwrap_or(false);
+        Function { id, name: self.qual(&name), params, locals, body, span: sp, is_module: false, unit: self.unit, param_ann, ret_ann, class, sig, parent: None, captures: vec![], cells: vec![], is_async }
     }
 
     fn lower_block(&mut self, body: &[Value]) -> Vec<Stmt> {
@@ -1246,7 +1284,8 @@ impl<'l> Lowerer<'l> {
                             Some(tmp)
                         }
                     };
-                    body = vec![Stmt { kind: StmtKind::With { ctx, var, body }, span: sp }];
+                    let is_async = st["is_async"].as_bool().unwrap_or(false);
+                    body = vec![Stmt { kind: StmtKind::With { ctx, var, body, is_async }, span: sp }];
                 }
                 return body.into_iter().next();
             }
@@ -1363,10 +1402,11 @@ impl<'l> Lowerer<'l> {
             && !self.bindings.contains_key("range")
             && arr(it, "keywords").is_empty()
             && (1..=3).contains(&arr(it, "args").len());
-        if !is_range {
+        let is_async = st["is_async"].as_bool().unwrap_or(false);
+        if !is_range || is_async {
             let iter = self.lower_expr(it)?;
             let body = with_prefix(self.lower_block(arr(st, "body")));
-            return Some(Stmt { kind: StmtKind::ForIter { var, iter, body }, span: sp });
+            return Some(Stmt { kind: StmtKind::ForIter { var, iter, body, is_async }, span: sp });
         }
         let mut lowered = Vec::new();
         for a in arr(it, "args") {
@@ -1467,6 +1507,15 @@ impl<'l> Lowerer<'l> {
                     }
                     "float" => ExprKind::Float(c["value"].as_str().unwrap_or("0.0").parse().unwrap_or(f64::NAN)),
                     "str" => ExprKind::Str(sstr(c, "value").to_string()),
+                    // `b"..."` is `bytes([...])`, a CPython object.
+                    "bytes" => {
+                        let items = c["value"].as_array().map(|v| v.iter().map(|b| Expr { kind: ExprKind::Int(b.as_i64().unwrap_or(0)), span: sp }).collect()).unwrap_or_default();
+                        ExprKind::CallObj {
+                            func: Box::new(Expr { kind: ExprKind::PyBuiltin("bytes".into()), span: sp }),
+                            args: vec![Expr { kind: ExprKind::List(items), span: sp }],
+                            kwargs: vec![],
+                        }
+                    }
                     _ => {
                         self.unsupported(sp, &format!("`{}` literal", sstr(c, "type")), "bytes/complex/Ellipsis are not supported yet");
                         return None;
@@ -1480,6 +1529,7 @@ impl<'l> Lowerer<'l> {
                 let right = self.lower_expr(&e["right"])?;
                 ExprKind::BinOp { op, left: Box::new(left), right: Box::new(right) }
             }
+            "Await" => ExprKind::Await(Box::new(self.lower_expr(&e["value"])?)),
             "UnaryOp" => {
                 let op = match ty(&e["op"]) {
                     "USub" => UnaryOp::Neg,
@@ -1990,6 +2040,7 @@ impl<'l> Lowerer<'l> {
             parent: None,
             captures: vec![],
             cells: vec![],
+            is_async: false,
         });
         self.ld.classes[cid as usize].methods.push(Method { name: "__init__".into(), func: id, kind: MethodKind::Instance });
         let fields = &mut self.ld.classes[cid as usize].fields;
@@ -2106,6 +2157,22 @@ impl<'l> Lowerer<'l> {
             "body": {"_t": "Call", "_loc": loc, "func": {"_t": "Name", "id": n, "_loc": loc}, "args": [{"_t": "Name", "id": "__x", "_loc": loc}], "keywords": []},
         });
         self.lower_expr(&lam)
+    }
+
+    /// `Struct.name(...)` (an associated function), or `Struct(...)` (its `new`,
+    /// or the field-wise constructor of a C struct).
+    fn extern_ctor(&mut self, e: usize, si: usize, name: &str, args: Vec<Expr>, sp: Span) -> Option<Expr> {
+        let m = &self.ld.externs[e];
+        let sname = m.structs[si].name.clone();
+        let want = [format!("{sname}::{name}"), format!("{sname}::__new__")];
+        let found = m.funcs.iter().position(|f| f.owner == Some(si) && f.recv.is_none() && (f.name == want[0] || (name == "new" && f.name == want[1])));
+        match found {
+            Some(func) => Some(Expr { kind: ExprKind::ExternCall { ext: e, func, args }, span: sp }),
+            None => {
+                self.err("P150", sp, format!("`{}.{sname}` has no associated function `{name}`", m.name));
+                None
+            }
+        }
     }
 
     /// A fresh synthetic local of the current function.
@@ -2420,6 +2487,7 @@ impl<'l> Lowerer<'l> {
                     self.unsupported(sp, &format!("calling module `{id}`"), "modules are not callable");
                     return None;
                 }
+                Some(Binding::ExternStruct(e, si)) => return self.extern_ctor(e, si, "new", args, sp),
                 Some(Binding::Class(c)) => {
                     if self.in_module {
                         if let Some(&(_, def_sp)) = self.class_ids.get(id) {
@@ -2464,6 +2532,23 @@ impl<'l> Lowerer<'l> {
         if ty(f) == "Attribute" && ty(&f["value"]) == "Call" && ty(&f["value"]["func"]) == "Name" && f["value"]["func"]["id"] == "super" && arr(&f["value"], "args").is_empty() {
             return self.lower_super_call(sstr(f, "attr"), args, kwargs, sp);
         }
+        // Associated functions of Rust/C structs: shapes.Counter.new(...), Counter.new(...).
+        if ty(f) == "Attribute" {
+            let target = match ty(&f["value"]) {
+                "Name" if !self.locals.contains(sstr(&f["value"], "id")) => match self.bindings.get(sstr(&f["value"], "id")).cloned() {
+                    Some(Binding::ExternStruct(e, si)) => Some((e, si)),
+                    _ => None,
+                },
+                "Attribute" => match self.module_binding(&f["value"]["value"]) {
+                    Some(Binding::Extern(e)) if e != usize::MAX => self.ld.externs[e].structs.iter().position(|st| st.name == sstr(&f["value"], "attr")).map(|si| (e, si)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some((e, si)) = target {
+                return self.extern_ctor(e, si, sstr(f, "attr"), args, sp);
+            }
+        }
         // Class attribute calls: Point.from_pair(...), Point.norm(p).
         if ty(f) == "Attribute" && ty(&f["value"]) == "Name" && !self.locals.contains(sstr(&f["value"], "id")) {
             if let Some(Binding::Class(c)) = self.bindings.get(sstr(&f["value"], "id")).cloned() {
@@ -2499,6 +2584,9 @@ impl<'l> Lowerer<'l> {
                         if starred {
                             self.unsupported(sp, &format!("`*`/`**` arguments to the Rust/C function `{modname}.{attr}`"), "pass arguments explicitly");
                             return None;
+                        }
+                        if let Some(si) = self.ld.externs[ext].structs.iter().position(|st| st.name == attr) {
+                            return self.extern_ctor(ext, si, "new", args, sp);
                         }
                         return match self.ld.externs[ext].funcs.iter().position(|x| x.name == attr) {
                             Some(func) => Some(Expr { kind: ExprKind::ExternCall { ext, func, args }, span: sp }),

@@ -89,15 +89,51 @@ pub struct ExternModule {
     pub funcs: Vec<ExternFn>,
     /// Functions present in the source whose signatures cannot cross the boundary.
     pub skipped: Vec<(String, String)>,
+    /// `pub struct`s (Rust) / `typedef struct` (C) usable from Python.
+    pub structs: Vec<ExternStruct>,
+    /// Build settings from `pyfast:` comments: Cargo dependencies (`name = "1"`)
+    /// for Rust, libraries / pkg-config packages for C.
+    pub deps: Vec<String>,
+    pub link_libs: Vec<String>,
+    pub pkg_config: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExternStruct {
+    pub name: String,
+    /// `pub` fields (C: all fields).
+    pub fields: Vec<(String, ExtTy)>,
+    pub debug: bool,
+    pub clone: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct ExternFn {
+    /// Free functions: `name`; methods and associated functions: `Struct::name`.
     pub name: String,
     pub params: Vec<ExtTy>,
     pub ret: ExtTy,
     /// Rust `Result<T, E>` return: errors raise `RuntimeError(str(e))`.
     pub fallible: bool,
+    /// The struct an `impl` item belongs to, and how it takes `self` (None:
+    /// an associated function such as `new`).
+    pub owner: Option<usize>,
+    pub recv: Option<Pass>,
+}
+
+impl ExternFn {
+    /// The name without the `Struct::` prefix.
+    pub fn short(&self) -> &str {
+        self.name.rsplit("::").next().unwrap_or(&self.name)
+    }
+}
+
+/// How a Rust struct value crosses: by value (cloned), `&S`, or `&mut S`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Pass {
+    Value,
+    Ref,
+    Mut,
 }
 
 /// A native type at the Rust/C boundary.
@@ -115,6 +151,30 @@ pub enum ExtTy {
     /// C `const char *` (NUL-terminated UTF-8).
     CStr,
     Unit,
+    /// `Vec<T>` (copied from/to a list).
+    Vec(Box<ExtTy>),
+    /// `&[T]` (a list or tuple copied into a temporary vector).
+    Slice(Box<ExtTy>),
+    /// `&mut [T]` / `&mut Vec<T>` (copied in, written back into the same list).
+    SliceMut(Box<ExtTy>, bool),
+    /// `Option<T>` (`T | None`).
+    Opt(Box<ExtTy>),
+    /// `(A, B, ...)`.
+    Tuple(Vec<ExtTy>),
+    /// `HashMap<K, V>` / `BTreeMap<K, V>` (copied from/to a dict); the flag is BTreeMap.
+    Map(Box<ExtTy>, Box<ExtTy>, bool),
+    /// A struct of an extern module (`ext` index, struct index, Python name).
+    Struct { ext: usize, idx: usize, name: String, pass: Pass },
+    /// `impl Fn(A..) -> R` / `&dyn Fn(A..) -> R` (a function value).
+    Callback(Vec<ExtTy>, Box<ExtTy>, bool),
+    /// C `T *data` followed by a length parameter (`size_t n`): one list
+    /// argument. Fields: element, mutable (non-const), Rust type of the length.
+    CArray(Box<ExtTy>, bool, String),
+    /// `Vec<u8>` / `&[u8]` (bytes or a list of ints).
+    Bytes(Pass),
+    /// C function pointer `R (*f)(A, ...)` (a native function value, called
+    /// through a generated trampoline).
+    CFn(Vec<ExtTy>, Box<ExtTy>),
 }
 
 impl ExtTy {
@@ -125,6 +185,14 @@ impl ExtTy {
             ExtTy::Bool => Ty::Bool,
             ExtTy::StrRef | ExtTy::OwnedString | ExtTy::CStr => Ty::Str,
             ExtTy::Unit => Ty::None,
+            ExtTy::Vec(e) | ExtTy::Slice(e) | ExtTy::SliceMut(e, _) | ExtTy::CArray(e, _, _) => Ty::list(e.ty()),
+            ExtTy::Opt(e) => Ty::opt(e.ty()),
+            ExtTy::Tuple(es) => Ty::tuple(es.iter().map(|e| e.ty()).collect()),
+            ExtTy::Map(k, v, _) => Ty::dict(k.ty(), v.ty()),
+            ExtTy::Struct { ext, idx, name, .. } => Ty::comp(crate::Comp::ExtStruct(*ext as u32, *idx as u32, Box::leak(name.clone().into_boxed_str()))),
+            ExtTy::Callback(..) | ExtTy::CFn(..) => Ty::Obj,
+            ExtTy::Bytes(Pass::Value) => Ty::Obj,
+            ExtTy::Bytes(_) => Ty::list(Ty::Int),
         }
     }
 
@@ -138,18 +206,48 @@ impl ExtTy {
             ExtTy::OwnedString => "String".into(),
             ExtTy::CStr => "*const std::ffi::c_char".into(),
             ExtTy::Unit => "()".into(),
+            ExtTy::Vec(e) => format!("Vec<{}>", e.rust()),
+            ExtTy::Slice(e) => format!("&[{}]", e.rust()),
+            ExtTy::SliceMut(e, true) => format!("&mut Vec<{}>", e.rust()),
+            ExtTy::SliceMut(e, false) => format!("&mut [{}]", e.rust()),
+            ExtTy::Opt(e) => format!("Option<{}>", e.rust()),
+            ExtTy::Tuple(es) => format!("({},)", es.iter().map(|e| e.rust()).collect::<Vec<_>>().join(", ")),
+            ExtTy::Map(k, v, false) => format!("std::collections::HashMap<{}, {}>", k.rust(), v.rust()),
+            ExtTy::Map(k, v, true) => format!("std::collections::BTreeMap<{}, {}>", k.rust(), v.rust()),
+            ExtTy::Struct { name, .. } => name.clone(),
+            ExtTy::Callback(..) => "_".into(),
+            ExtTy::CFn(ps, r) => format!("extern \"C\" fn({}){}", ps.iter().map(|p| p.rust()).collect::<Vec<_>>().join(", "), if **r == ExtTy::Unit { String::new() } else { format!(" -> {}", r.rust()) }),
+            ExtTy::CArray(e, true, _) => format!("*mut {}", e.rust()),
+            ExtTy::CArray(e, false, _) => format!("*const {}", e.rust()),
+            ExtTy::Bytes(Pass::Value) => "Vec<u8>".into(),
+            ExtTy::Bytes(_) => "&[u8]".into(),
         }
     }
 
     /// Whether a value of type `t` can be passed for this parameter.
     pub fn accepts(&self, t: Ty) -> bool {
-        match self.ty() {
-            _ if t == Ty::Obj => true, // converted at runtime, TypeError on mismatch
-            Ty::Int => matches!(t, Ty::Int | Ty::Bool),
-            Ty::Float => t.is_numeric(),
-            Ty::Bool => t == Ty::Bool,
-            Ty::Str => t == Ty::Str,
-            Ty::None | Ty::Obj | Ty::C(_) => false,
+        let t = t.as_opt().filter(|_| !matches!(self, ExtTy::Opt(_))).unwrap_or(t);
+        if t == Ty::Obj {
+            // Converted at runtime (TypeError on mismatch); handles and callbacks are native only.
+            return !matches!(self, ExtTy::Struct { .. } | ExtTy::Callback(..) | ExtTy::CFn(..));
+        }
+        let elem_ok = |e: &ExtTy, t: Ty| crate::Ty::iter_elem(t).is_some_and(|x| x.is_never() || e.accepts(x));
+        match self {
+            ExtTy::Int(_) => matches!(t, Ty::Int | Ty::Bool),
+            ExtTy::F64 | ExtTy::F32 => t.is_numeric(),
+            ExtTy::Bool => t == Ty::Bool,
+            ExtTy::StrRef | ExtTy::OwnedString | ExtTy::CStr => t == Ty::Str,
+            ExtTy::Unit => false,
+            ExtTy::Vec(e) | ExtTy::Slice(e) | ExtTy::CArray(e, false, _) => elem_ok(e, t),
+            // Written back: the list's element type must be exactly the Rust one.
+            ExtTy::SliceMut(e, _) | ExtTy::CArray(e, true, _) => t.list_elem().is_some_and(|x| x == e.ty() || x.is_never()),
+            ExtTy::Opt(e) => t == Ty::None || e.accepts(t.as_opt().unwrap_or(t)),
+            ExtTy::Tuple(es) => t.tuple_items().is_some_and(|ts| ts.len() == es.len() && es.iter().zip(&ts).all(|(e, x)| e.accepts(*x))),
+            ExtTy::Map(k, v, _) => t.dict_kv().is_some_and(|(a, b)| (a.is_never() || k.accepts(a)) && (b.is_never() || v.accepts(b))),
+            ExtTy::Struct { .. } => t == self.ty(),
+            ExtTy::Callback(..) => t.as_closure().is_some() || t.union_members().is_some_and(|ms| ms.iter().all(|m| m.as_closure().is_some())),
+            ExtTy::Bytes(_) => t.list_elem().is_some_and(|x| matches!(x, Ty::Int | Ty::Bool) || x.is_never()),
+            ExtTy::CFn(..) => t.as_closure().is_some(),
         }
     }
 }
@@ -182,6 +280,8 @@ pub struct Function {
     pub cells: Vec<String>,
     /// How call arguments bind to the parameters.
     pub sig: CallSig,
+    /// `async def`: a call makes a coroutine (`Coro<T>`) running the body.
+    pub is_async: bool,
 }
 
 impl Function {
@@ -214,7 +314,8 @@ pub enum StmtKind {
     /// `for var in range(start, stop, step)`; bounds are evaluated once, in order.
     ForRange { var: String, start: Option<Expr>, stop: Expr, step: Option<Expr>, body: Vec<Stmt> },
     /// `for var in <python iterable>`: iteration through the CPython bridge.
-    ForIter { var: String, iter: Expr, body: Vec<Stmt> },
+    /// `for var in iter` (`async for` when `is_async`: `__aiter__`/`__anext__`).
+    ForIter { var: String, iter: Expr, body: Vec<Stmt>, is_async: bool },
     /// `obj[index] = value`
     SetItem { obj: Expr, index: Expr, value: Expr },
     /// `obj.name = value`
@@ -226,7 +327,8 @@ pub enum StmtKind {
     /// `raise`, `raise e`, `raise e from cause` (the cause only affects the traceback body).
     Raise(Option<Expr>),
     /// `with a as x, b as y: body` (one item per statement after lowering).
-    With { ctx: Expr, var: Option<String>, body: Vec<Stmt> },
+    /// `with` (`async with` when `is_async`: `__aenter__`/`__aexit__`).
+    With { ctx: Expr, var: Option<String>, body: Vec<Stmt>, is_async: bool },
     /// `del obj[index]` / `del obj.attr` (one target per statement).
     Del(Expr),
     /// Assignment to a module-level variable kept in a global cell
@@ -305,6 +407,8 @@ pub enum ExprKind {
     Call { callee: Callee, args: Vec<Expr>, order: Vec<usize> },
     BinOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
     Unary { op: UnaryOp, operand: Box<Expr> },
+    /// `await e`: runs a native coroutine inline, or suspends on a Python awaitable.
+    Await(Box<Expr>),
     /// Chained comparison `a < b <= c`; each middle operand is evaluated once.
     Compare { first: Box<Expr>, rest: Vec<(CmpOp, Expr)> },
     BoolOp { op: BoolOpKind, values: Vec<Expr> },

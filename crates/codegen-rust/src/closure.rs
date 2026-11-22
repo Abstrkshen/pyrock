@@ -47,11 +47,7 @@ impl FnEmitter<'_, '_> {
                     .collect();
                 let key: Vec<Ty> = if env { std::iter::once(m).chain(vals.iter().map(|v| v.1)).collect() } else { vals.iter().map(|v| v.1).collect() };
                 let spec = self.prog.spec(&SpecKey { func: fid, args: key }).expect("function value specialization");
-                let rt = match spec.ret {
-                    pyfast_infer::Slot::Known(t) => t,
-                    pyfast_infer::Slot::Boxed(..) => Ty::Obj,
-                    _ => Ty::None,
-                };
+                let rt = crate::call_ret(self.prog, spec);
                 let mut call_args: Vec<String> = if env { vec!["__fv.clone()".into()] } else { vec![] };
                 call_args.extend(vals.into_iter().map(|v| v.0));
                 let call = format!("{}({})?", spec.mangled, call_args.join(", "));
@@ -89,11 +85,7 @@ impl FnEmitter<'_, '_> {
         key_args.extend(arg_tys);
         key_args.extend(dvals.iter().map(|d| d.1));
         let spec = self.prog.spec(&SpecKey { func: fid, args: key_args }).expect("function value specialization");
-        let ret = match spec.ret {
-            pyfast_infer::Slot::Known(t) => t,
-            pyfast_infer::Slot::Boxed(..) => Ty::Obj,
-            _ => Ty::None,
-        };
+        let ret = crate::call_ret(self.prog, spec);
         let name = spec.mangled.clone();
         let params: Vec<String> = arg_tys.iter().enumerate().map(|(i, t)| format!("__a{i}: {}", t.rust())).collect();
         let mut call_args: Vec<String> = if env { vec!["__f.clone()".into()] } else { vec![] };
@@ -189,11 +181,7 @@ pub(crate) fn emit_boxers(prog: &pyfast_infer::Program, out: &mut String) {
             key.push(Ty::dict(Ty::Str, Ty::Obj));
         }
         let Some(spec) = prog.spec(&SpecKey { func: fid, args: key }) else { continue };
-        let ret = match spec.ret {
-            pyfast_infer::Slot::Known(r) => r,
-            pyfast_infer::Slot::Boxed(..) => Ty::Obj,
-            _ => Ty::None,
-        };
+        let ret = crate::call_ret(prog, spec);
         let short = f.name.rsplit('.').next().unwrap_or(&f.name).to_string();
         let params: Vec<String> = f.sig.names.iter().map(|n| format!("{n:?}")).collect();
         let mut body = String::new();

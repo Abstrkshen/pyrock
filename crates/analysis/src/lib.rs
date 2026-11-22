@@ -238,7 +238,11 @@ pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
         entries.push(PlanEntry {
             spec_id: s.id,
             function: f.name.clone(),
-            signature: if f.is_module { pyfast_infer::spec_label(prog, s) } else { format!("{}({}) -> {ret}", f.name, params.join(", ")) },
+            signature: if f.is_module {
+                pyfast_infer::spec_label(prog, s)
+            } else {
+                format!("{}{}({}) -> {ret}", if f.is_async { "async " } else { "" }, f.name, params.join(", "))
+            },
             rust_name: s.mangled.clone(),
             tier: if per_spec_bridge[s.id] { Tier::Bridge } else { Tier::Native },
             recursive,
@@ -249,7 +253,7 @@ pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
     let reached: HashSet<FuncId> = prog.specs.iter().filter(|s| reachable.contains(&s.id)).map(|s| s.key.func).collect();
     let unreachable = prog.module.funcs.iter().filter(|f| !reached.contains(&f.id) && !f.is_module).map(|f| f.name.clone()).collect();
 
-    let mut diags = Vec::new();
+    let mut diags: Vec<Diagnostic> = prog.spec_diagnostics.iter().filter(|(i, _)| reachable.contains(i)).map(|(_, d)| d.clone()).collect();
     if prog.mode == Mode::NativeOnly {
         for b in &boundaries {
             diags.push(
@@ -328,6 +332,7 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
             };
             push("P200", st.span, format!("runtime import of `{m}`"), "no .py/.rs/.c of that name next to the source: CPython import");
         }
+        StmtKind::ForIter { is_async: true, .. } => push("P217", st.span, "`async for`".into(), "CPython async iterator protocol (__aiter__/__anext__) in the event loop"),
         StmtKind::ForIter { iter, .. } if ty0(iter) == Some(Ty::Obj) => push("P214", st.span, "for-loop over a Python iterable".into(), "CPython iterator protocol"),
         StmtKind::SetItem { obj, .. } if ty0(obj) == Some(Ty::Obj) => push("P212", st.span, "item assignment".into(), "CPython __setitem__"),
         StmtKind::Del(t) => match &t.kind {
@@ -336,6 +341,7 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
             _ => {}
         },
         StmtKind::SetAttr { name, obj, .. } if ty0(obj) == Some(Ty::Obj) => push("P210", st.span, format!("attribute assignment `.{name}`"), "CPython __setattr__"),
+        StmtKind::With { is_async: true, .. } => push("P217", st.span, "`async with` statement".into(), "CPython async context manager protocol (__aenter__/__aexit__)"),
         StmtKind::With { .. } => push("P216", st.span, "`with` statement".into(), "CPython context manager protocol (__enter__/__exit__)"),
         StmtKind::Try { handlers, .. } => {
             for h in handlers {
@@ -360,9 +366,10 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
             };
             push("P210", e.span, format!("{}(...)", name_of(func)), reason);
         }
-        ExprKind::GetAttr { name, obj } if ty(obj) == Some(Ty::Obj) || ty(obj).is_some_and(|t| !pyfast_infer::spec::class_like(t) && !matches!(t.as_comp(), Some(Comp::Type(..)))) => {
+        ExprKind::GetAttr { name, obj } if ty(obj) == Some(Ty::Obj) || ty(obj).is_some_and(|t| !pyfast_infer::spec::class_like(t) && t.as_ext_struct().is_none() && !matches!(t.as_comp(), Some(Comp::Type(..)))) => {
             push("P210", e.span, format!("attribute `.{name}`"), "dynamic receiver: CPython attribute lookup")
         }
+        ExprKind::Await(v) if ty(v) == Some(Ty::Obj) => push("P217", e.span, "`await` of a Python awaitable".into(), "suspends the coroutine until the asyncio event loop has awaited it"),
         ExprKind::List(_) if ty(e) == Some(Ty::Obj) => push("P212", e.span, "list literal".into(), "kept as a Python list"),
         ExprKind::Dict(_) if ty(e) == Some(Ty::Obj) => push("P212", e.span, "dict literal".into(), "kept as a Python dict (keys are not natively hashable)"),
         ExprKind::Set(_) if ty(e) == Some(Ty::Obj) => push("P212", e.span, "set literal".into(), "kept as a Python set (elements are not natively hashable)"),
@@ -549,7 +556,7 @@ fn walk_expr_live(prog: &Program, s: &Spec, e: &Expr, f: &mut impl FnMut(&Expr))
 fn children(e: &Expr, skip_callee: bool) -> Vec<&Expr> {
     match &e.kind {
         ExprKind::BinOp { left, right, .. } => vec![left, right],
-        ExprKind::Unary { operand, .. } => vec![operand],
+        ExprKind::Unary { operand, .. } | ExprKind::Await(operand) => vec![operand],
         ExprKind::Compare { first, rest } => std::iter::once(&**first).chain(rest.iter().map(|r| &r.1)).collect(),
         ExprKind::BoolOp { values, .. } => values.iter().collect(),
         ExprKind::IfExp { test, body, orelse } => vec![test, body, orelse],
@@ -607,7 +614,7 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr), skip_callee: bool) {
             walk_expr(left, f, skip_callee);
             walk_expr(right, f, skip_callee);
         }
-        ExprKind::Unary { operand, .. } => walk_expr(operand, f, skip_callee),
+        ExprKind::Unary { operand, .. } | ExprKind::Await(operand) => walk_expr(operand, f, skip_callee),
         ExprKind::Compare { first, rest } => {
             walk_expr(first, f, skip_callee);
             for (_, c) in rest {

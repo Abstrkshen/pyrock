@@ -34,3 +34,27 @@ pub unsafe fn from_cstr(p: *const c_char) -> PyResult<Str> {
 pub fn rust_err<E: std::fmt::Display>(e: E) -> Exc {
     Exc::new("RuntimeError", e.to_string())
 }
+
+thread_local! {
+    /// An exception raised inside a callback called by Rust/C code (which
+    /// cannot propagate it): re-raised when that call returns.
+    static STASH: std::cell::RefCell<Option<Exc>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Keep the first exception raised by a callback.
+pub fn stash(e: Exc) {
+    STASH.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.is_none() {
+            *s = Some(e);
+        }
+    });
+}
+
+/// After a Rust/C call that received callbacks: re-raise a stashed exception.
+pub fn check() -> PyResult<()> {
+    match STASH.with(|s| s.borrow_mut().take()) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}

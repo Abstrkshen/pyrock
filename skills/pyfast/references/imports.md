@@ -54,8 +54,10 @@ pub fn checked_div(a: i64, b: i64) -> Result<i64, String> {
 ```
 
 * Included as `#[path = "/abs/x.rs"] mod rs_x;` in the generated crate, so it's compiled with
-  the program and can contain private helpers, structs and `use std::...`. It can't use
-  external crates (there's no way to add dependencies yet).
+  the program and can contain private helpers, structs and `use std::...`.
+* External crates: add a `// pyfast: dep NAME = "VERSION"` comment line (any Cargo dependency
+  spec after the `=`, e.g. `// pyfast: dep serde = { version = "1", features = ["derive"] }`).
+  It is copied into the generated `Cargo.toml`.
 * Parsed with `syn`. Only `pub fn` at the top level of the file are exposed.
 
 | Rust signature type | Python value |
@@ -67,10 +69,22 @@ pub fn checked_div(a: i64, b: i64) -> Result<i64, String> {
 | `String` | `str` (argument or return) |
 | `()` / no return | `None` |
 | `Result<T, E>` return | `T`. `Err(e)` raises `RuntimeError(e.to_string())` |
+| `Vec<T>`, `&[T]`, `&Vec<T>` | any iterable of `T` (list, tuple, `array.array`, numpy array, ...); a returned `Vec<T>` is a `list` |
+| `&mut [T]`, `&mut Vec<T>` | a list (or any mutable sequence, e.g. `array.array`); the changes are written back after the call |
+| `Vec<u8>` / `&[u8]` | `bytes`, `bytearray` or a list of ints; a returned `Vec<u8>` is `bytes` |
+| `Option<T>` | `T` or `None` |
+| `(A, B, ...)` | `tuple` |
+| `HashMap<K, V>`, `BTreeMap<K, V>` | `dict` |
+| `impl Fn(A) -> R`, `&dyn Fn(A) -> R` | a function, lambda or closure; it's compiled natively for the argument types, and an exception inside it propagates out of the Rust call |
+| `pub struct S` (with `#[derive(Clone)]`) | a handle object: `S(...)`/`S.new(...)` (an `impl` fn named `new`), `pub` fields read and assigned as attributes, `impl` methods taking `&self`/`&mut self` called as methods |
+
+Struct handles are shared by reference (like Python objects), print as `S { .. }` (Rust
+`Debug`) and must stay native: passing one to CPython is P231. Associated functions
+are called as `S.name(...)`.
 
 Skipped (listed in `explain` with a reason, calling one gives P150): generic functions,
-`async`, `unsafe`, `self` methods, and other parameter types (slices, `Vec`, structs, `&mut`,
-`Option`, ...). Wrong argument types or count from Python: P303.
+`async`, `unsafe`, `&mut` of scalars, references to unsupported types. Wrong argument types
+or count from Python: P303.
 
 ## C modules (`x.c` + optional `x.h`)
 
@@ -87,6 +101,8 @@ const char *version(void);
   literal.
 * The generated `build.rs` compiles `x.c` with the `cc` crate (the header directory is added
   to the include path) and links `libm`.
+* Libraries: `// pyfast: link NAME` adds `-lNAME`; `// pyfast: pkg-config NAME` adds the
+  package's compile and link flags (e.g. `// pyfast: pkg-config raylib`).
 
 | C type | Python value |
 |---|---|
@@ -96,8 +112,11 @@ const char *version(void);
 | `const char *` / `char *` argument | `str`. NUL inside → `ValueError` |
 | `const char *` return | `str` (copied, never freed, so return static or long-lived strings) |
 | `void` | `None` |
+| `T *data, int n` / `const T *data, size_t n` (pointer followed by an integer length) | one argument: a sequence of `T`; a non-`const` pointer writes the changes back |
+| `typedef struct { ... } S;` by value | `S(field, ...)` creates it; fields are attributes; a returned struct is an `S` |
+| `R (*f)(A, ...)` | a function, lambda or closure (called through a generated `extern "C"` trampoline; it must not be kept after the call) |
 
-Skipped: other pointer types, structs, arrays, function pointers, variadic (`...`), `static`.
+Skipped: other pointer types, unions, variadic (`...`), `static`.
 
 ## CPython imports
 
@@ -131,4 +150,5 @@ pyfast run project/main.py
 
 Working examples in the repo: `examples/imports/`, `samples/18_local_modules/`,
 `samples/19_rust_module/`, `samples/20_c_module/`, `samples/21_everything/`,
-`tests/interop/rust_c/`.
+`tests/interop/rust_c/`, `tests/interop/rich/` (slices, structs, callbacks, crates, C arrays and
+structs), `tests/interop/buffers/` (`array.array`, `bytes`).

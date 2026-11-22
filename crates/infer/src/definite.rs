@@ -45,7 +45,7 @@ fn stmt(s: &Stmt, mut cur: Set, out: &mut HashSet<String>) -> Option<Set> {
         }
         StmtKind::Break | StmtKind::Continue => return None,
         StmtKind::Pass | StmtKind::Import(_) => {}
-        StmtKind::ForIter { var, iter, body } => {
+        StmtKind::ForIter { var, iter, body, .. } => {
             expr(iter, &cur, out);
             let mut inner = cur.clone();
             inner.insert(var.clone());
@@ -83,7 +83,7 @@ fn stmt(s: &Stmt, mut cur: Set, out: &mut HashSet<String>) -> Option<Set> {
         }
         StmtKind::AssignGlobal { value, .. } => expr(value, &cur, out),
         StmtKind::Del(t) => expr(t, &cur, out),
-        StmtKind::With { ctx, var, body } => {
+        StmtKind::With { ctx, var, body, .. } => {
             expr(ctx, &cur, out);
             let mut inner = cur.clone();
             if let Some(v) = var {
@@ -142,7 +142,7 @@ fn expr(e: &Expr, cur: &Set, out: &mut HashSet<String>) {
             expr(left, cur, out);
             expr(right, cur, out);
         }
-        ExprKind::Unary { operand, .. } => expr(operand, cur, out),
+        ExprKind::Unary { operand, .. } | ExprKind::Await(operand) => expr(operand, cur, out),
         ExprKind::Compare { first, rest } => {
             expr(first, cur, out);
             for (_, c) in rest {

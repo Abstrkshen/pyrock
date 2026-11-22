@@ -63,15 +63,16 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 
 ## Phase 5: Rich Rust and C interop
 
-- [ ] Lists and slices (`Vec<T>`, `&[T]`, `T *` + length) across the boundary
-- [ ] Buffers (`bytes`, buffer protocol, numpy arrays)
-- [ ] Structs ↔ classes; Rust `impl` methods; opaque handles
-- [ ] Callbacks (function pointers, `Fn` arguments)
-- [ ] Cargo dependencies for `.rs` files; library / pkg-config flags for `.c` files
+- [x] Lists and slices (`Vec<T>`, `&[T]`, `T *` + length) across the boundary
+- [x] Buffers (`bytes`, buffer protocol, numpy arrays)
+- [x] Structs ↔ classes; Rust `impl` methods; opaque handles
+- [x] Callbacks (function pointers, `Fn` arguments)
+- [x] Cargo dependencies for `.rs` files; library / pkg-config flags for `.c` files
 
 ## Phase 6: async
 
-- [ ] `async def` / `await` bridged to asyncio
+- [x] `async def` / `await` bridged to asyncio (`async with`, `async for`)
+- [ ] Generators (`yield`, `yield from`) on the same stackful coroutines
 
 ## Throughout
 
@@ -338,3 +339,66 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
   class look nested in its last method. Read-only consumers (`json.dumps`) still wrap
   function values and instances passed to them (`default=to_dict`).
 * Test: `tests/differential/objects_to_python.py`.
+
+### Phase 5: rich Rust and C interop (2026-11-22)
+
+* New `ExtTy` signature types (`crates/ir/src/hir.rs`), each with its Python type, Rust
+  spelling and accepted argument types: `Vec`/`Slice`/`SliceMut` (write-back), `Opt`,
+  `Tuple`, `Map`, `Struct`, `Callback` (`impl Fn`/`&dyn Fn`), `CArray` (C pointer + length,
+  expanded to two C arguments), `Bytes`, `CFn` (C function pointer).
+* Rust parsing (`frontend/src/externs.rs`): `pub struct` + `impl` methods (`S::name`, with
+  `Self` substituted), `// pyfast: dep` lines → `[dependencies]` in the generated
+  `Cargo.toml`. C parsing: `typedef struct` (with a synthesized constructor), pointer+length
+  pairs, function pointer parameters (parameter lists split at top-level commas),
+  `// pyfast: link` / `pkg-config` → `build.rs`.
+* Codegen (`codegen-rust/src/ext.rs`): conversions both ways (`ext_out` / `conv_in`); struct
+  handles are `Rc<RefCell<_>>` newtypes with Python-style printing and identity; callbacks
+  are Rust closures calling the native specialization, with exceptions stashed
+  (`rt::ext::stash`) and re-raised after the call; C function pointers go through a
+  generated `extern "C"` trampoline that reads the current closure from a per-call-site
+  thread-local stack (so re-entrant calls work).
+* Buffers: any iterable converts to a slice; a mutable slice argument that is a Python
+  object (`array.array`, numpy array) is written back item by item; `Vec<u8>` returns are
+  Python `bytes`; `b"..."` literals lower to `bytes([...])` (hybrid).
+* Handles that reach CPython are P231 (they have no Python wrapper yet).
+* Tests: `tests/interop/rich/` (Rust: slices, `&mut`, `Vec` push, tuple/`HashMap`
+  returns, `impl Fn`/`&dyn Fn` with closures, the `itoa` crate, a struct with methods; C:
+  arrays with write-back, struct values, a function pointer integrator, `-lm`),
+  `tests/interop/buffers/`.
+
+### Phase 6.1: async / await (2026-11-22)
+
+* Calling an `async def` makes a native coroutine (`rt::aio::Coro<T>`, type
+  `Coroutine[T]`): the body is emitted as `<name>__body` and the function itself returns the
+  body as a closure. `await` of a native coroutine runs it inline (as CPython does).
+* When a coroutine reaches CPython (`asyncio.run`, `gather`, `create_task`), `ToPy` wraps it
+  in a small Python driver coroutine plus a stackful coroutine (`corosensei`) running the
+  body on its own 2 MB lazily committed stack. `await` of a Python awaitable inside the body
+  suspends that stack and hands the awaitable to the driver, which awaits it in the event
+  loop and resumes the body with the result or throws the exception into it. Everything
+  stays on the event loop's thread, so thread-local state (globals, stdout buffer) is
+  unaffected. 2000 concurrent native tasks work.
+* `async with` / `async for` (`__aenter__`/`__aexit__`, `__aiter__`/`__anext__`, with
+  `StopAsyncIteration`) on Python objects, and on native class instances through their
+  Python wrapper. New boundary code P217 (`await` of a Python awaitable, `async with`,
+  `async for`).
+* Dropping a suspended coroutine (`rt::stackful::Co`) unwinds its frames with
+  `panic = "unwind"`, and resets and frees the stack under `panic = "abort"` (release).
+* Fixes found on the way (by the new `raylib-breakout` sample, which now compiles natively
+  because `b"..."` literals are supported):
+  * Functions with no `return <value>` that cannot fall off their end (always raise) have
+    type `Never` instead of P306.
+  * A native list/tuple/str indexed by a CPython object unboxes the index at runtime.
+  * Hybrid mode: past 16 specializations a function's further direct calls share one
+    specialization with `object` arguments (`Program::resolve_key`) instead of P310.
+  * Diagnostics from a specialization's body are reported only when that specialization
+    is reachable under the final types (`Program::spec_diagnostics`): early fixed-point
+    rounds can create specializations for types that later widen.
+  * Codegen stops a block at the statement where inference stops (`spec::falls_through`),
+    so dead code after a statically decided `if ...: return` is not emitted.
+  * `scripts/readme_check.sh` builds first, then runs with a 30 s limit; a program still
+    running then (a game, a server) counts as working.
+* Tests: `tests/differential/async_basic.py` (sleep, gather, exceptions, tasks,
+  `wait_for` timeout), `tests/differential/async_protocols.py` (async methods, native async
+  iterator and context manager classes, `asyncio.Queue`, closures, 2000 tasks, reuse error,
+  uncaught exception).

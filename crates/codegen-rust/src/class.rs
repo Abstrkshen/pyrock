@@ -169,11 +169,7 @@ fn emit_native_object(prog: &Program, c: ClassId, out: &mut String) {
                 _ => std::iter::once(t).chain((1..n).map(|_| Ty::Obj)).collect(),
             };
             let Some(spec) = prog.spec(&SpecKey { func: meth.func, args: key }) else { continue };
-            let ret = match spec.ret {
-                pyfast_infer::Slot::Known(x) => x,
-                pyfast_infer::Slot::Boxed(..) => Ty::Obj,
-                _ => Ty::None,
-            };
+            let ret = crate::call_ret(prog, spec);
             let name = &meth.name;
             if meth.kind == MethodKind::Property {
                 arms.push(format!("{name:?} => {{ let __r = {}(self.clone())?; Ok({}) }},", spec.mangled, crate::boxed("__r", ret)));

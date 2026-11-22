@@ -56,8 +56,8 @@ imports `.c` files.
 | Found | Result |
 |---|---|
 | `x.py` | Compiled natively into the same binary. Functions are specialized per call types, and the module body runs once. If it can't be compiled (classes, try, ...) it falls back to CPython with warning P220 |
-| `x.rs` | `#[path] mod`. `pub fn` with int/float/bool/`&str`/`String`/`()` types, or `Result<T, E>` return (Err → `RuntimeError`) |
-| `x.c` (+`x.h`) | Built with `cc`, called over FFI. Integer types, float/double, bool, `const char *`, void |
+| `x.rs` | `#[path] mod`. `pub fn` with scalars, strings, `Vec`/slices (`&mut` written back), `Option`, tuples, `HashMap`, `impl Fn` callbacks, `pub struct` handles with methods, `Result` (Err → `RuntimeError`); crates via `// pyfast: dep` |
+| `x.c` (+`x.h`) | Built with `cc`, called over FFI. Scalars, strings, pointer+length arrays, `typedef struct` values, function pointers; `// pyfast: link` / `pkg-config` |
 | nothing | CPython import at runtime (stdlib, site-packages, numpy, ...) |
 
 Dotted names (`import os.path`) always go to CPython. Relative imports, `import *` and imports

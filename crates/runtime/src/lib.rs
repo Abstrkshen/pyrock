@@ -8,16 +8,19 @@
 //! whose exact result does not fit raises `OverflowError` instead of
 //! wrapping or silently changing type. Arbitrary precision is milestone M4.
 
+pub mod aio;
 pub mod coll;
 pub mod conv;
 pub mod exc;
 pub mod ext;
 pub mod float;
+pub mod gen;
 pub mod fmt;
 pub mod int;
 pub mod io;
 #[cfg(feature = "python")]
 pub mod py;
+pub mod stackful;
 pub mod string;
 
 pub use coll::{Dict, List, Never, Set, Tup, Tuple0};

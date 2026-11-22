@@ -103,6 +103,11 @@ pub struct Program<'m> {
     pub specs: Vec<Spec>,
     pub index: HashMap<SpecKey, usize>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Diagnostics found in the body of a specialization (its index). Only
+    /// those of specializations reachable under the final types are reported
+    /// (`analysis::plan`): early rounds can create specializations for types
+    /// that later widen.
+    pub spec_diagnostics: Vec<(usize, Diagnostic)>,
 }
 
 impl<'m> Program<'m> {
@@ -115,14 +120,41 @@ impl<'m> Program<'m> {
         if !s.analyzed {
             return None;
         }
-        match (s.ret, s.falls_through) {
+        let r = match (s.ret, s.falls_through) {
             (Slot::Known(Ty::None), _) | (Slot::Unknown, true) => Some(Ty::None),
+            // Never returns normally (always raises): `Never`.
+            (Slot::Unknown, false) if !returns_value(&self.module.funcs[s.key.func].body) => Some(Ty::never()),
             (Slot::Known(t), false) => Some(t),
             // Falling off the end returns None: `T | None`.
             (Slot::Known(t), true) => Some(opt_join(t, Ty::None).unwrap_or(Ty::Obj)),
             (Slot::Boxed(..), _) => Some(Ty::Obj),
             _ => None,
+        };
+        // Calling an `async def` makes a coroutine; its body produces `r`.
+        if self.module.funcs[s.key.func].is_async {
+            return r.map(Ty::coro);
         }
+        r
+    }
+
+    /// What the body of `s` returns (the call result, minus the coroutine of
+    /// an `async def`).
+    pub fn body_result(&self, s: &Spec) -> Option<Ty> {
+        let r = self.call_result(s)?;
+        Some(if self.module.funcs[s.key.func].is_async { r.as_coro().unwrap_or(r) } else { r })
+    }
+
+    /// The specialization a direct call with argument types `key` uses: its
+    /// own, or (hybrid mode, once the function has reached the limit) the
+    /// shared one with object-typed immutable arguments.
+    pub fn resolve_key(&self, key: SpecKey) -> SpecKey {
+        if self.index.contains_key(&key) || !self.boxing() {
+            return key;
+        }
+        if self.specs.iter().filter(|s| s.key.func == key.func).count() < MAX_SPECS_PER_FUNCTION {
+            return key;
+        }
+        generic_key(&self.module.funcs[key.func], &key)
     }
 
     pub fn spec(&self, key: &SpecKey) -> Option<&Spec> {
@@ -218,6 +250,7 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
         specs: vec![],
         index: HashMap::new(),
         diagnostics: vec![],
+        spec_diagnostics: vec![],
     };
     let main_key = SpecKey { func: module.main, args: vec![] };
     add_spec(&mut prog, main_key);
@@ -290,7 +323,10 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
             for (key, span) in requests {
                 if !prog.index.contains_key(&key) {
                     let count = prog.specs.iter().filter(|s| s.key.func == key.func).count();
-                    if count >= MAX_SPECS_PER_FUNCTION {
+                    // Hybrid mode: past the limit, calls share one object-typed
+                    // specialization (`Program::resolve_key`), which is always allowed.
+                    let generic = prog.boxing() && generic_key(&module.funcs[key.func], &key) == key;
+                    if count >= MAX_SPECS_PER_FUNCTION && !generic {
                         let name = &module.funcs[key.func].name;
                         prog.diagnostics.push(Diagnostic::error(
                             "P310",
@@ -316,6 +352,7 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
 
     // Final reporting pass over the converged state.
     let mut diags = Vec::new();
+    let mut owners: Vec<usize> = Vec::new();
     for i in 0..prog.specs.len() {
         let mut sink = Vec::new();
         let before = diags.len();
@@ -337,6 +374,7 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
                 (Slot::Known(t), false) => (Some(Slot::Known(t)), true),
                 (Slot::Known(Ty::None), true) => (Some(Slot::Known(Ty::None)), true),
                 (Slot::Unknown, true) => (Some(Slot::Known(Ty::None)), true),
+                (Slot::Unknown, false) if !returns_value(&f.body) => (Some(Slot::Known(Ty::never())), true),
                 (Slot::Unknown, false) => (None, false),
                 (Slot::Boxed(a, b), _) => (Some(Slot::Boxed(a, b)), true),
                 (Slot::Known(t), true) if opt_join(t, Ty::None).is_some() => (Some(Slot::Known(opt_join(t, Ty::None).unwrap())), true),
@@ -367,16 +405,38 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
                 prog.specs[i].ret = r;
             }
         }
+        owners.resize(diags.len(), i);
     }
-    dedup(&mut diags);
-    prog.diagnostics.extend(diags);
+    let mut seen = HashSet::new();
+    for (d, i) in diags.into_iter().zip(owners) {
+        if seen.insert((d.code, d.span, d.message.clone())) {
+            prog.spec_diagnostics.push((i, d));
+        }
+    }
     prog
 }
 
-fn dedup(d: &mut Vec<Diagnostic>) {
-    let mut seen = HashSet::new();
-    d.retain(|x| seen.insert((x.code, x.span, x.message.clone())));
+/// Whether a function body has a `return <value>` anywhere (a body without
+/// one that cannot fall off its end always raises).
+fn returns_value(stmts: &[Stmt]) -> bool {
+    if std::env::var("PF_NO_NEVER").is_ok() { return true; }
+    stmts.iter().any(|s| match &s.kind {
+        StmtKind::Return(Some(_)) => true,
+        StmtKind::If { body, orelse, .. } => returns_value(body) || returns_value(orelse),
+        StmtKind::While { body, .. } | StmtKind::ForRange { body, .. } | StmtKind::ForIter { body, .. } | StmtKind::With { body, .. } => returns_value(body),
+        StmtKind::Try { body, handlers, orelse, finalbody } => returns_value(body) || handlers.iter().any(|h| returns_value(&h.body)) || returns_value(orelse) || returns_value(finalbody),
+        _ => false,
+    })
 }
+
+/// `key` with every immutable argument boxed (the environment of a closure
+/// and mutable containers keep their types: boxing would copy them).
+pub fn generic_key(f: &Function, key: &SpecKey) -> SpecKey {
+    let off = env_offset(f);
+    let args = key.args.iter().enumerate().map(|(i, t)| if i < off || t.has_mutable() { *t } else { Ty::Obj }).collect();
+    SpecKey { func: key.func, args }
+}
+
 
 pub fn spec_label(prog: &Program, s: &Spec) -> String {
     let f = &prog.module.funcs[s.key.func];
@@ -519,6 +579,8 @@ pub enum CallClass {
     RuntimeIsinstance(Vec<ClassId>),
     /// A call of a function value (closure, lambda, function used as a value).
     ClosureCall,
+    /// A method of a Rust/C struct handle (`counter.incr(2)`).
+    ExtMethod { ext: usize, func: usize },
 }
 
 /// A native instance or a union of them.
@@ -690,6 +752,15 @@ impl Ctx<'_, '_> {
             }
             ExprKind::Call { callee: Callee::Func(fid), args, .. } => {
                 let tys: Option<Vec<Ty>> = args.iter().map(|a| self.expr(a)).collect();
+                // An `async def` call is a coroutine: widen what its body returns.
+                let t = if self.prog.module.funcs[*fid].is_async {
+                    match t.as_coro() {
+                        Some(r) => r,
+                        None => return,
+                    }
+                } else {
+                    t
+                };
                 if let Some(args) = tys {
                     self.ret_widen.push((SpecKey { func: *fid, args }, t));
                 }
@@ -748,6 +819,13 @@ impl Ctx<'_, '_> {
                     }
                     self.news.push((0, Some(m)));
                 }
+                return;
+            }
+            if t.as_ext_struct().is_some() {
+                self.report(
+                    Diagnostic::error("P231", e.span, format!("a handle to the Rust/C struct `{t}` is passed to Python"))
+                        .note("handles stay native; pass their fields (plain values) to Python instead"),
+                );
                 return;
             }
             if has_class(t) {
@@ -849,7 +927,17 @@ impl Ctx<'_, '_> {
                 assigns.push((var.clone(), Ty::Int));
                 self.block(body, assigns, ret);
             }
-            StmtKind::ForIter { var, iter, body } => {
+            StmtKind::ForIter { var, iter, body, is_async: true } => {
+                // A native instance is iterated through its Python wrapper.
+                if self.expr(iter).is_some_and(class_like) {
+                    self.escape(iter);
+                } else if let Some(t) = self.expr(iter).filter(|t| *t != Ty::Obj) {
+                    self.report(Diagnostic::error("P301", iter.span, format!("'async for' requires an object with __aiter__ method, got {t}")).note("CPython would raise TypeError here"));
+                }
+                assigns.push((var.clone(), Ty::Obj));
+                self.block(body, assigns, ret);
+            }
+            StmtKind::ForIter { var, iter, body, .. } => {
                 let it = match self.expr(iter) {
                     Some(t) if class_like(t) => match self.dunder(iter, t, "__iter__", &[]) {
                         Some(r) => r,
@@ -877,6 +965,19 @@ impl Ctx<'_, '_> {
                 self.block(body, assigns, ret);
             }
             StmtKind::SetItem { obj, index, value } => self.set_item(obj, index, value),
+            StmtKind::SetAttr { obj, value, name } if self.expr(obj).is_some_and(|t| t.as_ext_struct().is_some()) => {
+                let (ext, si) = self.expr(obj).unwrap().as_ext_struct().unwrap();
+                let st = &self.prog.module.externs[ext].structs[si];
+                let field = st.fields.iter().find(|(n, _)| n == name).map(|(_, t)| t.clone());
+                let sname = st.name.clone();
+                if let Some(vt) = self.expr(value) {
+                    match field {
+                        Some(ft) if ft.accepts(vt) => {}
+                        Some(ft) => self.report(Diagnostic::error("P303", value.span, format!("field `{name}` of `{sname}` expects {}, got {vt}", ft.ty()))),
+                        None => self.report(Diagnostic::error("P301", s.span, format!("'{sname}' has no public field '{name}'"))),
+                    }
+                }
+            }
             StmtKind::SetAttr { obj, value, name } => {
                 if let Some(ot) = self.expr(obj) {
                     if let Some(ms) = ot.union_members() {
@@ -981,9 +1082,12 @@ impl Ctx<'_, '_> {
                 }
                 return false;
             }
-            StmtKind::With { ctx, var, body } => {
+            StmtKind::With { ctx, var, body, is_async } => {
                 if let Some(t) = self.expr(ctx) {
-                    if t != Ty::Obj {
+                    if *is_async && class_like(t) {
+                        // `async with` on a native instance: through its Python wrapper.
+                        self.escape(ctx);
+                    } else if t != Ty::Obj {
                         self.report(
                             Diagnostic::error("P301", ctx.span, format!("'{t}' object does not support the context manager protocol"))
                                 .note("CPython would raise TypeError here"),
@@ -1122,6 +1226,13 @@ impl Ctx<'_, '_> {
     fn classify(&mut self, func: &Expr, args: &[Expr], kwargs: &[(String, Expr)]) -> CallClass {
         if let ExprKind::GetAttr { obj, name } = &func.kind {
             if let Some(t) = self.expr(obj) {
+                if let Some((ext, si)) = t.as_ext_struct() {
+                    let m = &self.prog.module.externs[ext];
+                    return match m.funcs.iter().position(|f| f.owner == Some(si) && f.recv.is_some() && f.short() == name) {
+                        Some(func) => CallClass::ExtMethod { ext, func },
+                        None => CallClass::Bridge,
+                    };
+                }
                 if t.union_members().is_some() {
                     return CallClass::UnionMethod(name.clone());
                 }
@@ -1377,6 +1488,37 @@ impl Ctx<'_, '_> {
         }
     }
 
+    /// Type-check a Rust/C call's arguments; callbacks get specializations
+    /// for the Rust parameter types. Returns the result type.
+    fn extern_args(&mut self, e: &Expr, ext: usize, func: usize, args: &[Expr]) -> Option<Ty> {
+        let tys: Vec<Option<Ty>> = args.iter().map(|a| self.expr(a)).collect();
+        let tys: Vec<Ty> = tys.into_iter().collect::<Option<_>>()?;
+        let m = &self.prog.module.externs[ext];
+        let f = &m.funcs[func];
+        if f.params.len() != tys.len() {
+            self.report(Diagnostic::error("P303", e.span, format!("{}.{}() takes {} argument(s) but {} were given", m.name, f.name.replace("::", "."), f.params.len(), tys.len())));
+            return None;
+        }
+        let params = f.params.clone();
+        let (mname, fname) = (m.name.clone(), f.name.replace("::", "."));
+        for (i, (p, t)) in params.iter().zip(&tys).enumerate() {
+            if !p.accepts(*t) {
+                self.report(
+                    Diagnostic::error("P303", args[i].span, format!("argument {} of {mname}.{fname}() expects {} (`{}`), got {t}", i + 1, p.ty(), p.rust()))
+                        .note("CPython-side code would raise TypeError here"),
+                );
+                continue;
+            }
+            if let ExtTy::Callback(ps, _, _) | ExtTy::CFn(ps, _) = p {
+                let pts: Vec<Ty> = ps.iter().map(|x| x.ty()).collect();
+                for member in t.union_members().unwrap_or(vec![*t]) {
+                    self.call_value_tys(e, member, &pts);
+                }
+            }
+        }
+        Some(self.prog.module.externs[ext].funcs[func].ret.ty())
+    }
+
     fn class_ty(&self, c: ClassId) -> Ty {
         Ty::class(c, &self.prog.module.class(c).rust)
     }
@@ -1622,6 +1764,17 @@ impl Ctx<'_, '_> {
                 }
                 Some(t)
             }
+            ExprKind::Await(v) => {
+                let t = self.expr(v)?;
+                if let Some(r) = t.as_coro() {
+                    return Some(r);
+                }
+                if t == Ty::Obj {
+                    return Some(Ty::Obj);
+                }
+                self.report(Diagnostic::error("P301", v.span, format!("object {t} can't be used in 'await' expression")).note("CPython would raise TypeError here"));
+                None
+            }
             ExprKind::Int(_) => Some(Ty::Int),
             ExprKind::Float(_) => Some(Ty::Float),
             ExprKind::Str(_) => Some(Ty::Str),
@@ -1767,29 +1920,7 @@ impl Ctx<'_, '_> {
                 let b = self.expr(orelse);
                 self.merge(&[a?, b?], e, "conditional expression")
             }
-            ExprKind::ExternCall { ext, func, args } => {
-                let tys: Vec<Option<Ty>> = args.iter().map(|a| self.expr(a)).collect();
-                let tys: Vec<Ty> = tys.into_iter().collect::<Option<_>>()?;
-                let m = &self.prog.module.externs[*ext];
-                let f = &m.funcs[*func];
-                if f.params.len() != tys.len() {
-                    self.report(Diagnostic::error(
-                        "P303",
-                        e.span,
-                        format!("{}.{}() takes {} argument(s) but {} were given", m.name, f.name, f.params.len(), tys.len()),
-                    ));
-                    return None;
-                }
-                for (i, (p, t)) in f.params.iter().zip(&tys).enumerate() {
-                    if !p.accepts(ops::base(*t)) {
-                        self.report(
-                            Diagnostic::error("P303", args[i].span, format!("argument {} of {}.{}() expects {} (`{}`), got {t}", i + 1, m.name, f.name, p.ty(), p.rust()))
-                                .note("CPython-side code would raise TypeError here"),
-                        );
-                    }
-                }
-                Some(f.ret.ty())
-            }
+            ExprKind::ExternCall { ext, func, args } => self.extern_args(e, *ext, *func, args),
             ExprKind::Annotated { ty, value } => {
                 let v = self.expr(value)?;
                 // Checked unbox (TypeError unless the object is exactly a `ty`).
@@ -1826,6 +1957,16 @@ impl Ctx<'_, '_> {
                 let t = self.expr(obj)?;
                 if t == Ty::Obj {
                     return Some(Ty::Obj);
+                }
+                if let Some((ext, si)) = t.as_ext_struct() {
+                    let st = &self.prog.module.externs[ext].structs[si];
+                    return match st.fields.iter().find(|(n, _)| n == name) {
+                        Some((_, ft)) => Some(ft.ty()),
+                        None => {
+                            self.report(Diagnostic::error("P301", e.span, format!("'{}' has no public field '{name}'", st.name)));
+                            None
+                        }
+                    };
                 }
                 if class_like(t) || matches!(t.as_comp(), Some(Comp::Type(..))) {
                     return self.attr(e, t, name);
@@ -2057,7 +2198,7 @@ impl Ctx<'_, '_> {
                             ));
                             return None;
                         }
-                        let key = SpecKey { func: *fid, args: tys.clone() };
+                        let key = self.prog.resolve_key(SpecKey { func: *fid, args: tys.clone() });
                         let callee = self.prog.spec(&key);
                         let r = callee.and_then(|s| self.prog.call_result(s));
                         // A callee that widens a parameter (appends to it, lets it
@@ -2095,6 +2236,15 @@ impl Ctx<'_, '_> {
                 self.method_call(e, recv, name, fid, kind, args, kwargs)
             }
             CallClass::Construct(c) => self.new_instance(e, c, args, kwargs),
+            CallClass::ExtMethod { ext, func: fi } => {
+                if !kwargs.is_empty() {
+                    self.report(Diagnostic::error("P303", e.span, "keyword arguments to Rust/C methods are not supported"));
+                    return None;
+                }
+                let ExprKind::GetAttr { obj, .. } = &func.kind else { unreachable!() };
+                self.expr(obj)?;
+                self.extern_args(e, ext, fi, args)
+            }
             CallClass::ClosureCall => {
                 let ft = self.expr(func)?;
                 self.call_value_exprs(e, ft, args, kwargs)
@@ -2310,6 +2460,26 @@ impl<'m> Program<'m> {
             news: vec![],
         }
     }
+}
+
+/// Whether control can continue after `s` (the rule inference uses to stop
+/// analyzing a block; codegen stops emitting at the same point, so statements
+/// it never typed are never emitted).
+pub fn falls_through(locals: &BTreeMap<String, Slot>, s: &Stmt) -> bool {
+    match &s.kind {
+        StmtKind::Return(_) | StmtKind::Raise(_) => false,
+        StmtKind::If { test, body, orelse } => match static_truth(locals, test) {
+            Some(true) => block_falls_through(locals, body),
+            Some(false) => block_falls_through(locals, orelse),
+            None => block_falls_through(locals, body) || block_falls_through(locals, orelse),
+        },
+        StmtKind::While { test, body } => !(matches!(test.kind, ExprKind::Bool(true)) && !contains_break(body)),
+        _ => true,
+    }
+}
+
+pub fn block_falls_through(locals: &BTreeMap<String, Slot>, stmts: &[Stmt]) -> bool {
+    stmts.iter().all(|s| falls_through(locals, s))
 }
 
 fn contains_break(stmts: &[Stmt]) -> bool {

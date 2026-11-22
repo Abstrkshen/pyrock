@@ -9,3 +9,6 @@ python = ["dep:pyo3"]
 
 [dependencies]
 pyo3 = { version = "0.30", optional = true }
+# Stackful coroutines: generators (`yield`) and `async def` bodies that
+# suspend at `await` of a Python awaitable.
+corosensei = "0.3"

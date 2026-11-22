@@ -37,7 +37,9 @@ In hybrid mode these aren't printed by `check`. They're listed under "CPython bo
 | P214 | `for x in <non-range iterable>` | `for i in range(n)` |
 | P215 | Value boxed (no single native type) | Make the variable or return single-typed |
 | P216 | `with` statement, or `except` naming a Python exception class | Native exception classes; manage the resource explicitly |
+| P217 | `await` of a Python awaitable, `async with`, `async for` | Inherent to asyncio: keep the CPU work between awaits native |
 | P220 | Warning: local `.py` imported through CPython because it can't be compiled. The note shows the first blocker | Fix that blocker in the module |
+| P231 | A Rust/C struct handle is passed to CPython (an error in both modes) | Pass its fields instead |
 | P308 | Warning: an attribute that is never assigned anywhere is read (raises AttributeError at runtime) | Fix the attribute name |
 
 ## Types (P3xx)

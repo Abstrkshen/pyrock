@@ -97,22 +97,40 @@ pub fn enter(cm: &Obj) -> PyResult<Obj> {
 /// `with` statement exit. `err` is the exception leaving the body, if any;
 /// returns whether `__exit__` suppressed it.
 pub fn exit(cm: &Obj, err: Option<&Exc>) -> PyResult<bool> {
+    let r = exit_call(cm, "__exit__", err)?;
+    with(|py| r.bind(py).is_truthy())
+}
+
+/// `type(cm).__aenter__(cm)` (the awaitable).
+pub fn aenter_call(cm: &Obj) -> PyResult<Obj> {
+    with(|py| {
+        let b = cm.bind(py);
+        call_special(b, "__aenter__", vec![]).map(own)
+    })
+}
+
+/// Call `__exit__` / `__aexit__` with the exception leaving the body.
+pub fn exit_call(cm: &Obj, method: &str, err: Option<&Exc>) -> PyResult<Obj> {
     let exc = match err {
         Some(e) => Some(exc_obj(e)?),
         None => None,
     };
     with(|py| {
         let b = cm.bind(py);
-        let exit = b.get_type().getattr("__exit__")?;
         let r = match exc {
-            None => exit.call1((b, py.None(), py.None(), py.None()))?,
+            None => call_special(b, method, vec![py.None().into_bound(py), py.None().into_bound(py), py.None().into_bound(py)])?,
             Some(x) => {
                 let v = x.bind(py);
-                exit.call1((b, v.get_type(), v, v.getattr("__traceback__")?))?
+                call_special(b, method, vec![v.get_type().into_any(), v.clone(), v.getattr("__traceback__")?])?
             }
         };
-        r.is_truthy()
+        Ok(own(r))
     })
+}
+
+/// `bool(o)` for a Python object.
+pub fn is_true(o: &Obj) -> PyResult<bool> {
+    with(|py| o.bind(py).is_truthy())
 }
 
 /// Run `f` attached to the interpreter, mapping Python errors to `Exc`.
@@ -916,4 +934,68 @@ impl<T: FromPy> FromPy for Option<T> {
 
 pub fn from_py<T: FromPy>(o: &Obj) -> PyResult<T> {
     T::from_py(o)
+}
+
+/// `o[i] = items[i]` for every item (write-back into a Python sequence such as
+/// a numpy array or `array.array`).
+pub fn set_all(o: &Obj, items: Vec<Obj>) -> PyResult<()> {
+    with(|py| {
+        // Item by item: `array.array` only accepts arrays for slice assignment.
+        let b = o.bind(py);
+        for (i, a) in items.into_iter().enumerate() {
+            b.set_item(i, a.0)?;
+        }
+        Ok(())
+    })
+}
+
+/// A Python `bytes` object.
+pub fn bytes(v: &[u8]) -> Obj {
+    Python::attach(|py| own(pyo3::types::PyBytes::new(py, v).into_any()))
+}
+
+impl Obj {
+    /// Take ownership of a PyO3 object.
+    pub fn from_py(o: Py<PyAny>) -> Obj {
+        Obj(o)
+    }
+
+    /// The PyO3 object.
+    pub fn into_py(self) -> Py<PyAny> {
+        self.0
+    }
+}
+
+/// Run Python source as a module and return one of its attributes.
+pub fn run_module_attr(src: &std::ffi::CStr, file: &std::ffi::CStr, module: &std::ffi::CStr, attr: &str) -> PyResult<Obj> {
+    with(|py| PyModule::from_code(py, src, file, module)?.getattr(attr).map(own))
+}
+
+/// Placeholder for not-yet-assigned locals captured by closures (`None`).
+impl Default for Obj {
+    fn default() -> Obj {
+        none()
+    }
+}
+
+/// `type(o).name(o, *args)` (special-method lookup, as CPython's protocols do).
+pub fn call_method(o: &Obj, name: &str, args: Vec<Obj>) -> PyResult<Obj> {
+    with(|py| {
+        let b = o.bind(py);
+        call_special(b, name, args.into_iter().map(|a| a.0.into_bound(py)).collect()).map(own)
+    })
+}
+
+/// `type(o).name(o, *args)`, or `o.name(*args)` when the type has no such
+/// attribute (a compiled class instance answers through `__getattr__`).
+fn call_special<'py>(b: &Bound<'py, PyAny>, name: &str, args: Vec<Bound<'py, PyAny>>) -> pyo3::PyResult<Bound<'py, PyAny>> {
+    let py = b.py();
+    match b.get_type().getattr(name) {
+        Ok(f) => {
+            let mut all = vec![b.clone()];
+            all.extend(args);
+            f.call1(PyTuple::new(py, all)?)
+        }
+        Err(_) => b.getattr(name)?.call1(PyTuple::new(py, args)?),
+    }
 }
