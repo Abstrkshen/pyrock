@@ -1,0 +1,16 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Python with a shared libpython
+        run: sudo apt-get update && sudo apt-get install -y python3-dev
+      - name: Unit and suite tests
+        run: cargo test --workspace
+      - name: Samples vs CPython
+        run: bash samples/run_all.sh
+      - name: README commands, verbatim
+        run: bash scripts/readme_check.sh

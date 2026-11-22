@@ -132,7 +132,12 @@ Python source ─► CPython ast (JSON protocol v1) ─► scope-resolved HIR
 ```console
 cargo test --workspace                 # unit + differential + golden + diagnostics
 UPDATE_SNAPSHOTS=1 cargo test -p pyfast --test suites   # re-bless snapshots
+bash samples/run_all.sh                # every sample vs CPython
+bash scripts/readme_check.sh           # every sample README's commands, verbatim
 ```
+
+Progress towards compiling real backend, AI and GUI apps is tracked in
+[docs/roadmap.md](docs/roadmap.md).
 
 * `tests/differential/*.py`: each program is compiled and run, then compared with CPython
   on stdout, exit status and the final exception line.

@@ -152,3 +152,23 @@ fn interop() {
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
 }
+
+/// `--python` given as a relative path must still reach PyO3's build script,
+/// which cargo runs from another directory (regression: the README form
+/// `--python ../.venv/bin/python` failed at `run`).
+#[test]
+fn relative_python_path() {
+    let py = Command::new(python()).args(["-c", "import sys; print(sys.executable)"]).output().unwrap();
+    let abs = String::from_utf8_lossy(&py.stdout).trim().to_string();
+    let rel = abs.trim_start_matches('/');
+    let case = root().join("tests/cli/fallback_imports/main.py");
+    let out_dir = root().join("target/pyfast-tests/relative-python");
+    let build = pyfast().current_dir("/").arg("build").arg(&case).arg("--python").arg(rel).arg("--out").arg(&out_dir).output().unwrap();
+    assert!(build.status.success(), "build with --python {rel} from / failed:\n{}", String::from_utf8_lossy(&build.stderr));
+    // Generated code must compile without warnings: `pyfast run` shows them above the program's output.
+    let err = String::from_utf8_lossy(&build.stderr);
+    assert!(!err.contains("warning"), "cargo warnings in generated code:\n{err}");
+    let exe = String::from_utf8_lossy(&build.stdout).trim().to_string();
+    let run = Command::new(&exe).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+}
