@@ -244,12 +244,45 @@ fn target_dir() -> PathBuf {
     cache.join("pyfast").join("target")
 }
 
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/runtime_files.rs"));
+}
+
+/// The runtime crate generated projects depend on: `$PYFAST_RUNTIME`, else
+/// the copy embedded in this binary, extracted once per content hash into
+/// `<cache>/pyfast/runtime/<hash>` (so the binary works from anywhere).
 fn runtime_path() -> Result<PathBuf, String> {
     if let Ok(p) = std::env::var("PYFAST_RUNTIME") {
         return Ok(PathBuf::from(p));
     }
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime");
-    p.canonicalize().map_err(|e| format!("cannot locate pyfast-runtime at {}: {e} (set PYFAST_RUNTIME)", p.display()))
+    let base = target_dir().parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let dir = base.join("runtime").join(embedded::RUNTIME_HASH);
+    if dir.join("Cargo.toml").is_file() {
+        return Ok(dir);
+    }
+    // Write to a fresh directory, then rename: concurrent builds never see a
+    // half-written crate.
+    let tmp = base.join("runtime").join(format!(".{}-{}", embedded::RUNTIME_HASH, std::process::id()));
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(tmp.join("src"))?;
+        for (path, text) in embedded::RUNTIME_FILES {
+            let text = if *path == "Cargo.toml" { standalone_manifest(text) } else { text.to_string() };
+            std::fs::write(tmp.join(path), text)?;
+        }
+        Ok(())
+    };
+    write().map_err(|e| format!("cannot extract the pyfast runtime into {}: {e}", tmp.display()))?;
+    if std::fs::rename(&tmp, &dir).is_err() {
+        // Another process won the race.
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    Ok(dir)
+}
+
+/// The runtime's manifest without workspace inheritance.
+fn standalone_manifest(text: &str) -> String {
+    text.replace("version.workspace = true", &format!("version = {:?}", env!("CARGO_PKG_VERSION")))
+        .replace("edition.workspace = true", "edition = \"2021\"")
 }
 
 /// The build interpreter's module search path, embedded into the binary so

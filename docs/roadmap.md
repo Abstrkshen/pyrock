@@ -76,7 +76,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 
 ## Throughout
 
-- [ ] Install without depending on the repo path (runtime crate shipped with the binary)
+- [x] Install without depending on the repo path (runtime crate shipped with the binary)
 - [ ] Demo apps compiled and checked in CI: backend (JSON API handlers), AI (tokenizer +
       C/Rust inference glue), GUI (raylib through its C API)
 
@@ -425,3 +425,13 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
   recursive tree walk, `enumerate(fib())`, laziness order of prints, `next` with default,
   `StopIteration`, `itertools.islice` on a native generator); also passes with `--release`
   (`panic = "abort"`, abandoned generators are reset).
+
+### Install independence (2026-11-22)
+
+* `crates/driver/build.rs` embeds every file of `crates/runtime` (`include_str!`, rerun on
+  change) with a content hash. `runtime_path()` extracts them once into
+  `<cache>/pyfast/runtime/<hash>/` (write to a temporary directory, then rename, so
+  concurrent builds are safe) with a standalone `Cargo.toml` (no workspace inheritance).
+  `PYFAST_RUNTIME` still overrides it.
+* Checked by copying the binary out of the repo and running a program with it; every test
+  suite now builds against the extracted copy.

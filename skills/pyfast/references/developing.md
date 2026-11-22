@@ -19,7 +19,7 @@ main.py → frontend (python3 -I dump_ast.py → JSON) → HIR (ir)
 | `crates/infer` | `ops.rs` (operator/builtin typing table), `spec.rs` (`specialize`, Program, Spec, mangling, P3xx), `definite.rs` (maybe-unbound), `generic.rs` (HM-style schemes) |
 | `crates/analysis` | `plan`: call graph, recursion, effects, Native/Bridge tier, boundary list (P2xx) |
 | `crates/codegen-rust` | `emit`: one fn per Spec, slots, unit inits, extern FFI, `rid()` keyword escaping |
-| `crates/runtime` | `pyfast-runtime`, linked into generated programs: `int.rs`, `float.rs`, `string.rs`, `conv.rs`, `exc.rs`, `io.rs`, `ext.rs`, `py.rs` (PyO3 bridge, `python` feature) |
+| `crates/runtime` | `pyfast-runtime`, linked into generated programs: `int.rs`, `float.rs`, `string.rs`, `conv.rs`, `exc.rs`, `io.rs`, `ext.rs`, `py.rs` (PyO3 bridge, `python` feature), `stackful.rs` (corosensei coroutines), `gen.rs` (generators), `aio.rs` (async) |
 | `crates/driver` | The `pyfast` CLI (`main.rs`): commands, Cargo.toml/build.rs generation, shared target dir, crate-name hashing, explain rendering |
 
 Docs: `README.md`, `docs/imports.md`, `docs/how-it-works.md`, `docs/subset.md`, `Project.md` (spec).
@@ -70,5 +70,5 @@ reserves `test` and doesn't accept hyphens in command names.)
 | Variable | Effect |
 |---|---|
 | `PYFAST_TARGET_DIR` | Cargo target dir (default `$XDG_CACHE_HOME/pyfast/target` or `~/.cache/pyfast/target`) |
-| `PYFAST_RUNTIME` | Path to `crates/runtime` (default: baked in at build time) |
+| `PYFAST_RUNTIME` | Path to a runtime crate (default: the copy embedded in the binary by `crates/driver/build.rs`, extracted to `<cache>/pyfast/runtime/<content hash>/`) |
 | `UPDATE_SNAPSHOTS=1` | Re-bless test snapshots |

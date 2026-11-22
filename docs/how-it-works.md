@@ -269,7 +269,8 @@ The driver writes a small Cargo project to `.pyfast/<name>/`:
 
 ```
 .pyfast/demo/
-├── Cargo.toml              # depends on crates/runtime (+ "python" feature, + cc if C is used)
+├── Cargo.toml              # depends on the runtime crate (embedded in the binary, extracted to
+│                           # ~/.cache/pyfast/runtime/<hash>/), + "python" feature, + cc if C is used
 ├── build.rs                # only if C files are imported
 ├── src/main.rs             # the generated code above
 ├── pyfast-report.json      # what explain shows, as JSON

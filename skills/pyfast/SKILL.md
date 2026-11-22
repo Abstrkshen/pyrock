@@ -12,8 +12,9 @@ Anything it can't compile natively runs in an embedded CPython at an explicit, r
 **boundary** (hybrid mode, the default). `--mode native-only` turns boundaries into errors.
 
 `pyfast` is on PATH (installed by `bman` into `~/Documents/bin`). Check with `pyfast --version`.
-The source repo is `~/Documents/projects/pyfast`. The installed binary uses that repo's
-`crates/runtime`, so the repo must stay there (or set `PYFAST_RUNTIME` to the runtime crate path).
+The source repo is `~/Documents/projects/pyfast`. The binary carries its runtime crate and
+extracts it to `~/.cache/pyfast/runtime/<hash>/` on first use, so it works from anywhere
+(`PYFAST_RUNTIME` overrides it with a runtime crate path).
 
 ## Commands
 
