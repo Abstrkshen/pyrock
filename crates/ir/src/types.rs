@@ -59,6 +59,8 @@ pub enum Comp {
     Never,
     /// A live dict view: `d.keys()`, `d.values()`, `d.items()`.
     View(ViewKind, Ty, Ty),
+    /// A native class object itself (`cls` in a classmethod, `Point` as a value).
+    Type(ClassId, &'static str),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -120,7 +122,8 @@ impl Ty {
                 },
                 format!("tup{}_{}", ts.len(), join(ts, Ty::mangle, "_")),
             ),
-            Comp::Class(_, name) => (name.to_string(), format!("rt::Ref<{}>", name.replace('.', "_")), name.replace('.', "_")),
+            Comp::Class(_, rust) => (rust.to_string(), rust.to_string(), rust.to_string()),
+            Comp::Type(_, rust) => (format!("type[{rust}]"), "()".to_string(), format!("type_{rust}")),
             Comp::Func(ps, r) => (
                 format!("Callable[[{}], {}]", join(ps, Ty::py_name, ", "), r.py_name()),
                 format!("rt::Func<({}), {}>", ps.iter().map(|p| format!("{},", p.rust())).collect::<String>(), r.rust()),
@@ -265,6 +268,15 @@ impl Ty {
             Some(Comp::Tuple(ts)) => Some(ts),
             _ => None,
         }
+    }
+
+    /// An instance of native class `id` (`rust` is its generated type name).
+    pub fn class(id: ClassId, rust: &str) -> Ty {
+        Ty::comp(Comp::Class(id, Box::leak(rust.to_string().into_boxed_str())))
+    }
+
+    pub fn class_type(id: ClassId, rust: &str) -> Ty {
+        Ty::comp(Comp::Type(id, Box::leak(rust.to_string().into_boxed_str())))
     }
 
     pub fn class_id(self) -> Option<ClassId> {

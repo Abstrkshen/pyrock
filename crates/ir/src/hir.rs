@@ -1,7 +1,7 @@
 //! Structured, scope-resolved HIR. Python evaluation order is preserved:
 //! nothing here reorders sub-expressions.
 
-use crate::{Span, Ty};
+use crate::{ClassId, Span, Ty};
 
 pub type FuncId = usize;
 
@@ -24,6 +24,8 @@ pub struct Module {
     pub imports: Vec<ImportRecord>,
     /// Module-level variables stored in global cells: (unit, name).
     pub globals: Vec<(usize, String)>,
+    /// Natively compiled classes.
+    pub classes: Vec<ClassDef>,
 }
 
 impl Module {
@@ -169,6 +171,10 @@ pub struct Function {
     pub param_ann: Vec<Option<Ty>>,
     /// Return annotation, if it names a type pyfast understands.
     pub ret_ann: Option<Ty>,
+    /// The class this function is a method of.
+    pub class: Option<ClassId>,
+    /// How call arguments bind to the parameters.
+    pub sig: CallSig,
 }
 
 impl Function {
@@ -318,6 +324,11 @@ pub enum ExprKind {
     Unpack { value: Box<Expr>, n: usize, star: Option<usize> },
     /// List/set/dict comprehension or generator expression (evaluated eagerly).
     Comp { kind: CompKind, elt: Box<Expr>, val: Option<Box<Expr>>, gens: Vec<CompFor> },
+    /// `Point(...)`: a new instance of a natively compiled class (arguments
+    /// bind to `__init__`).
+    New { class: ClassId, args: Vec<Expr>, kwargs: Vec<(String, Expr)> },
+    /// A natively compiled class used as a value (`isinstance(x, Point)`, `cls`).
+    ClassRef(ClassId),
     /// `ValueError(...)`: a builtin exception instance (native `rt::Exc`).
     NewExc { kind: String, args: Vec<Expr> },
 }
@@ -526,4 +537,230 @@ pub const BUILTIN_EXCEPTIONS: &[&str] = &[
 
 pub fn is_builtin_exception(name: &str) -> bool {
     BUILTIN_EXCEPTIONS.contains(&name)
+}
+
+/// How a method is bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MethodKind {
+    Instance,
+    Static,
+    Class,
+    /// `@property` getter.
+    Property,
+    /// `@name.setter`.
+    Setter,
+}
+
+#[derive(Clone, Debug)]
+pub struct Method {
+    pub name: String,
+    pub func: FuncId,
+    pub kind: MethodKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ClassBase {
+    /// A natively compiled class.
+    Native(ClassId),
+    /// A builtin exception class (`class MyError(ValueError)`).
+    Exception(String),
+}
+
+/// A natively compiled class.
+#[derive(Clone, Debug)]
+pub struct ClassDef {
+    pub id: ClassId,
+    /// Python name (`Point`, or `geo.Point` for an imported unit).
+    pub name: String,
+    /// Generated Rust type name.
+    pub rust: String,
+    pub unit: usize,
+    pub span: Span,
+    pub base: Option<ClassBase>,
+    pub methods: Vec<Method>,
+    /// Instance attributes assigned through `self.<name> = ...` in its methods.
+    pub fields: Vec<String>,
+    /// Class attributes (stored as global cells named `Class.attr`).
+    pub class_vars: Vec<String>,
+    pub dataclass: bool,
+}
+
+impl Module {
+    pub fn class(&self, c: ClassId) -> &ClassDef {
+        &self.classes[c as usize]
+    }
+
+    /// Classes from `c` up its base chain.
+    pub fn mro(&self, c: ClassId) -> Vec<ClassId> {
+        let mut out = vec![c];
+        let mut cur = c;
+        while let Some(ClassBase::Native(b)) = &self.class(cur).base {
+            if out.contains(b) {
+                break;
+            }
+            out.push(*b);
+            cur = *b;
+        }
+        out
+    }
+
+    /// Method lookup along the MRO.
+    pub fn find_method(&self, c: ClassId, name: &str) -> Option<&Method> {
+        self.mro(c).into_iter().find_map(|k| self.class(k).methods.iter().find(|m| m.name == name))
+    }
+
+    /// The class (along the MRO) defining class attribute `name`.
+    pub fn find_class_var(&self, c: ClassId, name: &str) -> Option<ClassId> {
+        self.mro(c).into_iter().find(|k| self.class(*k).class_vars.iter().any(|v| v == name))
+    }
+
+    pub fn is_subclass(&self, c: ClassId, base: ClassId) -> bool {
+        self.mro(c).contains(&base)
+    }
+
+    /// The builtin exception class at the root of `c`'s bases, if any.
+    pub fn exception_base(&self, c: ClassId) -> Option<String> {
+        self.mro(c).into_iter().find_map(|k| match &self.class(k).base {
+            Some(ClassBase::Exception(e)) => Some(e.clone()),
+            _ => None,
+        })
+    }
+
+    /// Instance attributes collected for `c` and its bases (bases first).
+    pub fn declared_fields(&self, c: ClassId) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for k in self.mro(c).into_iter().rev() {
+            for f in &self.class(k).fields {
+                if !out.contains(f) {
+                    out.push(f.clone());
+                }
+            }
+        }
+        out
+    }
+}
+
+/// How arguments bind to a function's parameters.
+#[derive(Clone, Debug, Default)]
+pub struct CallSig {
+    /// Positional-only, then positional-or-keyword, then keyword-only names.
+    pub names: Vec<String>,
+    pub n_posonly: usize,
+    /// Number of parameters that can be passed positionally.
+    pub n_pos: usize,
+    /// Literal default per parameter (already lowered).
+    pub defaults: Vec<Option<Expr>>,
+    pub vararg: Option<String>,
+    pub kwarg: Option<String>,
+}
+
+/// Why a call could not be bound (CPython's TypeError wording).
+#[derive(Clone, Debug)]
+pub enum BindError {
+    TypeError(String),
+    Unsupported(String),
+}
+
+fn builtin_call(name: &str, args: Vec<Expr>, kwargs: Vec<(String, Expr)>, sp: Span) -> Expr {
+    Expr {
+        kind: ExprKind::CallObj { func: Box::new(Expr { kind: ExprKind::PyBuiltin(name.into()), span: sp }), args, kwargs },
+        span: sp,
+    }
+}
+
+/// Place positional and keyword arguments, defaults, `*args` and `**kwargs`
+/// into parameter order. Returns the arguments and their evaluation order
+/// (empty when it is already parameter order).
+pub fn bind_call(sig: &CallSig, fname: &str, args: Vec<Expr>, kwargs: Vec<(String, Expr)>, sp: Span) -> Result<(Vec<Expr>, Vec<usize>), BindError> {
+    let te = |m: String| BindError::TypeError(m);
+    let mut slots: Vec<Option<(Expr, usize)>> = vec![None; sig.names.len()];
+    if kwargs.iter().any(|(k, _)| k == "**") {
+        return Err(BindError::Unsupported(format!("`**mapping` in a call of the native function `{fname}`")));
+    }
+    let first_star = args.iter().position(|a| matches!(a.kind, ExprKind::Starred(_)));
+    if let Some(fs) = first_star {
+        if sig.vararg.is_none() || fs < sig.n_pos {
+            return Err(BindError::Unsupported(format!(
+                "`*iterable` argument to `{fname}` (a native function's fixed parameters need explicit arguments; `*xs` can only fill a `*args` parameter)"
+            )));
+        }
+    }
+    let npos = args.len();
+    if npos > sig.n_pos && sig.vararg.is_none() {
+        return Err(te(format!("{fname}() takes {} positional argument(s) but {npos} were given", sig.n_pos)));
+    }
+    let mut args = args;
+    let extras: Vec<Expr> = if npos > sig.n_pos { args.split_off(sig.n_pos) } else { vec![] };
+    for (i, a) in args.into_iter().enumerate() {
+        slots[i] = Some((a, i));
+    }
+    let mut kw_extra: Vec<(String, Expr)> = Vec::new();
+    let mut kw_extra_at = None;
+    for (k, (kw, v)) in kwargs.into_iter().enumerate() {
+        let Some(idx) = sig.names.iter().position(|n| *n == kw).filter(|&i| i >= sig.n_posonly) else {
+            if sig.kwarg.is_some() {
+                kw_extra_at.get_or_insert(npos + k);
+                kw_extra.push((kw, v));
+                continue;
+            }
+            return Err(te(format!("{fname}() got an unexpected keyword argument '{kw}'")));
+        };
+        if slots[idx].is_some() {
+            return Err(te(format!("{fname}() got multiple values for argument '{kw}'")));
+        }
+        slots[idx] = Some((v, npos + k));
+    }
+    let mut out = Vec::new();
+    let mut src = Vec::new();
+    let mut missing = Vec::new();
+    for (i, slot) in slots.into_iter().enumerate() {
+        match slot {
+            Some((e, at)) => {
+                src.push((at, i));
+                out.push(e);
+            }
+            None => match sig.defaults.get(i).cloned().flatten() {
+                Some(d) => out.push(Expr { span: sp, ..d }),
+                None => {
+                    missing.push(format!("'{}'", sig.names[i]));
+                    out.push(Expr { kind: ExprKind::NoneLit, span: sp });
+                }
+            },
+        }
+    }
+    if !missing.is_empty() {
+        return Err(te(format!("{fname}() missing {} required argument(s): {}", missing.len(), missing.join(", "))));
+    }
+    if sig.vararg.is_some() {
+        let mut list: Option<Expr> = None;
+        let mut plain = Vec::new();
+        let concat = |l: Option<Expr>, part: Expr| match l {
+            None => part,
+            Some(l) => Expr { kind: ExprKind::BinOp { op: BinOp::Add, left: Box::new(l), right: Box::new(part) }, span: sp },
+        };
+        for x in extras {
+            match x.kind {
+                ExprKind::Starred(inner) => {
+                    if !plain.is_empty() {
+                        list = Some(concat(list, Expr { kind: ExprKind::List(std::mem::take(&mut plain)), span: sp }));
+                    }
+                    list = Some(concat(list, builtin_call("list", vec![*inner], vec![], sp)));
+                }
+                _ => plain.push(x),
+            }
+        }
+        if !plain.is_empty() || list.is_none() {
+            list = Some(concat(list, Expr { kind: ExprKind::List(plain), span: sp }));
+        }
+        src.push((sig.n_pos, out.len()));
+        out.push(builtin_call("tuple", vec![list.unwrap()], vec![], sp));
+    }
+    if sig.kwarg.is_some() {
+        src.push((kw_extra_at.unwrap_or(usize::MAX), out.len()));
+        out.push(builtin_call("dict", vec![], kw_extra, sp));
+    }
+    src.sort();
+    let order: Vec<usize> = src.iter().map(|&(_, i)| i).collect();
+    let identity = order.windows(2).all(|w| w[0] < w[1]);
+    Ok((out, if identity { vec![] } else { order }))
 }

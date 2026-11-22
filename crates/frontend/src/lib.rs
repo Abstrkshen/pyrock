@@ -53,6 +53,8 @@ pub fn parse_file(path: &str, python: &str, mode: Mode) -> Result<ParseOutput, S
         func_anns: HashMap::new(),
         func_sigs: HashMap::new(),
         unit_globals: vec![],
+        classes: vec![],
+        unit_classes: vec![],
     };
     let (unit, diags) = ld.load_unit(&entry, "__main__", path);
     let Some(unit) = unit else {
@@ -76,6 +78,7 @@ pub fn parse_file(path: &str, python: &str, mode: Mode) -> Result<ParseOutput, S
         root_dir: root_dir.display().to_string(),
         imports: ld.imports,
         globals,
+        classes: ld.classes,
     };
     Ok(ParseOutput { module: Some(module), diagnostics: diags, python_version: ld.python_version })
 }
@@ -97,9 +100,12 @@ struct Loader {
     /// Annotations per function: (parameters, return).
     func_anns: HashMap<FuncId, (Vec<Option<Ty>>, Option<Ty>)>,
     /// Call signatures of natively compiled functions.
-    func_sigs: HashMap<FuncId, Sig>,
+    func_sigs: HashMap<FuncId, CallSig>,
     /// Per unit: module-level variables kept in global cells.
     unit_globals: Vec<HashSet<String>>,
+    classes: Vec<ClassDef>,
+    /// Per unit: class name -> class.
+    unit_classes: Vec<HashMap<String, ClassId>>,
 }
 
 /// How arguments bind to a native function's parameters.
@@ -141,6 +147,49 @@ fn signature(a: &Value) -> (Vec<&Value>, Sig) {
     (params, Sig { names, n_posonly: posonly.len(), n_pos, defaults, vararg, kwarg })
 }
 
+/// A literal default value as HIR (see `literal_default`).
+fn lower_literal(v: &Value, unit: usize) -> Option<Expr> {
+    let l = |i: usize| v["_loc"][i].as_u64().unwrap_or(0) as u32;
+    let span = Span { line: l(0), col: l(1), end_line: l(2), end_col: l(3), unit: unit as u32 };
+    let kind = match ty(v) {
+        "Constant" => {
+            let c = &v["value"];
+            match c["kind"].as_str().unwrap_or("") {
+                "none" => ExprKind::NoneLit,
+                "bool" => ExprKind::Bool(c["value"].as_bool().unwrap_or(false)),
+                "int" => ExprKind::Int(c["value"].as_str()?.parse().ok()?),
+                "float" => ExprKind::Float(c["value"].as_str()?.parse().ok()?),
+                "str" => ExprKind::Str(sstr(c, "value").to_string()),
+                _ => return None,
+            }
+        }
+        "UnaryOp" => {
+            let inner = lower_literal(&v["operand"], unit)?;
+            match (ty(&v["op"]), inner.kind) {
+                ("USub", ExprKind::Int(i)) => ExprKind::Int(i.checked_neg()?),
+                ("USub", ExprKind::Float(f)) => ExprKind::Float(-f),
+                ("UAdd", k @ (ExprKind::Int(_) | ExprKind::Float(_))) => k,
+                _ => return None,
+            }
+        }
+        "Tuple" => ExprKind::Tuple(arr(v, "elts").iter().map(|e| lower_literal(e, unit)).collect::<Option<_>>()?),
+        _ => return None,
+    };
+    Some(Expr { kind, span })
+}
+
+/// The call signature with lowered literal defaults.
+fn call_sig(sig: &Sig, unit: usize) -> CallSig {
+    CallSig {
+        names: sig.names.clone(),
+        n_posonly: sig.n_posonly,
+        n_pos: sig.n_pos,
+        defaults: sig.defaults.iter().map(|d| d.as_ref().and_then(|d| lower_literal(d, unit))).collect(),
+        vararg: sig.vararg.clone(),
+        kwarg: sig.kwarg.clone(),
+    }
+}
+
 /// Defaults are evaluated once, at `def` time, in CPython. pyfast inlines
 /// them at each call, which is only equivalent for immutable literals.
 fn literal_default(v: &Value) -> bool {
@@ -179,6 +228,7 @@ impl Loader {
         self.units.push(Unit { name: name.into(), path: display.into(), init: usize::MAX });
         self.unit_funcs.push(HashMap::new());
         self.unit_globals.push(HashSet::new());
+        self.unit_classes.push(HashMap::new());
         self.unit_by_path.insert(canon.clone(), uid);
         let at = |line: u32, col: u32| Span { line, col, end_line: line, end_col: col, unit: uid as u32 };
         let json = match self.dump(path) {
@@ -217,6 +267,7 @@ enum Binding {
     Extern(usize),
     ExternFn(usize, usize),
     Slot(usize),
+    Class(ClassId),
 }
 
 struct Lowerer<'l> {
@@ -236,6 +287,10 @@ struct Lowerer<'l> {
     extra_locals: Vec<String>,
     /// Counter for synthetic locals (`__u1`, ...).
     tmp: usize,
+    /// The class whose method is being lowered, and the name of its `self` parameter.
+    cur_class: Option<(ClassId, Option<String>)>,
+    /// Classes of this unit: name -> (class, definition span).
+    class_ids: HashMap<String, (ClassId, Span)>,
     /// Comprehension scopes: source name -> renamed local.
     comp_scopes: Vec<HashMap<String, String>>,
     /// `from mod import NAME` of module variables, per import statement:
@@ -302,6 +357,38 @@ fn arr<'a>(v: &'a Value, k: &str) -> &'a [Value] {
 
 fn sstr<'a>(v: &'a Value, k: &str) -> &'a str {
     v[k].as_str().unwrap_or("")
+}
+
+/// Instance attributes assigned through `self_name.<attr> = ...` in a method body.
+fn scan_self_fields(body: &[Value], self_name: &str, out: &mut Vec<String>) {
+    fn target(t: &Value, self_name: &str, out: &mut Vec<String>) {
+        match ty(t) {
+            "Attribute" if ty(&t["value"]) == "Name" && sstr(&t["value"], "id") == self_name => {
+                let a = sstr(t, "attr").to_string();
+                if !out.contains(&a) {
+                    out.push(a);
+                }
+            }
+            "Tuple" | "List" => arr(t, "elts").iter().for_each(|e| target(e, self_name, out)),
+            "Starred" => target(&t["value"], self_name, out),
+            _ => {}
+        }
+    }
+    for st in body {
+        match ty(st) {
+            "Assign" => arr(st, "targets").iter().for_each(|t| target(t, self_name, out)),
+            "AugAssign" | "AnnAssign" => target(&st["target"], self_name, out),
+            "For" | "AsyncFor" => target(&st["target"], self_name, out),
+            "With" => arr(st, "items").iter().for_each(|i| target(&i["optional_vars"], self_name, out)),
+            _ => {}
+        }
+        for k in ["body", "orelse", "finalbody"] {
+            scan_self_fields(arr(st, k), self_name, out);
+        }
+        for h in arr(st, "handlers") {
+            scan_self_fields(arr(h, "body"), self_name, out);
+        }
+    }
 }
 
 /// Every `Name` mentioned anywhere under `v`.
@@ -416,6 +503,8 @@ impl<'l> Lowerer<'l> {
             extra_locals: vec![],
             var_imports: HashMap::new(),
             tmp: 0,
+            cur_class: None,
+            class_ids: HashMap::new(),
             comp_scopes: vec![],
             locals: HashSet::new(),
             in_module: true,
@@ -463,10 +552,16 @@ impl<'l> Lowerer<'l> {
                 let mut anns: Vec<Option<Ty>> = params.iter().map(|p| parse_ann(&p["annotation"])).collect();
                 anns.extend(sig.vararg.iter().chain(&sig.kwarg).map(|_| None));
                 self.ld.func_anns.insert(id, (anns, parse_ann(&st["returns"])));
-                self.ld.func_sigs.insert(id, sig);
+                self.ld.func_sigs.insert(id, call_sig(&sig, self.unit));
                 self.func_ids.insert(name.clone(), (id, sp));
                 self.bindings.insert(name.clone(), Binding::Func(id));
                 self.ld.unit_funcs[self.unit].insert(name, id);
+            }
+        }
+        // Pass 1a': discover classes (in order: bases must be defined earlier).
+        for st in body {
+            if ty(st) == "ClassDef" {
+                self.declare_class(st);
             }
         }
         // Pass 1b: resolve imports (they are visible inside functions).
@@ -489,7 +584,12 @@ impl<'l> Lowerer<'l> {
         // global cells. All variables of an imported unit do, so importers can
         // read `mod.NAME`.
         let mut g: HashSet<String> = HashSet::new();
-        for st in body.iter().filter(|st| ty(st) == "FunctionDef") {
+        let methods: Vec<&Value> = body
+            .iter()
+            .filter(|st| ty(st) == "ClassDef")
+            .flat_map(|c| arr(c, "body").iter().filter(|m| ty(m) == "FunctionDef"))
+            .collect();
+        for st in body.iter().filter(|st| ty(st) == "FunctionDef").chain(methods) {
             let sig = signature(&st["args"]).1;
             let mut fl = sig.names;
             fl.extend(sig.vararg);
@@ -514,6 +614,12 @@ impl<'l> Lowerer<'l> {
         if self.unit != 0 {
             g.extend(self.module_vars.iter().cloned());
         }
+        // Class attributes are global cells named `Class.attr`.
+        for (cname, (cid, _)) in &self.class_ids {
+            for v in &self.ld.classes[*cid as usize].class_vars {
+                g.insert(format!("{cname}.{v}"));
+            }
+        }
         self.module_vars.extend(g.iter().cloned());
         self.globals = g.clone();
         self.ld.unit_globals[self.unit] = g;
@@ -533,6 +639,11 @@ impl<'l> Lowerer<'l> {
                 let f = self.lower_function(id, st);
                 (self.locals, self.in_module, self.extra_locals) = saved;
                 self.ld.funcs[id] = Some(f);
+            } else if ty(st) == "ClassDef" {
+                let saved = (std::mem::take(&mut self.locals), self.in_module, std::mem::take(&mut self.extra_locals));
+                let stmts = self.lower_class(st);
+                (self.locals, self.in_module, self.extra_locals) = saved;
+                main_body.extend(stmts);
             } else if let Some(s) = self.lower_stmt(st) {
                 main_body.push(s);
             }
@@ -573,6 +684,8 @@ impl<'l> Lowerer<'l> {
             unit: self.unit,
             param_ann: vec![],
             ret_ann: None,
+            class: None,
+            sig: CallSig::default(),
         });
         self.ld.units[self.unit].init = init;
     }
@@ -756,10 +869,13 @@ impl<'l> Lowerer<'l> {
     }
 
     fn lower_function(&mut self, id: FuncId, st: &Value) -> Function {
-        let name = sstr(st, "name").to_string();
+        let name = match &self.cur_class {
+            Some((c, _)) => format!("{}.{}", self.ld.classes[*c as usize].name.rsplit('.').next().unwrap_or(""), sstr(st, "name")),
+            None => sstr(st, "name").to_string(),
+        };
         let sp = self.span(st);
         let a = &st["args"];
-        if !arr(st, "decorator_list").is_empty() {
+        if !arr(st, "decorator_list").is_empty() && self.cur_class.is_none() {
             self.err("P101", sp, format!("decorators on `{name}` are not supported yet"));
         }
         let (_, sig) = signature(a);
@@ -791,7 +907,9 @@ impl<'l> Lowerer<'l> {
         self.ret_ann = None;
         self.fn_globals.clear();
         locals.extend(std::mem::take(&mut self.extra_locals));
-        Function { id, name: self.qual(&name), params, locals, body, span: sp, is_module: false, unit: self.unit, param_ann, ret_ann }
+        let sig = self.ld.func_sigs.get(&id).cloned().unwrap_or_default();
+        let class = self.cur_class.as_ref().map(|c| c.0);
+        Function { id, name: self.qual(&name), params, locals, body, span: sp, is_module: false, unit: self.unit, param_ann, ret_ann, class, sig }
     }
 
     fn lower_block(&mut self, body: &[Value]) -> Vec<Stmt> {
@@ -1044,6 +1162,17 @@ impl<'l> Lowerer<'l> {
     fn lower_store(&mut self, t: &Value, value: Expr, sp: Span) -> Option<Stmt> {
         let kind = match ty(t) {
             "Subscript" => StmtKind::SetItem { obj: self.lower_expr(&t["value"])?, index: self.lower_index(&t["slice"])?, value },
+            "Attribute" if ty(&t["value"]) == "Name" && !self.locals.contains(sstr(&t["value"], "id")) && matches!(self.bindings.get(sstr(&t["value"], "id")), Some(Binding::Class(_))) => {
+                let Some(Binding::Class(c)) = self.bindings.get(sstr(&t["value"], "id")).cloned() else { unreachable!() };
+                let attr = sstr(t, "attr");
+                match self.ld.classes.iter().position(|_| true).and(Some(())).and_then(|_| self.class_var_owner(c, attr)) {
+                    Some((u, qual)) => StmtKind::AssignGlobal { unit: u, name: qual, value },
+                    None => {
+                        self.unsupported(sp, &format!("adding class attribute `{attr}` after the class statement"), "declare it in the class body");
+                        return None;
+                    }
+                }
+            }
             "Attribute" => match self.module_binding(&t["value"]) {
                 Some(Binding::Unit(u)) if self.ld.unit_globals[u].contains(sstr(t, "attr")) => {
                     StmtKind::AssignGlobal { unit: u, name: sstr(t, "attr").to_string(), value }
@@ -1268,7 +1397,15 @@ impl<'l> Lowerer<'l> {
             "JoinedStr" => return self.lower_fstring(e),
             "Attribute" => {
                 let attr = sstr(e, "attr");
+                if ty(&e["value"]) == "Name" && !self.locals.contains(sstr(&e["value"], "id")) {
+                    if let Some(Binding::Class(c)) = self.bindings.get(sstr(&e["value"], "id")).cloned() {
+                        return self.class_attr(c, attr, sp);
+                    }
+                }
                 if let Some(Binding::Unit(u)) = self.module_binding(&e["value"]) {
+                    if let Some(&c) = self.ld.unit_classes[u].get(attr) {
+                        return Some(Expr { kind: ExprKind::ClassRef(c), span: sp });
+                    }
                     if self.ld.unit_globals[u].contains(attr) {
                         return Some(Expr { kind: ExprKind::Global { unit: u, name: attr.to_string() }, span: sp });
                     }
@@ -1312,6 +1449,289 @@ impl<'l> Lowerer<'l> {
             }
         };
         Some(Expr { kind, span: sp })
+    }
+
+    /// The unit and global-cell name of class attribute `attr` of `c` (or a base).
+    fn class_var_owner(&self, c: ClassId, attr: &str) -> Option<(usize, String)> {
+        let mut cur = Some(c);
+        while let Some(k) = cur {
+            let cd = &self.ld.classes[k as usize];
+            if cd.class_vars.iter().any(|v| v == attr) {
+                let short = cd.name.rsplit('.').next().unwrap_or("");
+                return Some((cd.unit, format!("{short}.{attr}")));
+            }
+            cur = match &cd.base {
+                Some(ClassBase::Native(b)) => Some(*b),
+                _ => None,
+            };
+        }
+        None
+    }
+
+    /// `Point.attr` (a class attribute, or the class's method used as a value).
+    fn class_attr(&mut self, c: ClassId, attr: &str, sp: Span) -> Option<Expr> {
+        if let Some((u, qual)) = self.class_var_owner(c, attr) {
+            return Some(Expr { kind: ExprKind::Global { unit: u, name: qual }, span: sp });
+        }
+        let cname = self.ld.classes[c as usize].name.clone();
+        self.unsupported(sp, &format!("`{cname}.{attr}` as a value"), "call methods directly; class attributes must be assigned in the class body");
+        None
+    }
+
+    fn method_of(&self, c: ClassId, name: &str) -> Option<Method> {
+        let mut cur = Some(c);
+        while let Some(k) = cur {
+            let cd = &self.ld.classes[k as usize];
+            if let Some(m) = cd.methods.iter().find(|m| m.name == name) {
+                return Some(m.clone());
+            }
+            cur = match &cd.base {
+                Some(ClassBase::Native(b)) => Some(*b),
+                _ => None,
+            };
+        }
+        None
+    }
+
+    /// `Point.make(...)` / `Point.norm(p)`.
+    fn lower_class_attr_call(&mut self, c: ClassId, attr: &str, args: Vec<Expr>, kwargs: Vec<(String, Expr)>, sp: Span) -> Option<Expr> {
+        let cname = self.ld.classes[c as usize].name.clone();
+        let Some(m) = self.method_of(c, attr) else {
+            if self.class_var_owner(c, attr).is_some() {
+                let f = self.class_attr(c, attr, sp)?;
+                return Some(Expr { kind: ExprKind::CallObj { func: Box::new(f), args, kwargs }, span: sp });
+            }
+            self.err("P301", sp, format!("type object '{cname}' has no attribute '{attr}'"));
+            return None;
+        };
+        let mut args = args;
+        if m.kind == MethodKind::Class {
+            args.insert(0, Expr { kind: ExprKind::ClassRef(c), span: sp });
+        }
+        let (args, order) = self.bind_args(m.func, &format!("{cname}.{attr}"), args, kwargs, sp)?;
+        let args = self.annotate_args(m.func, args);
+        Some(Expr { kind: ExprKind::Call { callee: Callee::Func(m.func), args, order }, span: sp })
+    }
+
+    /// `super().name(...)` inside a method of a class with a native base.
+    fn lower_super_call(&mut self, name: &str, args: Vec<Expr>, kwargs: Vec<(String, Expr)>, sp: Span) -> Option<Expr> {
+        let Some((c, self_name)) = self.cur_class.clone() else {
+            self.err("P001", sp, "RuntimeError: super(): no arguments outside a method");
+            return None;
+        };
+        let base = self.ld.classes[c as usize].base.clone();
+        match base {
+            Some(ClassBase::Native(b)) => {
+                let Some(m) = self.method_of(b, name) else {
+                    if name == "__init__" {
+                        // object.__init__: nothing to do (arguments are still evaluated).
+                        return Some(Expr { kind: ExprKind::Tuple(args), span: sp });
+                    }
+                    self.err("P301", sp, format!("'super' object has no attribute '{name}'"));
+                    return None;
+                };
+                let mut args = args;
+                match m.kind {
+                    MethodKind::Instance | MethodKind::Property | MethodKind::Setter => {
+                        let Some(sn) = self_name else {
+                            self.err("P301", sp, "super() in a method without `self`");
+                            return None;
+                        };
+                        args.insert(0, Expr { kind: ExprKind::Local(sn), span: sp });
+                    }
+                    MethodKind::Class => args.insert(0, Expr { kind: ExprKind::ClassRef(c), span: sp }),
+                    MethodKind::Static => {}
+                }
+                let (args, order) = self.bind_args(m.func, &format!("super().{name}"), args, kwargs, sp)?;
+                Some(Expr { kind: ExprKind::Call { callee: Callee::Func(m.func), args, order }, span: sp })
+            }
+            Some(ClassBase::Exception(_)) if name == "__init__" => {
+                // BaseException.__init__(self, *args): the message is str(args[0]).
+                let Some(sn) = self_name else { return None };
+                let msg = match args.len() {
+                    0 => Expr { kind: ExprKind::Str(String::new()), span: sp },
+                    _ => Expr { kind: ExprKind::Call { callee: Callee::Builtin(Builtin::Str), args: vec![args[0].clone()], order: vec![] }, span: sp },
+                };
+                let _ = kwargs;
+                Some(Expr { kind: ExprKind::CallObj {
+                    func: Box::new(Expr { kind: ExprKind::GetAttr { obj: Box::new(Expr { kind: ExprKind::Local(sn), span: sp }), name: "__exc_init__".into() }, span: sp }),
+                    args: vec![msg],
+                    kwargs: vec![],
+                }, span: sp })
+            }
+            _ if name == "__init__" => Some(Expr { kind: ExprKind::Tuple(args), span: sp }),
+            _ => {
+                self.err("P301", sp, format!("'super' object has no attribute '{name}'"));
+                None
+            }
+        }
+    }
+
+    /// Pass 1: a class statement's shape (methods, fields, class attributes).
+    fn declare_class(&mut self, st: &Value) {
+        let name = sstr(st, "name").to_string();
+        let sp = self.span(st);
+        if self.class_ids.contains_key(&name) || self.func_ids.contains_key(&name) {
+            self.err("P141", sp, format!("class `{name}` is redefined; global rebinding is not compiled natively"));
+            return;
+        }
+        let cid = self.ld.classes.len() as ClassId;
+        let mut dataclass = false;
+        for d in arr(st, "decorator_list") {
+            let target = if ty(d) == "Call" { &d["func"] } else { d };
+            let dname = if ty(target) == "Name" { sstr(target, "id") } else { sstr(target, "attr") };
+            if dname == "dataclass" {
+                dataclass = true;
+                if ty(d) == "Call" && !arr(d, "keywords").is_empty() {
+                    let dsp = self.span(d);
+                    self.unsupported(dsp, "`@dataclass(...)` options", "use plain `@dataclass`");
+                }
+            } else {
+                let dsp = self.span(d);
+                self.unsupported(dsp, &format!("class decorator `{dname}`"), "only @dataclass is compiled natively");
+            }
+        }
+        if !arr(st, "keywords").is_empty() {
+            self.unsupported(sp, "class keywords (e.g. `metaclass=`)", "dynamic class creation keeps CPython; put the class in a module that falls back");
+        }
+        let bases = arr(st, "bases");
+        let base = match bases {
+            [] => None,
+            [b] if ty(b) == "Name" && sstr(b, "id") == "object" => None,
+            [b] if ty(b) == "Name" && self.class_ids.contains_key(sstr(b, "id")) => Some(ClassBase::Native(self.class_ids[sstr(b, "id")].0)),
+            [b] if ty(b) == "Name" && is_builtin_exception(sstr(b, "id")) => Some(ClassBase::Exception(sstr(b, "id").to_string())),
+            [b] if ty(b) == "Attribute" && self.module_binding(&b["value"]).is_some_and(|m| matches!(m, Binding::Unit(u) if self.ld.unit_classes[u].contains_key(sstr(b, "attr")))) => {
+                let Some(Binding::Unit(u)) = self.module_binding(&b["value"]) else { unreachable!() };
+                Some(ClassBase::Native(self.ld.unit_classes[u][sstr(b, "attr")]))
+            }
+            [_] => {
+                self.unsupported(sp, &format!("class `{name}` with a base class that is not a natively compiled class"), "subclassing CPython classes is phase 4; keep this class in a module that falls back to CPython");
+                None
+            }
+            _ => {
+                self.unsupported(sp, &format!("multiple inheritance in `{name}`"), "use single inheritance");
+                None
+            }
+        };
+        let mut methods = Vec::new();
+        let mut class_vars: Vec<String> = Vec::new();
+        let mut fields: Vec<String> = Vec::new();
+        for item in arr(st, "body") {
+            let isp = self.span(item);
+            match ty(item) {
+                "FunctionDef" => {
+                    let mname = sstr(item, "name").to_string();
+                    let mut kind = MethodKind::Instance;
+                    for d in arr(item, "decorator_list") {
+                        match (ty(d), sstr(d, "id"), sstr(d, "attr")) {
+                            ("Name", "staticmethod", _) => kind = MethodKind::Static,
+                            ("Name", "classmethod", _) => kind = MethodKind::Class,
+                            ("Name", "property", _) => kind = MethodKind::Property,
+                            ("Attribute", _, "setter") => kind = MethodKind::Setter,
+                            _ => {
+                                let dsp = self.span(d);
+                                self.unsupported(dsp, "this method decorator", "only @staticmethod, @classmethod, @property and @x.setter are compiled natively");
+                            }
+                        }
+                    }
+                    let id = self.ld.alloc_func();
+                    let (params, sig) = signature(&item["args"]);
+                    let mut anns: Vec<Option<Ty>> = params.iter().map(|p| parse_ann(&p["annotation"])).collect();
+                    anns.extend(sig.vararg.iter().chain(&sig.kwarg).map(|_| None));
+                    self.ld.func_anns.insert(id, (anns, parse_ann(&item["returns"])));
+                    self.ld.func_sigs.insert(id, call_sig(&sig, self.unit));
+                    if matches!(kind, MethodKind::Instance | MethodKind::Property | MethodKind::Setter) {
+                        match sig.names.first() {
+                            Some(self_name) => scan_self_fields(arr(item, "body"), self_name, &mut fields),
+                            None => self.err("P303", isp, format!("method `{name}.{mname}` needs a `self` parameter")),
+                        }
+                    }
+                    methods.push(Method { name: mname, func: id, kind });
+                }
+                "Assign" => {
+                    for t in arr(item, "targets") {
+                        if ty(t) == "Name" {
+                            if !class_vars.iter().any(|v| v == sstr(t, "id")) {
+                                class_vars.push(sstr(t, "id").to_string());
+                            }
+                        } else {
+                            self.unsupported(isp, "this class-body assignment", "assign names only");
+                        }
+                    }
+                }
+                "AnnAssign" if ty(&item["target"]) == "Name" => {
+                    let v = sstr(&item["target"], "id").to_string();
+                    if dataclass {
+                        if !fields.contains(&v) {
+                            fields.push(v.clone());
+                        }
+                        if !item["value"].is_null() && !class_vars.contains(&v) {
+                            class_vars.push(v);
+                        }
+                    } else if !item["value"].is_null() && !class_vars.contains(&v) {
+                        class_vars.push(v);
+                    }
+                }
+                "Pass" => {}
+                "Expr" if ty(&item["value"]) == "Constant" => {} // docstring
+                other => self.unsupported(isp, &format!("`{other}` in a class body"), "classes may contain methods and class attributes"),
+            }
+        }
+        let unit_prefix = if self.unit == 0 { String::new() } else { format!("{}_", self.ld.units[self.unit].name) };
+        const RESERVED: &[&str] = &["Box", "Vec", "String", "Option", "Result", "Some", "None", "Ok", "Err", "Rc", "RefCell", "Default", "Clone", "Copy", "Self", "Str"];
+        let rust = if RESERVED.contains(&name.as_str()) { format!("{unit_prefix}Py{name}") } else { format!("{unit_prefix}{name}") };
+        let qual = if self.unit == 0 { name.clone() } else { format!("{}.{name}", self.ld.units[self.unit].name) };
+        self.ld.classes.push(ClassDef { id: cid, name: qual, rust, unit: self.unit, span: sp, base, methods, fields, class_vars, dataclass });
+        self.class_ids.insert(name.clone(), (cid, sp));
+        self.bindings.insert(name.clone(), Binding::Class(cid));
+        self.ld.unit_classes[self.unit].insert(name, cid);
+    }
+
+    /// Pass 2: lower a class's methods; return the class-attribute assignments
+    /// (they run at the class statement, in order).
+    fn lower_class(&mut self, st: &Value) -> Vec<Stmt> {
+        let name = sstr(st, "name");
+        let Some(&(cid, sp)) = self.class_ids.get(name) else { return vec![] };
+        if sp != self.span(st) {
+            return vec![];
+        }
+        let methods = self.ld.classes[cid as usize].methods.clone();
+        let mut out = Vec::new();
+        let mut mi = 0;
+        for item in arr(st, "body") {
+            match ty(item) {
+                "FunctionDef" => {
+                    let m = &methods[mi];
+                    mi += 1;
+                    let self_name = match m.kind {
+                        MethodKind::Static | MethodKind::Class => None,
+                        _ => self.ld.func_sigs.get(&m.func).and_then(|s| s.names.first().cloned()),
+                    };
+                    self.cur_class = Some((cid, self_name));
+                    self.locals = HashSet::new();
+                    let f = self.lower_function(m.func, item);
+                    self.cur_class = None;
+                    self.ld.funcs[m.func] = Some(f);
+                }
+                "Assign" | "AnnAssign" => {
+                    if item["value"].is_null() {
+                        continue;
+                    }
+                    self.locals = self.module_vars.difference(&self.globals).cloned().collect();
+                    self.in_module = true;
+                    let Some(value) = self.lower_expr(&item["value"]) else { continue };
+                    let isp = self.span(item);
+                    let targets: Vec<&Value> = if ty(item) == "Assign" { arr(item, "targets").iter().collect() } else { vec![&item["target"]] };
+                    for t in targets {
+                        if ty(t) == "Name" {
+                            out.push(Stmt { kind: StmtKind::AssignGlobal { unit: self.unit, name: format!("{name}.{}", sstr(t, "id")), value: value.clone() }, span: isp });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     /// A fresh synthetic local of the current function.
@@ -1498,6 +1918,7 @@ impl<'l> Lowerer<'l> {
                     self.used_slots.insert(s);
                     ExprKind::Slot(s)
                 }
+                Binding::Class(c) => ExprKind::ClassRef(c),
                 _ => {
                     self.unsupported(sp, &format!("using `{id}` as a first-class value"), "call it directly; function values are milestone M6");
                     return None;
@@ -1573,6 +1994,17 @@ impl<'l> Lowerer<'l> {
                     self.unsupported(sp, &format!("calling module `{id}`"), "modules are not callable");
                     return None;
                 }
+                Some(Binding::Class(c)) => {
+                    if self.in_module {
+                        if let Some(&(_, def_sp)) = self.class_ids.get(id) {
+                            if def_sp.line > sp.line {
+                                self.err("P144", sp, format!("`{id}` is used before its class statement (NameError at runtime)"));
+                                return None;
+                            }
+                        }
+                    }
+                    return Some(Expr { kind: ExprKind::New { class: c, args, kwargs }, span: sp });
+                }
                 Some(Binding::Slot(_)) | None => {}
             }
             if self.builtin_exc(id) && kwargs.is_empty() && args.len() <= 1 && !starred {
@@ -1602,12 +2034,26 @@ impl<'l> Lowerer<'l> {
             }
         }
 
+        // super().method(...) inside a method.
+        if ty(f) == "Attribute" && ty(&f["value"]) == "Call" && ty(&f["value"]["func"]) == "Name" && f["value"]["func"]["id"] == "super" && arr(&f["value"], "args").is_empty() {
+            return self.lower_super_call(sstr(f, "attr"), args, kwargs, sp);
+        }
+        // Class attribute calls: Point.from_pair(...), Point.norm(p).
+        if ty(f) == "Attribute" && ty(&f["value"]) == "Name" && !self.locals.contains(sstr(&f["value"], "id")) {
+            if let Some(Binding::Class(c)) = self.bindings.get(sstr(&f["value"], "id")).cloned() {
+                return self.lower_class_attr_call(c, sstr(f, "attr"), args, kwargs, sp);
+            }
+        }
         // Module attribute calls: helpers.f(...), mymath.dot(...).
         if ty(f) == "Attribute" {
             if let Some(b) = self.module_binding(&f["value"]) {
                 let attr = sstr(f, "attr");
                 let modname = sstr(&f["value"], "id").to_string();
                 match b {
+                    Binding::Unit(u) if self.ld.unit_classes[u].contains_key(attr) => {
+                        let c = self.ld.unit_classes[u][attr];
+                        return Some(Expr { kind: ExprKind::New { class: c, args, kwargs }, span: sp });
+                    }
                     Binding::Unit(u) => match self.ld.unit_funcs[u].get(attr).copied() {
                         Some(fid) => {
                             let (args, order) = self.bind_args(fid, &format!("{modname}.{attr}"), args, kwargs, sp)?;
@@ -1651,112 +2097,17 @@ impl<'l> Lowerer<'l> {
     /// it is already parameter order).
     fn bind_args(&mut self, fid: FuncId, name: &str, args: Vec<Expr>, kwargs: Vec<(String, Expr)>, sp: Span) -> Option<(Vec<Expr>, Vec<usize>)> {
         let sig = self.ld.func_sigs.get(&fid).cloned().unwrap_or_default();
-        let mut slots: Vec<Option<(Expr, usize)>> = vec![None; sig.names.len()];
-        if kwargs.iter().any(|(k, _)| k == "**") {
-            self.unsupported(sp, &format!("`**mapping` in a call of the native function `{name}`"), "pass keyword arguments explicitly");
-            return None;
-        }
-        // A `*iterable` argument can only fill `*args` (its length is not known statically).
-        let first_star = args.iter().position(|a| matches!(a.kind, ExprKind::Starred(_)));
-        if let Some(fs) = first_star {
-            if sig.vararg.is_none() || fs < sig.n_pos {
-                self.unsupported(sp, &format!("`*iterable` argument to `{name}`"), "a native function's fixed parameters need explicit arguments; `*xs` can only fill a `*args` parameter");
-                return None;
+        match bind_call(&sig, name, args, kwargs, sp) {
+            Ok(r) => Some(r),
+            Err(BindError::TypeError(m)) => {
+                self.err("P303", sp, m);
+                None
+            }
+            Err(BindError::Unsupported(m)) => {
+                self.diags.push(Diagnostic::error("P100", sp, format!("{m} is not supported yet")));
+                None
             }
         }
-        let npos = args.len();
-        if npos > sig.n_pos && sig.vararg.is_none() {
-            self.err("P303", sp, format!("{name}() takes {} positional argument(s) but {npos} were given", sig.n_pos));
-            return None;
-        }
-        let mut args = args;
-        let extras: Vec<Expr> = if npos > sig.n_pos { args.split_off(sig.n_pos) } else { vec![] };
-        for (i, a) in args.into_iter().enumerate() {
-            slots[i] = Some((a, i));
-        }
-        let mut kw_extra: Vec<(String, Expr)> = Vec::new();
-        let mut kw_extra_at = None;
-        for (k, (kw, v)) in kwargs.into_iter().enumerate() {
-            let Some(idx) = sig.names.iter().position(|n| *n == kw).filter(|&i| i >= sig.n_posonly) else {
-                if sig.kwarg.is_some() {
-                    kw_extra_at.get_or_insert(npos + k);
-                    kw_extra.push((kw, v));
-                    continue;
-                }
-                self.err("P303", sp, format!("{name}() got an unexpected keyword argument '{kw}'"));
-                return None;
-            };
-            if slots[idx].is_some() {
-                self.err("P303", sp, format!("{name}() got multiple values for argument '{kw}'"));
-                return None;
-            }
-            slots[idx] = Some((v, npos + k));
-        }
-        let mut out = Vec::new();
-        let mut src = Vec::new();
-        let mut missing = Vec::new();
-        for (i, slot) in slots.into_iter().enumerate() {
-            match slot {
-                Some((e, at)) => {
-                    src.push((at, i));
-                    out.push(e);
-                }
-                None => match sig.defaults[i].clone() {
-                    Some(d) => out.push(self.lower_expr(&d)?),
-                    None => {
-                        missing.push(format!("'{}'", sig.names[i]));
-                        out.push(Expr { kind: ExprKind::NoneLit, span: sp });
-                    }
-                },
-            }
-        }
-        if !missing.is_empty() {
-            self.err("P303", sp, format!("{name}() missing {} required argument(s): {}", missing.len(), missing.join(", ")));
-            return None;
-        }
-        // `*args`: the extra positional arguments as a tuple; `**kwargs`: a dict.
-        if sig.vararg.is_some() {
-            let at = sig.n_pos;
-            let mut list: Option<Expr> = None;
-            let mut plain = Vec::new();
-            let flush = |plain: &mut Vec<Expr>, list: &mut Option<Expr>| {
-                if plain.is_empty() {
-                    return;
-                }
-                let part = Expr { kind: ExprKind::List(std::mem::take(plain)), span: sp };
-                *list = Some(match list.take() {
-                    None => part,
-                    Some(l) => Expr { kind: ExprKind::BinOp { op: BinOp::Add, left: Box::new(l), right: Box::new(part) }, span: sp },
-                });
-            };
-            for x in extras {
-                match x.kind {
-                    ExprKind::Starred(inner) => {
-                        flush(&mut plain, &mut list);
-                        let as_list = Expr { kind: ExprKind::CallObj { func: Box::new(self.py_builtin("list", sp)), args: vec![*inner], kwargs: vec![] }, span: sp };
-                        list = Some(match list.take() {
-                            None => as_list,
-                            Some(l) => Expr { kind: ExprKind::BinOp { op: BinOp::Add, left: Box::new(l), right: Box::new(as_list) }, span: sp },
-                        });
-                    }
-                    _ => plain.push(x),
-                }
-            }
-            flush(&mut plain, &mut list);
-            let list = list.unwrap_or(Expr { kind: ExprKind::List(vec![]), span: sp });
-            let tuple = Expr { kind: ExprKind::CallObj { func: Box::new(self.py_builtin("tuple", sp)), args: vec![list], kwargs: vec![] }, span: sp };
-            src.push((at, out.len()));
-            out.push(tuple);
-        }
-        if sig.kwarg.is_some() {
-            let d = Expr { kind: ExprKind::CallObj { func: Box::new(self.py_builtin("dict", sp)), args: vec![], kwargs: kw_extra }, span: sp };
-            src.push((kw_extra_at.unwrap_or(usize::MAX), out.len()));
-            out.push(d);
-        }
-        src.sort();
-        let order: Vec<usize> = src.iter().map(|&(_, i)| i).collect();
-        let identity = order.windows(2).all(|w| w[0] < w[1]);
-        Some((out, if identity { vec![] } else { order }))
     }
 
     /// Arguments to annotated parameters are checked/unboxed at the call.

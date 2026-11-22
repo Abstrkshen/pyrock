@@ -421,7 +421,13 @@ impl State<'_> {
                 self.expr(value, cx);
                 self.fresh()
             }
-            ExprKind::Comp { .. } => self.fresh(),
+            ExprKind::Comp { .. } | ExprKind::ClassRef(_) => self.fresh(),
+            ExprKind::New { args, kwargs, .. } => {
+                for a in args.iter().chain(kwargs.iter().map(|(_, v)| v)) {
+                    self.expr(a, cx);
+                }
+                self.fresh()
+            }
             ExprKind::NewExc { args, .. } => {
                 for a in args {
                     self.expr(a, cx);

@@ -82,6 +82,12 @@ fn spec_calls(prog: &Program, s: &Spec) -> BTreeSet<usize> {
                 }
             }
         }
+        // Methods, constructors and dunders of native classes.
+        for key in prog.class_calls(s, e) {
+            if let Some(c) = prog.spec(&key) {
+                out.insert(c.id);
+            }
+        }
     });
     walk_stmts(&f.body, &mut |st| {
         if let StmtKind::Import(ImportAction::Unit(fid)) = &st.kind {
@@ -89,7 +95,25 @@ fn spec_calls(prog: &Program, s: &Spec) -> BTreeSet<usize> {
                 out.insert(c.id);
             }
         }
+        for key in prog.class_stmt_calls(s, st) {
+            if let Some(c) = prog.spec(&key) {
+                out.insert(c.id);
+            }
+        }
     });
+    // Trait impls of instantiated classes call their dunders.
+    if s.id == 0 {
+        for &c in &prog.instantiated {
+            let t = Ty::class(c, &prog.module.class(c).rust);
+            for (d, args) in [("__repr__", vec![t]), ("__str__", vec![t]), ("__len__", vec![t]), ("__bool__", vec![t]), ("__hash__", vec![t]), ("__eq__", vec![t, t]), ("__lt__", vec![t, t])] {
+                if let Some(m) = prog.module.find_method(c, d) {
+                    if let Some(sp) = prog.spec(&pyfast_infer::SpecKey { func: m.func, args }) {
+                        out.insert(sp.id);
+                    }
+                }
+            }
+        }
+    }
     out
 }
 
@@ -218,8 +242,9 @@ pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
         holds_obj |= s.locals.values().any(|x| x.known().is_some_and(|t| t.mentions_obj()));
         holds_obj |= s.key.args.iter().any(|t| t.mentions_obj());
         let f = &prog.module.funcs[s.key.func];
-        walk_block(&f.body, &mut |e| {
-            if !holds_obj && prog.type_of(s, e).is_some_and(|t| t.mentions_obj()) {
+        // Callee positions (`s.split`) and slice nodes are not values at run time.
+        walk_block_skip_callees(&f.body, &mut |e| {
+            if !holds_obj && !matches!(e.kind, ExprKind::Slice { .. } | ExprKind::GetAttr { .. }) && prog.type_of(s, e).is_some_and(|t| t.mentions_obj()) {
                 holds_obj = true;
             }
         });
@@ -283,7 +308,7 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
             ExprKind::GetAttr { name, .. } => push("P210", st.span, format!("attribute deletion `.{name}`"), "CPython __delattr__"),
             _ => {}
         },
-        StmtKind::SetAttr { name, .. } => push("P210", st.span, format!("attribute assignment `.{name}`"), "CPython __setattr__"),
+        StmtKind::SetAttr { name, obj, .. } if ty0(obj) == Some(Ty::Obj) => push("P210", st.span, format!("attribute assignment `.{name}`"), "CPython __setattr__"),
         StmtKind::With { .. } => push("P216", st.span, "`with` statement".into(), "CPython context manager protocol (__enter__/__exit__)"),
         StmtKind::Try { handlers, .. } => {
             for h in handlers {
@@ -308,7 +333,9 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
             };
             push("P210", e.span, format!("{}(...)", name_of(func)), reason);
         }
-        ExprKind::GetAttr { name, .. } => push("P210", e.span, format!("attribute `.{name}`"), "dynamic receiver: CPython attribute lookup"),
+        ExprKind::GetAttr { name, obj } if ty(obj) == Some(Ty::Obj) || ty(obj).is_some_and(|t| t.class_id().is_none() && !matches!(t.as_comp(), Some(Comp::Type(..)))) => {
+            push("P210", e.span, format!("attribute `.{name}`"), "dynamic receiver: CPython attribute lookup")
+        }
         ExprKind::List(_) if ty(e) == Some(Ty::Obj) => push("P212", e.span, "list literal".into(), "kept as a Python list"),
         ExprKind::Dict(_) if ty(e) == Some(Ty::Obj) => push("P212", e.span, "dict literal".into(), "kept as a Python dict (keys are not natively hashable)"),
         ExprKind::Set(_) if ty(e) == Some(Ty::Obj) => push("P212", e.span, "set literal".into(), "kept as a Python set (elements are not natively hashable)"),
@@ -451,6 +478,10 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr), skip_callee: bool) {
         }
         ExprKind::Slice { lo, hi, step } => [lo, hi, step].into_iter().flatten().for_each(|a| walk_expr(a, f, skip_callee)),
         ExprKind::Unpack { value, .. } | ExprKind::Starred(value) => walk_expr(value, f, skip_callee),
+        ExprKind::New { args, kwargs, .. } => {
+            args.iter().for_each(|a| walk_expr(a, f, skip_callee));
+            kwargs.iter().for_each(|(_, v)| walk_expr(v, f, skip_callee));
+        }
         ExprKind::Comp { elt, val, gens, .. } => {
             for g in gens {
                 walk_expr(&g.iter, f, skip_callee);

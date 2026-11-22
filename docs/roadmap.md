@@ -45,7 +45,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 
 ## Phase 3: Classes
 
-- [ ] Classes with `__init__`, fields inferred from `self.x = ...`, methods
+- [x] Classes with `__init__`, fields inferred from `self.x = ...`, methods, class attributes,
+      `@property`/setters, `@staticmethod`, `@classmethod`, operator and builtin dunders
 - [ ] `@dataclass`
 - [ ] Single inheritance and `super()`
 - [ ] User-defined exception classes
@@ -225,3 +226,25 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 * An empty `*args` is `tuple[Never, ...]`; consumers that need a concrete element type
   (`str.join`, `sum`) get an empty vector of that type (`iter_vec_as`).
 * Tests: `tests/differential/formatting.py`, `tests/differential/varargs.py`.
+
+### Phase 3.1: native classes (2026-11-22)
+
+* IR: `ClassDef` (bases, methods with `MethodKind`, fields from `self.x = ...`, class
+  attributes), `ExprKind::New` / `ClassRef`, `Comp::Class` / `Comp::Type`. Function
+  signatures are now `CallSig` (with lowered literal defaults) and `bind_call` lives in the
+  IR, so method calls bind keyword arguments and defaults after the frontend.
+* Codegen: each class is a local newtype `struct Point(Rc<RefCell<PointData>>)` (identity and
+  shared mutation like Python objects; a local type so runtime traits can be implemented).
+  Fields are `Option<T>`: reading an unset attribute falls back to the class attribute or
+  raises CPython's `AttributeError`. Generated impls: `PyFmt` (`__repr__`/`__str__`, else
+  `<__main__.Point object at 0x..>`), `PyEq` (`__eq__`, else identity), `PyOrd` (`__lt__`),
+  `Truthy` (`__bool__`/`__len__`), `Hash` (`__hash__`, else identity).
+* Inference: instance-attribute types join program-wide (`Program::fields`), including
+  widening through `self.items.append(x)`; methods are specialized functions with a typed
+  `self`, resolved from the receiver type; class attributes reuse global cells
+  (`Point.count`); dunders drive `+ - * ...`, comparisons, `in`, `[]`, `len`, `abs`,
+  `int`, `float`, iteration (`__iter__` returning a native iterable) and unary operators.
+  A read of an attribute that is never assigned anywhere compiles to a runtime
+  `AttributeError` (warning P308).
+* A native instance passed to CPython code is error P230 until phase 4.
+* Test: `tests/differential/classes.py` (passes `--mode native-only`, no libpython).

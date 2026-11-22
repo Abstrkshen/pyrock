@@ -9,6 +9,7 @@
 //! * CPython objects are `rt::py::Obj`; native values are boxed exactly
 //!   where they meet one, and unboxed only through checked conversions.
 
+mod class;
 mod coll;
 
 use pyfast_analysis::Plan;
@@ -76,6 +77,7 @@ pub fn emit(prog: &Program, plan: &Plan, file_name: &str, py_paths: &[String]) -
         }
         writeln!(out, "thread_local! {{ static {}: std::cell::RefCell<Option<{}>> = const {{ std::cell::RefCell::new(None) }}; }}", gname(*u, name), t.rust()).unwrap();
     }
+    class::emit_classes(prog, plan, &mut out);
     for s in prog.specs.iter().filter(|s| plan.is_reachable(s.id)) {
         let f = &m.funcs[s.key.func];
         if f.is_module && f.unit != 0 {
@@ -636,6 +638,23 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 self.loop_body(body, depth + 1, out);
                 writeln!(out, "{ind}}}").unwrap();
             }
+            StmtKind::ForIter { var, iter, body } if self.ty(iter).class_id().is_some() => {
+                let it = self.expr(iter);
+                let call = self.dunder(it.clone(), "__iter__", vec![]).unwrap();
+                let c = it.1.class_id().unwrap();
+                let m = self.prog.module.find_method(c, "__iter__").unwrap();
+                let rt = self.prog.spec(&SpecKey { func: m.func, args: vec![it.1] }).and_then(|s| match s.ret {
+                    Slot::Known(t) => Some(t),
+                    _ => None,
+                }).unwrap_or(Ty::Obj);
+                let n = self.fresh();
+                writeln!(out, "{ind}let __it{n} = {call};").unwrap();
+                let elem = pyfast_infer::native::iter_elem(rt).unwrap_or(Ty::Obj);
+                writeln!(out, "{ind}for __v in {} {{", coll::iter_vec(&format!("__it{n}"), rt)).unwrap();
+                self.assign(var, "__v".into(), elem, depth + 1, out);
+                self.loop_body(body, depth + 1, out);
+                writeln!(out, "{ind}}}").unwrap();
+            }
             StmtKind::ForIter { var, iter, body } if self.ty(iter) != Ty::Obj => {
                 let it = self.ty(iter);
                 let (head, v) = self.for_native(iter, it, &ind, out);
@@ -653,6 +672,17 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 self.assign(var, "__v".into(), Ty::Obj, depth + 1, out);
                 self.loop_body(body, depth + 1, out);
                 writeln!(out, "{ind}}}").unwrap();
+            }
+            StmtKind::SetItem { obj, index, value } if self.ty(obj).class_id().is_some() => {
+                let v = self.expr(value);
+                let o = self.expr(obj);
+                let i = self.expr(index);
+                let call = self.dunder(o, "__setitem__", vec![i, v]).unwrap();
+                writeln!(out, "{ind}let _ = {call};").unwrap();
+            }
+            StmtKind::SetAttr { obj, name, value } if self.ty(obj).class_id().is_some() => {
+                let code = self.set_attr(obj, name, value, &ind);
+                writeln!(out, "{code}").unwrap();
             }
             StmtKind::SetItem { obj, index, value } if self.ty(obj) != Ty::Obj => {
                 let code = self.set_item(obj, index, value, &ind);
@@ -845,7 +875,44 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             let lets: String = parts.iter().map(|p| format!("let _ = {p}; ")).collect();
             return (format!("{{ {lets}unreachable!() }}"), t);
         }
+        let is_class = |t: Ty| t.class_id().is_some();
         let code = match &e.kind {
+            ExprKind::New { class, args, kwargs } => self.new_instance(e, *class, args, kwargs),
+            ExprKind::ClassRef(_) => "()".into(),
+            ExprKind::GetAttr { obj, name } if is_class(self.ty(obj)) || matches!(self.ty(obj).as_comp(), Some(Comp::Type(..))) => self.attr(obj, name, t),
+            ExprKind::BinOp { op, left, right } if is_class(self.ty(left)) || is_class(self.ty(right)) => {
+                let n = pyfast_infer::spec::dunder_name(*op);
+                let l = self.expr(left);
+                let r = self.expr(right);
+                match self.dunder(l.clone(), &format!("__{n}__"), vec![r.clone()]) {
+                    Some(c) => c,
+                    None => self.dunder(r, &format!("__r{n}__"), vec![l]).expect("dunder checked by inference"),
+                }
+            }
+            ExprKind::Unary { op, operand } if *op != UnaryOp::Not && is_class(self.ty(operand)) => {
+                let n = match op {
+                    UnaryOp::Neg => "__neg__",
+                    UnaryOp::Pos => "__pos__",
+                    _ => "__invert__",
+                };
+                let v = self.expr(operand);
+                self.dunder(v, n, vec![]).unwrap()
+            }
+            ExprKind::Subscript { obj, index } if is_class(self.ty(obj)) => {
+                let o = self.expr(obj);
+                let i = self.expr(index);
+                self.dunder(o, "__getitem__", vec![i]).unwrap()
+            }
+            ExprKind::Call { callee: Callee::Builtin(b @ (Builtin::Len | Builtin::Abs | Builtin::Int | Builtin::Float)), args, .. } if args.len() == 1 && is_class(self.ty(&args[0])) => {
+                let n = match b {
+                    Builtin::Len => "__len__",
+                    Builtin::Abs => "__abs__",
+                    Builtin::Int => "__int__",
+                    _ => "__float__",
+                };
+                let v = self.expr(&args[0]);
+                self.dunder(v, n, vec![]).unwrap()
+            }
             ExprKind::Int(v) => {
                 if *v == i64::MIN {
                     "i64::MIN".into()
@@ -1072,6 +1139,14 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             }
             ExprKind::CallObj { func, args, kwargs } if !matches!(self.prog.classify_call(self.spec, func, args, kwargs), CallClass::Bridge | CallClass::Pending) => {
                 match self.prog.classify_call(self.spec, func, args, kwargs) {
+                    CallClass::UserMethod { func: fid, kind } => {
+                        let ExprKind::GetAttr { obj, .. } = &func.kind else { unreachable!() };
+                        self.method_call(e, obj, fid, kind, args, kwargs)
+                    }
+                    CallClass::Construct(c) => {
+                        let f = self.expr(func).0;
+                        format!("{{ let _ = {f}; {} }}", self.new_instance(e, c, args, kwargs))
+                    }
                     CallClass::StaticBool(b) => {
                         let parts: Vec<String> = args.iter().take(1).map(|a| self.expr(a).0).collect();
                         format!("{{ let _ = {}; {b} }}", parts.join(", "))
@@ -1228,6 +1303,9 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
 
     /// One comparison, including native collections.
     fn compare_any(&mut self, op: CmpOp, l: &str, lt: Ty, r: &str, rt: Ty) -> String {
+        if lt.class_id().is_some() || rt.class_id().is_some() {
+            return self.compare_class(op, l, lt, r, rt);
+        }
         let comp = |t: Ty| t.as_comp().is_some_and(|c| !matches!(c, Comp::Opt(_) | Comp::Exc));
         if lt == Ty::Obj || rt == Ty::Obj || !(comp(lt) || comp(rt)) {
             return compare(op, l, lt, r, rt);
@@ -1270,6 +1348,48 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Comparison with a native instance operand (dunders, else identity).
+    fn compare_class(&mut self, op: CmpOp, l: &str, lt: Ty, r: &str, rt: Ty) -> String {
+        let (lv, rv) = ((l.to_string(), lt), (r.to_string(), rt));
+        let truthy_of = |code: String, me: &Self, name: &str, recv: Ty, other: Ty| -> String {
+            let c = recv.class_id().unwrap();
+            let m = me.prog.module.find_method(c, name).unwrap();
+            let rty = me.prog.spec(&SpecKey { func: m.func, args: vec![recv, other] }).and_then(|s| match s.ret {
+                Slot::Known(t) => Some(t),
+                _ => None,
+            });
+            truthy(&code, rty.unwrap_or(Ty::Bool))
+        };
+        match op {
+            CmpOp::In | CmpOp::NotIn => {
+                let c = self.dunder(rv.clone(), "__contains__", vec![lv.clone()]).map(|code| truthy_of(code, self, "__contains__", rt, lt));
+                let c = c.unwrap_or_else(|| self.contains(l, lt, r, rt));
+                if op == CmpOp::NotIn { format!("!{c}") } else { c }
+            }
+            CmpOp::Is | CmpOp::IsNot => {
+                let neg = if op == CmpOp::IsNot { "!" } else { "" };
+                if lt == rt { format!("{neg}{l}.is(&{})", borrow(r)) } else { format!("{{ let _ = {l}; let _ = {r}; {} }}", op == CmpOp::IsNot) }
+            }
+            _ => {
+                let (fwd, refl) = pyfast_infer::spec::cmp_dunder(op).unwrap();
+                if let Some(code) = self.dunder(lv.clone(), fwd, vec![rv.clone()]) {
+                    return truthy_of(code, self, fwd, lt, rt);
+                }
+                if let Some(code) = self.dunder(rv.clone(), refl, vec![lv.clone()]) {
+                    return truthy_of(code, self, refl, rt, lt);
+                }
+                if op == CmpOp::NotEq {
+                    if let Some(code) = self.dunder(lv.clone(), "__eq__", vec![rv.clone()]) {
+                        return format!("!{}", truthy_of(code, self, "__eq__", lt, rt));
+                    }
+                }
+                // Default: identity.
+                let same = if lt == rt { format!("{l}.is(&{})", borrow(r)) } else { format!("{{ let _ = {l}; let _ = {r}; false }}") };
+                if op == CmpOp::NotEq { format!("!{same}") } else { same }
             }
         }
     }

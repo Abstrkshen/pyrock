@@ -11,7 +11,7 @@
 
 use crate::{definite, native, ops};
 use pyfast_ir::*;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub const MAX_SPECS_PER_FUNCTION: usize = 16;
 pub const MAX_ROUNDS: usize = 64;
@@ -92,6 +92,10 @@ pub struct Program<'m> {
     pub mode: Mode,
     /// Types of global cells, joined over every assignment in the program.
     pub globals: BTreeMap<GlobalKey, Slot>,
+    /// Types of instance attributes of native classes, joined program-wide.
+    pub fields: BTreeMap<(ClassId, String), Slot>,
+    /// Classes instantiated anywhere.
+    pub instantiated: BTreeSet<ClassId>,
     pub specs: Vec<Spec>,
     pub index: HashMap<SpecKey, usize>,
     pub diagnostics: Vec<Diagnostic>,
@@ -199,7 +203,16 @@ impl Program<'_> {
 }
 
 pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
-    let mut prog = Program { module, mode, globals: BTreeMap::new(), specs: vec![], index: HashMap::new(), diagnostics: vec![] };
+    let mut prog = Program {
+        module,
+        mode,
+        globals: BTreeMap::new(),
+        fields: BTreeMap::new(),
+        instantiated: BTreeSet::new(),
+        specs: vec![],
+        index: HashMap::new(),
+        diagnostics: vec![],
+    };
     let main_key = SpecKey { func: module.main, args: vec![] };
     add_spec(&mut prog, main_key);
 
@@ -210,7 +223,19 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
         let mut i = 0;
         while i < prog.specs.len() {
             let mut requests = Vec::new();
-            let (locals, ret, falls, gassigns, ret_widen) = analyze(&prog, i, &mut requests, None);
+            let (locals, ret, falls, gassigns, ret_widen, (fassigns, news)) = analyze(&prog, i, &mut requests, None);
+            for (key, t) in fassigns {
+                let boxing = prog.boxing();
+                let slot = prog.fields.entry(key).or_insert(Slot::Unknown);
+                let joined = slot.join(t, boxing);
+                if joined != *slot {
+                    *slot = joined;
+                    changed = true;
+                }
+            }
+            for c in news {
+                changed |= prog.instantiated.insert(c);
+            }
             for (key, t) in ret_widen {
                 let boxing = prog.boxing();
                 if let Some(&j) = prog.index.get(&key) {
@@ -365,10 +390,12 @@ fn analyze(
     idx: usize,
     requests: &mut Requests,
     diags: Option<&mut Vec<Diagnostic>>,
-) -> (BTreeMap<String, Slot>, Slot, bool, Vec<(GlobalKey, Ty)>, Vec<(SpecKey, Ty)>) {
+) -> (BTreeMap<String, Slot>, Slot, bool, Vec<(GlobalKey, Ty)>, Vec<(SpecKey, Ty)>, (Vec<((ClassId, String), Ty)>, Vec<ClassId>)) {
     let spec = &prog.specs[idx];
     let mut gassigns;
     let mut ret_widen;
+    let mut fassigns;
+    let mut news;
     let cur_ret = match spec.ret.join_slot(spec.ret_floor, prog.boxing()) {
         Slot::Known(t) => Some(t),
         Slot::Boxed(..) => Some(Ty::Obj),
@@ -382,11 +409,13 @@ fn analyze(
     loop {
         let before = locals.clone();
         ret = spec.ret_floor;
-        let mut ctx = Ctx { prog, locals: &locals, requests: Some(requests), diags: None, gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret };
+        let mut ctx = Ctx { prog, locals: &locals, requests: Some(requests), diags: None, gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![] };
         let mut assigns = Vec::new();
         falls = ctx.block(&f.body, &mut assigns, &mut ret);
         gassigns = std::mem::take(&mut ctx.gassigns);
         ret_widen = std::mem::take(&mut ctx.ret_widen);
+        fassigns = std::mem::take(&mut ctx.fassigns);
+        news = std::mem::take(&mut ctx.news);
         assigns.append(&mut ctx.widens);
         for (name, t) in assigns {
             let s = locals.entry(name).or_insert(Slot::Unknown);
@@ -400,10 +429,10 @@ fn analyze(
     if let Some(d) = diags {
         let mut ret2 = Slot::Unknown;
         let mut sink = Vec::new();
-        let mut ctx = Ctx { prog, locals: &locals, requests: None, diags: Some(d), gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret };
+        let mut ctx = Ctx { prog, locals: &locals, requests: None, diags: Some(d), gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![] };
         ctx.block(&f.body, &mut sink, &mut ret2);
     }
-    (locals, ret, falls, gassigns, ret_widen)
+    (locals, ret, falls, gassigns, ret_widen, (fassigns, news))
 }
 
 struct Ctx<'a, 'p> {
@@ -419,6 +448,10 @@ struct Ctx<'a, 'p> {
     ret_widen: Vec<(SpecKey, Ty)>,
     /// The return type of the function being analysed, as currently known.
     cur_ret: Option<Ty>,
+    /// Instance-attribute assignments seen in this pass.
+    fassigns: Vec<((ClassId, String), Ty)>,
+    /// Classes instantiated in this pass.
+    news: Vec<ClassId>,
 }
 
 /// How a `CallObj` node executes.
@@ -434,12 +467,59 @@ pub enum CallClass {
     Bridge,
     /// Not decidable yet (argument types still unknown in this pass).
     Pending,
+    /// A method of a natively compiled class.
+    UserMethod { func: FuncId, kind: MethodKind },
+    /// `cls(...)` on a class object value.
+    Construct(ClassId),
+}
+
+/// Whether a type contains an instance of a native class.
+pub fn has_class(t: Ty) -> bool {
+    match t.as_comp() {
+        Some(Comp::Class(..)) => true,
+        Some(Comp::List(x) | Comp::Set(x) | Comp::Opt(x) | Comp::TupleVar(x)) => has_class(x),
+        Some(Comp::Dict(k, v) | Comp::View(_, k, v)) => has_class(k) || has_class(v),
+        Some(Comp::Tuple(ts)) => ts.iter().any(|t| has_class(*t)),
+        _ => false,
+    }
+}
+
+/// `+` -> `add` etc. (dunder stems).
+pub fn dunder_name(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "add",
+        BinOp::Sub => "sub",
+        BinOp::Mul => "mul",
+        BinOp::Div => "truediv",
+        BinOp::FloorDiv => "floordiv",
+        BinOp::Mod => "mod",
+        BinOp::Pow => "pow",
+        BinOp::BitAnd => "and",
+        BinOp::BitOr => "or",
+        BinOp::BitXor => "xor",
+        BinOp::LShift => "lshift",
+        BinOp::RShift => "rshift",
+    }
+}
+
+/// Dunder name of a comparison (`==` -> `__eq__`) and of its reflection.
+pub fn cmp_dunder(op: CmpOp) -> Option<(&'static str, &'static str)> {
+    Some(match op {
+        CmpOp::Eq => ("__eq__", "__eq__"),
+        CmpOp::NotEq => ("__ne__", "__ne__"),
+        CmpOp::Lt => ("__lt__", "__gt__"),
+        CmpOp::LtE => ("__le__", "__ge__"),
+        CmpOp::Gt => ("__gt__", "__lt__"),
+        CmpOp::GtE => ("__ge__", "__le__"),
+        _ => return None,
+    })
 }
 
 /// Expressions that denote a storage location a value can be widened through.
 fn is_place(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Local(_) | ExprKind::Global { .. } => true,
+        ExprKind::GetAttr { obj, .. } => is_place(obj),
         ExprKind::Subscript { obj, index } => !matches!(index.kind, ExprKind::Slice { .. }) && is_place(obj),
         ExprKind::Call { callee: Callee::Func(_), .. } => true,
         ExprKind::CallObj { func, .. } => {
@@ -500,6 +580,13 @@ impl Ctx<'_, '_> {
                     self.ret_widen.push((SpecKey { func: *fid, args }, t));
                 }
             }
+            ExprKind::GetAttr { obj, name } => {
+                if let Some(c) = self.expr(obj).and_then(|t| t.class_id()) {
+                    if self.prog.fields.get(&(c, name.clone())).and_then(|s| s.known()) != Some(t) {
+                        self.fassigns.push(((c, name.clone()), t));
+                    }
+                }
+            }
             // Methods that return a stored element: `d.setdefault(k, []).append(x)`.
             ExprKind::CallObj { func, .. } => {
                 if let ExprKind::GetAttr { obj, name } = &func.kind {
@@ -527,6 +614,13 @@ impl Ctx<'_, '_> {
     /// must be a Python object from creation (a copy would break aliasing).
     fn escape(&mut self, e: &Expr) {
         if let Some(t) = self.expr(e) {
+            if has_class(t) {
+                self.report(
+                    Diagnostic::error("P230", e.span, format!("an instance of the native class `{t}` is passed to Python"))
+                        .note("native instances cannot cross into CPython yet (phase 4); pass plain values (ints, strs, lists, dicts) instead"),
+                );
+                return;
+            }
             if t.has_mutable() && is_place(e) {
                 self.widen(e, Ty::Obj);
             }
@@ -616,7 +710,17 @@ impl Ctx<'_, '_> {
                 self.block(body, assigns, ret);
             }
             StmtKind::ForIter { var, iter, body } => {
-                if let Some(it) = self.expr(iter) {
+                let it = match self.expr(iter) {
+                    Some(t) if t.class_id().is_some() => match self.dunder(iter, t, "__iter__", &[]) {
+                        Some(r) => r,
+                        None => {
+                            self.report(Diagnostic::error("P301", iter.span, format!("'{t}' object is not iterable")));
+                            None
+                        }
+                    },
+                    t => t,
+                };
+                if let Some(it) = it {
                     match native::iter_elem(it) {
                         Some(e) => {
                             assigns.push((var.clone(), e));
@@ -635,6 +739,30 @@ impl Ctx<'_, '_> {
             StmtKind::SetItem { obj, index, value } => self.set_item(obj, index, value),
             StmtKind::SetAttr { obj, value, name } => {
                 if let Some(ot) = self.expr(obj) {
+                    if let Some(c) = ot.class_id() {
+                        if let Some(m) = self.prog.module.find_method(c, name).cloned() {
+                            if m.kind == MethodKind::Property {
+                                // `@x.setter` is a separate method with the same name.
+                                let setter = self.prog.module.mro(c).into_iter().find_map(|k| {
+                                    self.prog.module.class(k).methods.iter().find(|mm| mm.name == *name && mm.kind == MethodKind::Setter).cloned()
+                                });
+                                match setter {
+                                    Some(st) => {
+                                        self.call_spec(&Expr { kind: ExprKind::NoneLit, span: s.span }, st.func, &[ot], std::slice::from_ref(value));
+                                    }
+                                    None => self.report(Diagnostic::error("P301", s.span, format!("property '{name}' of '{}' object has no setter", self.prog.module.class(c).name))),
+                                }
+                                return true;
+                            }
+                        }
+                        if let Some(vt) = self.expr(value) {
+                            self.fassigns.push(((c, name.clone()), vt));
+                            if let Some(dest) = self.prog.fields.get(&(c, name.clone())).and_then(|x| x.known()) {
+                                self.flow(value, vt, dest);
+                            }
+                        }
+                        return true;
+                    }
                     if ot == Ty::Obj {
                         self.escape(value);
                     } else {
@@ -725,6 +853,12 @@ impl Ctx<'_, '_> {
             self.expr(value);
             return;
         };
+        if ot.class_id().is_some() {
+            if self.dunder(obj, ot, "__setitem__", &[index, value]).is_none() {
+                self.report(Diagnostic::error("P301", obj.span, format!("'{ot}' object does not support item assignment")));
+            }
+            return;
+        }
         if ot == Ty::Obj {
             self.expr(index);
             self.escape(value);
@@ -832,6 +966,28 @@ impl Ctx<'_, '_> {
 
     /// Classify a `CallObj` node (method / native builtin / bridge).
     fn classify(&mut self, func: &Expr, args: &[Expr], kwargs: &[(String, Expr)]) -> CallClass {
+        if let ExprKind::GetAttr { obj, name } = &func.kind {
+            if let Some(t) = self.expr(obj) {
+                let class = t.class_id().or(match t.as_comp() {
+                    Some(Comp::Type(c, _)) => Some(c),
+                    _ => None,
+                });
+                if let Some(c) = class {
+                    return match self.prog.module.find_method(c, name) {
+                        Some(m) => CallClass::UserMethod { func: m.func, kind: m.kind },
+                        None if name == "__exc_init__" => CallClass::UserMethod { func: usize::MAX, kind: MethodKind::Instance },
+                        None => CallClass::Bridge,
+                    };
+                }
+            }
+        }
+        if !matches!(func.kind, ExprKind::GetAttr { .. } | ExprKind::PyBuiltin(_) | ExprKind::Slot(_)) {
+            if let Some(t) = self.expr(func) {
+                if let Some(Comp::Type(c, _)) = t.as_comp() {
+                    return CallClass::Construct(c);
+                }
+            }
+        }
         match &func.kind {
             ExprKind::GetAttr { obj, name } => match self.expr(obj) {
                 Some(t) if t != Ty::Obj => {
@@ -875,8 +1031,230 @@ impl Ctx<'_, '_> {
         }
     }
 
+    /// One comparison where an operand is a native instance.
+    fn compare_classes(&mut self, e: &Expr, op: CmpOp, a: Ty, ae: &Expr, b: Ty, be: &Expr) {
+        match op {
+            CmpOp::Is | CmpOp::IsNot => {}
+            CmpOp::In | CmpOp::NotIn => {
+                if b.class_id().is_some() {
+                    if self.dunder(e, b, "__contains__", &[ae]).is_none() {
+                        self.report(Diagnostic::error("P301", e.span, format!("argument of type '{b}' is not iterable")));
+                    }
+                } else if !ops::compare(op, a, b) {
+                    self.report(Diagnostic::error("P301", e.span, format!("'in <{b}>' with a {a} operand")));
+                }
+            }
+            _ => {
+                let (fwd, refl) = cmp_dunder(op).unwrap();
+                if self.dunder(e, a, fwd, &[be]).is_some() || self.dunder(e, b, refl, &[ae]).is_some() {
+                    return;
+                }
+                if op == CmpOp::NotEq && self.dunder(e, a, "__eq__", &[be]).is_some() {
+                    return;
+                }
+                if !matches!(op, CmpOp::Eq | CmpOp::NotEq) {
+                    self.report(
+                        Diagnostic::error("P301", e.span, format!("'{}' not supported between instances of '{a}' and '{b}'", match op {
+                            CmpOp::Lt => "<",
+                            CmpOp::LtE => "<=",
+                            CmpOp::Gt => ">",
+                            _ => ">=",
+                        }))
+                        .note("define __lt__ (and friends) on the class"),
+                    );
+                }
+            }
+        }
+    }
+
+    fn class_ty(&self, c: ClassId) -> Ty {
+        Ty::class(c, &self.prog.module.class(c).rust)
+    }
+
+    /// Bind call arguments (with the receiver slot removed for methods).
+    fn bind(&mut self, e: &Expr, func: FuncId, skip_first: bool, args: &[Expr], kwargs: &[(String, Expr)]) -> Option<Vec<Expr>> {
+        let f = &self.prog.module.funcs[func];
+        let mut sig = f.sig.clone();
+        if skip_first && !sig.names.is_empty() {
+            sig.names.remove(0);
+            sig.n_pos = sig.n_pos.saturating_sub(1);
+            sig.n_posonly = sig.n_posonly.saturating_sub(1);
+            if !sig.defaults.is_empty() {
+                sig.defaults.remove(0);
+            }
+        }
+        match bind_call(&sig, &f.name, args.to_vec(), kwargs.to_vec(), e.span) {
+            Ok((a, _)) => Some(a),
+            Err(BindError::TypeError(m)) | Err(BindError::Unsupported(m)) => {
+                self.report(Diagnostic::error("P303", e.span, m).note("CPython would raise TypeError here"));
+                None
+            }
+        }
+    }
+
+    /// Call specialization `func` with leading receiver types and bound arguments.
+    fn call_spec(&mut self, e: &Expr, func: FuncId, lead: &[Ty], bound: &[Expr]) -> Option<Ty> {
+        let tys: Vec<Option<Ty>> = bound.iter().map(|a| self.expr(a)).collect();
+        let tys: Vec<Ty> = tys.into_iter().collect::<Option<_>>()?;
+        let mut all = lead.to_vec();
+        all.extend(&tys);
+        let key = SpecKey { func, args: all };
+        let callee = self.prog.spec(&key);
+        let r = callee.and_then(|s| self.prog.call_result(s));
+        if let Some(s) = callee.filter(|s| s.analyzed) {
+            let f = &self.prog.module.funcs[func];
+            for (i, (a, t)) in bound.iter().zip(&tys).enumerate() {
+                if let Some(pt) = f.params.get(lead.len() + i).and_then(|p| s.locals.get(p)).and_then(|x| x.known()) {
+                    self.flow(a, *t, pt);
+                }
+            }
+        }
+        if let Some(req) = self.requests.as_deref_mut() {
+            req.push((key, e.span));
+        }
+        r
+    }
+
+    fn method_call(&mut self, e: &Expr, recv: Ty, _name: &str, fid: FuncId, kind: MethodKind, args: &[Expr], kwargs: &[(String, Expr)]) -> Option<Ty> {
+        let class = recv.class_id().or(match recv.as_comp() {
+            Some(Comp::Type(c, _)) => Some(c),
+            _ => None,
+        })?;
+        match kind {
+            MethodKind::Static => {
+                let bound = self.bind(e, fid, false, args, kwargs)?;
+                self.call_spec(e, fid, &[], &bound)
+            }
+            MethodKind::Class => {
+                let bound = self.bind(e, fid, true, args, kwargs)?;
+                let t = Ty::class_type(class, &self.prog.module.class(class).rust);
+                self.call_spec(e, fid, &[t], &bound)
+            }
+            _ => {
+                if recv.class_id().is_none() {
+                    self.report(Diagnostic::error("P303", e.span, "instance method called on the class without an instance"));
+                    return None;
+                }
+                let bound = self.bind(e, fid, true, args, kwargs)?;
+                self.call_spec(e, fid, &[recv], &bound)
+            }
+        }
+    }
+
+    /// Dunder method `name` on a native instance: `Some(result)` when defined.
+    fn dunder(&mut self, e: &Expr, recv: Ty, name: &str, others: &[&Expr]) -> Option<Option<Ty>> {
+        let c = recv.class_id()?;
+        let m = self.prog.module.find_method(c, name)?.clone();
+        let bound: Vec<Expr> = others.iter().map(|x| (*x).clone()).collect();
+        Some(self.call_spec(e, m.func, &[recv], &bound))
+    }
+
+    fn new_instance(&mut self, e: &Expr, c: ClassId, args: &[Expr], kwargs: &[(String, Expr)]) -> Option<Ty> {
+        let t = self.class_ty(c);
+        self.news.push(c);
+        // The trait impls (printing, ==, <, truthiness, hashing) call these.
+        let unary = ["__repr__", "__str__", "__len__", "__bool__", "__hash__"];
+        for d in unary {
+            if let Some(m) = self.prog.module.find_method(c, d) {
+                if let Some(req) = self.requests.as_deref_mut() {
+                    req.push((SpecKey { func: m.func, args: vec![t] }, e.span));
+                }
+            }
+        }
+        for d in ["__eq__", "__lt__"] {
+            if let Some(m) = self.prog.module.find_method(c, d) {
+                if let Some(req) = self.requests.as_deref_mut() {
+                    req.push((SpecKey { func: m.func, args: vec![t, t] }, e.span));
+                }
+            }
+        }
+        match self.prog.module.find_method(c, "__init__").cloned() {
+            Some(m) => {
+                let bound = self.bind(e, m.func, true, args, kwargs)?;
+                self.call_spec(e, m.func, &[t], &bound)?;
+            }
+            None => {
+                if !args.is_empty() || !kwargs.is_empty() {
+                    if self.prog.module.exception_base(c).is_some() {
+                        for a in args {
+                            self.expr(a)?;
+                        }
+                    } else {
+                        self.report(Diagnostic::error("P303", e.span, format!("{}() takes no arguments", self.prog.module.class(c).name)).note("CPython would raise TypeError here"));
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(t)
+    }
+
+    /// `obj.name` on a native instance (or a class object).
+    fn attr(&mut self, e: &Expr, recv: Ty, name: &str) -> Option<Ty> {
+        let m = self.prog.module;
+        if let Some(Comp::Type(c, _)) = recv.as_comp() {
+            return match m.find_class_var(c, name) {
+                Some(owner) => {
+                    let cd = m.class(owner);
+                    let short = cd.name.rsplit('.').next().unwrap_or("").to_string();
+                    self.prog.globals.get(&(cd.unit, format!("{short}.{name}"))).and_then(|s| s.known())
+                }
+                None => {
+                    self.report(Diagnostic::error("P301", e.span, format!("type object '{}' has no attribute '{name}'", m.class(c).name)));
+                    None
+                }
+            };
+        }
+        let c = recv.class_id()?;
+        if let Some(meth) = m.find_method(c, name).cloned() {
+            return match meth.kind {
+                MethodKind::Property => self.call_spec(e, meth.func, &[recv], &[]),
+                _ => {
+                    self.report(
+                        Diagnostic::error("P301", e.span, format!("method `{name}` of `{}` used as a value", m.class(c).name))
+                            .note("call it directly; bound methods as values are phase 4"),
+                    );
+                    None
+                }
+            };
+        }
+        if name == "__class__" || name == "__dict__" {
+            self.report(Diagnostic::error("P301", e.span, format!("`{name}` of a native instance is not supported yet")));
+            return None;
+        }
+        let field = self.prog.fields.get(&(c, name.to_string())).and_then(|s| s.known());
+        let cvar = m.find_class_var(c, name).and_then(|owner| {
+            let cd = m.class(owner);
+            let short = cd.name.rsplit('.').next().unwrap_or("").to_string();
+            self.prog.globals.get(&(cd.unit, format!("{short}.{name}"))).and_then(|s| s.known())
+        });
+        match (field, cvar) {
+            (Some(f), Some(v)) => native::ty_join(f, v, self.boxing()).or(self.boxing().then_some(Ty::Obj)),
+            (Some(f), None) => Some(f),
+            (None, Some(v)) => Some(v),
+            (None, None) => {
+                let declared = m.declared_fields(c).iter().any(|f| f == name) || m.find_class_var(c, name).is_some();
+                if declared {
+                    return None; // assigned somewhere; type not known yet
+                }
+                // Never assigned anywhere: reading it always raises AttributeError.
+                self.report(
+                    Diagnostic::warning("P308", e.span, format!("'{}' object has no attribute '{name}'", m.class(c).name))
+                        .note("no assignment to this attribute exists; it raises AttributeError at runtime"),
+                );
+                Some(Ty::never())
+            }
+        }
+    }
+
+    fn expr_shallow(&mut self, e: &Expr) -> Option<Ty> {
+        self.expr(e)
+    }
+
     pub fn expr(&mut self, e: &Expr) -> Option<Ty> {
         match &e.kind {
+            ExprKind::New { class, args, kwargs } => self.new_instance(e, *class, args, kwargs),
+            ExprKind::ClassRef(c) => Some(Ty::class_type(*c, &self.prog.module.class(*c).rust)),
             ExprKind::Int(_) => Some(Ty::Int),
             ExprKind::Float(_) => Some(Ty::Float),
             ExprKind::Str(_) => Some(Ty::Str),
@@ -888,6 +1266,17 @@ impl Ctx<'_, '_> {
                 let l = self.expr(left);
                 let r = self.expr(right);
                 let (l, r) = (l?, r?);
+                if l.class_id().is_some() || r.class_id().is_some() {
+                    let n = dunder_name(*op);
+                    if let Some(t) = self.dunder(e, l, &format!("__{n}__"), &[right]) {
+                        return t;
+                    }
+                    if let Some(t) = self.dunder(e, r, &format!("__r{n}__"), &[left]) {
+                        return t;
+                    }
+                    self.report(Diagnostic::error("P301", e.span, format!("unsupported operand type(s) for {}: '{l}' and '{r}'", op.symbol())).note("define the dunder method on the class"));
+                    return None;
+                }
                 if l.is_never() || r.is_never() {
                     return Some(Ty::never());
                 }
@@ -932,6 +1321,24 @@ impl Ctx<'_, '_> {
                 if t.is_never() {
                     return Some(Ty::never());
                 }
+                if t.class_id().is_some() && *op != UnaryOp::Not {
+                    let n = match op {
+                        UnaryOp::Neg => "__neg__",
+                        UnaryOp::Pos => "__pos__",
+                        _ => "__invert__",
+                    };
+                    return match self.dunder(e, t, n, &[]) {
+                        Some(r) => r,
+                        None => {
+                            self.report(Diagnostic::error("P301", e.span, format!("bad operand type for unary operator: '{t}'")));
+                            None
+                        }
+                    };
+                }
+                if t.class_id().is_some() {
+                    // `not obj` uses __bool__/__len__ (requested at construction).
+                    return Some(Ty::Bool);
+                }
                 if t == Ty::Obj {
                     return Some(if *op == UnaryOp::Not { Ty::Bool } else { Ty::Obj });
                 }
@@ -947,7 +1354,9 @@ impl Ctx<'_, '_> {
                 for (op, c) in rest {
                     let r = self.expr(c);
                     if let (Some(a), Some(b)) = (l, r) {
-                        if a == Ty::Obj || b == Ty::Obj {
+                        if a.class_id().is_some() || b.class_id().is_some() {
+                            self.compare_classes(c, *op, a, prev, b, c);
+                        } else if a == Ty::Obj || b == Ty::Obj {
                             self.escape(prev);
                             self.escape(c);
                         } else if !a.is_never() && !b.is_never() && !ops::compare(*op, a, b) {
@@ -1041,6 +1450,9 @@ impl Ctx<'_, '_> {
                 let t = self.expr(obj)?;
                 if t == Ty::Obj {
                     return Some(Ty::Obj);
+                }
+                if t.class_id().is_some() || matches!(t.as_comp(), Some(Comp::Type(..))) {
+                    return self.attr(e, t, name);
                 }
                 if !t.has_mutable() {
                     return Some(Ty::Obj); // e.g. `x.real`: boxed copy of an immutable value
@@ -1185,6 +1597,15 @@ impl Ctx<'_, '_> {
                 if ot.is_never() {
                     return Some(Ty::never());
                 }
+                if ot.class_id().is_some() {
+                    return match self.dunder(e, ot, "__getitem__", &[index]) {
+                        Some(t) => t,
+                        None => {
+                            self.report(Diagnostic::error("P301", e.span, format!("'{ot}' object is not subscriptable")));
+                            None
+                        }
+                    };
+                }
                 if ot == Ty::Obj {
                     self.index_types(index);
                     self.escape(index);
@@ -1225,6 +1646,24 @@ impl Ctx<'_, '_> {
                 let tys: Option<Vec<Ty>> = tys.into_iter().collect();
                 let tys = tys?;
                 match callee {
+                    Callee::Builtin(b) if tys.first().is_some_and(|t| t.class_id().is_some()) && matches!(b, Builtin::Len | Builtin::Abs | Builtin::Int | Builtin::Float) => {
+                        let n = match b {
+                            Builtin::Len => "__len__",
+                            Builtin::Abs => "__abs__",
+                            Builtin::Int => "__int__",
+                            _ => "__float__",
+                        };
+                        match self.dunder(e, tys[0], n, &[]) {
+                            Some(t) => t,
+                            None => {
+                                self.report(Diagnostic::error("P303", e.span, format!("object of type '{}' has no {n}", tys[0])).note("CPython would raise TypeError here"));
+                                None
+                            }
+                        }
+                    }
+                    Callee::Builtin(b @ (Builtin::Str | Builtin::Bool | Builtin::Print | Builtin::PrintKw)) if tys.iter().any(|t| t.class_id().is_some()) => {
+                        Some(if matches!(b, Builtin::Str) { Ty::Str } else if matches!(b, Builtin::Bool) { Ty::Bool } else { Ty::None })
+                    }
                     Callee::Builtin(b) => match ops::builtin(*b, &tys, self.boxing()) {
                         Ok(t) => Some(t),
                         Err(msg) => {
@@ -1267,6 +1706,19 @@ impl Ctx<'_, '_> {
 
     fn call_obj(&mut self, e: &Expr, func: &Expr, args: &[Expr], kwargs: &[(String, Expr)]) -> Option<Ty> {
         match self.classify(func, args, kwargs) {
+            CallClass::UserMethod { func: fid, kind } => {
+                let ExprKind::GetAttr { obj, name } = &func.kind else { unreachable!() };
+                let recv = self.expr(obj)?;
+                if fid == usize::MAX {
+                    // BaseException.__init__(self, msg) from super().__init__ in a user exception.
+                    for a in args {
+                        self.expr(a)?;
+                    }
+                    return Some(Ty::None);
+                }
+                self.method_call(e, recv, name, fid, kind, args, kwargs)
+            }
+            CallClass::Construct(c) => self.new_instance(e, c, args, kwargs),
             CallClass::Pending => {
                 // Evaluate the parts (requests, flows) without deciding yet.
                 for a in args.iter().chain(kwargs.iter().map(|(_, v)| v)) {
@@ -1337,6 +1789,73 @@ impl Ctx<'_, '_> {
 }
 
 impl<'m> Program<'m> {
+    /// Specializations a node calls through native-class dispatch
+    /// (constructors, methods, dunders), for the call graph.
+    pub fn class_calls(&self, spec: &Spec, e: &Expr) -> Vec<SpecKey> {
+        let mut reqs: Requests = Vec::new();
+        {
+            let mut ctx = self.ctx_for(spec);
+            ctx.requests = Some(&mut reqs);
+            match &e.kind {
+                ExprKind::New { .. } | ExprKind::CallObj { .. } | ExprKind::BinOp { .. } | ExprKind::Unary { .. } | ExprKind::Compare { .. } | ExprKind::Subscript { .. } | ExprKind::GetAttr { .. } => {
+                    ctx.expr_shallow(e);
+                }
+                ExprKind::Call { callee: Callee::Builtin(_), .. } => {
+                    ctx.expr_shallow(e);
+                }
+                _ => {}
+            }
+        }
+        reqs.into_iter().map(|(k, _)| k).filter(|k| self.module.funcs[k.func].class.is_some()).collect()
+    }
+
+    /// Statement-level dunder calls (`obj[i] = v`, `for x in obj`, `obj.p = v`).
+    pub fn class_stmt_calls(&self, spec: &Spec, st: &Stmt) -> Vec<SpecKey> {
+        let mut reqs: Requests = Vec::new();
+        {
+            let mut ctx = self.ctx_for(spec);
+            ctx.requests = Some(&mut reqs);
+            match &st.kind {
+                StmtKind::SetItem { obj, index, value } => {
+                    if self.type_of(spec, obj).is_some_and(|t| t.class_id().is_some()) {
+                        ctx.set_item(obj, index, value);
+                    }
+                }
+                StmtKind::ForIter { iter, .. } => {
+                    if let Some(t) = self.type_of(spec, iter).filter(|t| t.class_id().is_some()) {
+                        ctx.dunder(iter, t, "__iter__", &[]);
+                    }
+                }
+                StmtKind::SetAttr { obj, name, value } => {
+                    if let Some(t) = self.type_of(spec, obj).filter(|t| t.class_id().is_some()) {
+                        let mut a = Vec::new();
+                        let mut r = Slot::Unknown;
+                        let _ = (name, value, t);
+                        ctx.stmt(st, &mut a, &mut r);
+                    }
+                }
+                _ => {}
+            }
+        }
+        reqs.into_iter().map(|(k, _)| k).filter(|k| self.module.funcs[k.func].class.is_some()).collect()
+    }
+
+    /// Arguments of a call of `func` bound to its parameters (the receiver
+    /// slot removed when `skip_first`), with their evaluation order.
+    pub fn bound_args(&self, func: FuncId, skip_first: bool, args: &[Expr], kwargs: &[(String, Expr)], span: Span) -> Option<(Vec<Expr>, Vec<usize>)> {
+        let f = &self.module.funcs[func];
+        let mut sig = f.sig.clone();
+        if skip_first && !sig.names.is_empty() {
+            sig.names.remove(0);
+            sig.n_pos = sig.n_pos.saturating_sub(1);
+            sig.n_posonly = sig.n_posonly.saturating_sub(1);
+            if !sig.defaults.is_empty() {
+                sig.defaults.remove(0);
+            }
+        }
+        bind_call(&sig, &f.name, args.to_vec(), kwargs.to_vec(), span).ok()
+    }
+
     /// How a `CallObj` node executes in `spec` (shared by analysis and codegen).
     pub fn classify_call(&self, spec: &Spec, func: &Expr, args: &[Expr], kwargs: &[(String, Expr)]) -> CallClass {
         let mut ctx = self.ctx_for(spec);
@@ -1353,6 +1872,8 @@ impl<'m> Program<'m> {
             widens: vec![],
             ret_widen: vec![],
             cur_ret: None,
+            fassigns: vec![],
+            news: vec![],
         }
     }
 }
