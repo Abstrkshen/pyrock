@@ -185,6 +185,7 @@ fn boxed(code: &str, t: Ty) -> String {
         Ty::None if code == "()" => "rt::py::none()".into(),
         Ty::None => format!("{{ {code}; rt::py::none() }}"),
         Ty::Obj => code.to_string(),
+        Ty::C(_) => format!("rt::py::to_py(&{})?", borrow(code)),
     }
 }
 
@@ -233,6 +234,7 @@ fn truthy(code: &str, t: Ty) -> String {
         Ty::Str => format!("!{code}.is_empty()"),
         Ty::None => format!("{{ {code}; false }}"),
         Ty::Obj => format!("rt::py::truthy(&{})?", borrow(code)),
+        Ty::C(_) => format!("rt::truthy(&{})", borrow(code)),
     }
 }
 
@@ -244,6 +246,7 @@ fn to_str(code: &str, t: Ty) -> String {
         Ty::Str => code.to_string(),
         Ty::None => format!("{{ {code}; rt::conv::str_none() }}"),
         Ty::Obj => format!("rt::py::str_of(&{})?", borrow(code)),
+        Ty::C(_) => format!("rt::conv::str_of(&{})", borrow(code)),
     }
 }
 
@@ -770,6 +773,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 }
             }
             Ty::None | Ty::Obj => unreachable!(),
+            Ty::C(_) => format!("rt::ops::{}(&{}, &{})?", op.rt_fn(), borrow(l), borrow(r)),
         }
     }
 

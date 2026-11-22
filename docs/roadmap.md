@@ -20,7 +20,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 
 ## Phase 1: Type system and everyday syntax
 
-- [ ] **Parametric types.** `Ty` becomes an interned, `Copy` handle that can express
+- [x] **Parametric types.** `Ty` becomes an interned, `Copy` handle that can express
       `list[T]`, `dict[K, V]`, `tuple[...]`, `set[T]`, class instances, functions and
       `Optional[T]`. Gate: behaviour-preserving, every golden snapshot unchanged.
 - [ ] `try` / `except` / `else` / `finally`, `raise`, exception hierarchy for builtin types
@@ -83,3 +83,15 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
   test fails without the fix. Goldens re-blessed; the only change is that allow line.
 * `scripts/readme_check.sh` runs README commands verbatim against the fresh debug build:
   11/11 sample projects pass. `samples/run_all.sh`: 21/21 pass.
+
+### Phase 1.1: parametric types (2026-11-22)
+
+* `Ty` gains `Ty::C(TyId)`: an index into a process-wide interner of `Comp` values
+  (`List`, `Dict`, `Set`, `Tuple`, `Class`, `Func`, `Opt`). `Ty` stays `Copy`/`Hash`/`Ord`,
+  so `SpecKey` and every existing `match` keep working. Interned names are leaked once per
+  distinct type so `py_name`/`rust`/`mangle` still return `&'static str`.
+* Constructors and views: `Ty::list(t)`, `Ty::dict(k, v)`, `Ty::tuple(..)`, `Ty::opt(t)`,
+  `t.list_elem()`, `t.dict_kv()`, `t.is_mutable()`, ...
+* Codegen routes composites through generic runtime entry points (`rt::truthy`,
+  `rt::conv::str_of`, `rt::py::to_py`, `rt::ops::*`) that phase 2 implements.
+* Gate met: `cargo test --workspace` passes with every golden snapshot unchanged.

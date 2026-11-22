@@ -145,7 +145,7 @@ impl ExtTy {
             Ty::Float => t.is_numeric(),
             Ty::Bool => t == Ty::Bool,
             Ty::Str => t == Ty::Str,
-            Ty::None | Ty::Obj => false,
+            Ty::None | Ty::Obj | Ty::C(_) => false,
         }
     }
 }
