@@ -77,6 +77,12 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [ ] Generator `send`/`throw`/`close`, `return value`, `finally` on abandoned generators
 - [ ] Async generators
 
+## Phase 7: speed of mixed code
+
+- [x] Cheaper CPython bridge (attached for the whole run, interned constants, no per-call flush)
+- [x] Native functions and objects callable from CPython threads
+- [ ] Per-key types for dicts with fixed string keys (record dicts → structs)
+
 ## Throughout
 
 - [x] Install without depending on the repo path (runtime crate shipped with the binary)
@@ -481,3 +487,31 @@ README command, verbatim) in CI:
 * `min`/`max(iterable, default=x)` are native.
 * Test: `tests/differential/genexp.py` (infinite source with `break`, side-effect order,
   late binding, nested `for`, inside comprehensions, `next`, `itertools.islice`).
+
+### Phase 7.1: a cheaper bridge, and threads (2026-11-22)
+
+Measured on a breakout-style update loop (state in dicts with mixed values, so every
+operation goes through CPython; 200k frames): CPython 0.61 s, pyfast **13.2 s** before.
+Each bridged operation cost ~400 ns.
+
+* The program runs attached to the interpreter (`rt::py::attached` around the module
+  body): each bridge operation only bumps PyO3's attach counter, and dropped objects are
+  released immediately instead of being queued in PyO3's global pending-decref pool.
+  13.2 s → 2.5 s.
+* `flush()` (called before every bridge operation so output stays ordered) does nothing
+  when nothing was printed since (it used to lock stdout each time).
+* String constants passed to CPython are interned once per call site (`rt::pystr!`), and
+  native string literals are cached per call site (`rt::lit!`). 2.5 s → 1.9 s.
+* Remaining gap (0.35x CPython): ~15 ns per generic C-API operation against ~5 ns for
+  CPython 3.12's specialized bytecode (in-place float ops, cached dict lookups). The fix is
+  typing such code natively (next item); the same loop written with classes runs 9.8x
+  faster than CPython.
+* Trade-off: CPython threads now run only when compiled code calls something that releases
+  the GIL (I/O, `sleep`, `join`, the asyncio selector), not during long native loops.
+* Threads: native functions and objects passed to CPython can be called from other threads
+  (`threading.Thread(target=native_fn)`, thread pools); they panicked before. Program state
+  shared across threads (module globals, the stdout buffer, the exception-class registry)
+  moved from thread-locals to `rt::Shared` cells, sound because compiled code only runs
+  under the GIL; per-thread execution state (recursion depth, coroutine stacks) stays
+  thread-local. Generators and coroutine steps stay bound to their thread.
+* Test: `tests/differential/threads.py`.

@@ -152,21 +152,19 @@ fn canonical(name: &str) -> &str {
     }
 }
 
-thread_local! {
-    /// Exception classes defined by the compiled program: (class, base).
-    static USER: std::cell::RefCell<Vec<(&'static str, &'static str)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
+/// Exception classes defined by the compiled program: (class, base).
+static USER: crate::Shared<Vec<(&'static str, &'static str)>> = crate::Shared::new(Vec::new());
 
 /// Register the program's own exception classes (called from `main`).
 pub fn register(classes: &[(&'static str, &'static str)]) {
-    USER.with(|u| u.borrow_mut().extend_from_slice(classes));
+    USER.with(|u| u.extend_from_slice(classes));
 }
 
 fn base_of(name: &str) -> Option<&'static str> {
     if let Some((_, b)) = HIERARCHY.iter().find(|(c, _)| *c == name) {
         return Some(b);
     }
-    USER.with(|u| u.borrow().iter().find(|(c, _)| *c == name).map(|(_, b)| *b))
+    USER.with(|u| u.iter().find(|(c, _)| *c == name).map(|(_, b)| *b))
 }
 
 /// Whether class `kind` is `base` or derives from it.

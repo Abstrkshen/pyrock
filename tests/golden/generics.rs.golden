@@ -46,7 +46,7 @@ fn add__float_float(mut a: f64, mut b: f64) -> PyResult<f64> {
 fn module_body() -> PyResult<()> {
     rt::print(&[rt::conv::str_int(twice__int(12_i64)?)]);
     rt::print(&[rt::conv::str_float(twice__float(1.5_f64)?)]);
-    rt::print(&[add__str_str(rt::Str::from("a"), rt::Str::from("b"))?]);
+    rt::print(&[add__str_str(rt::lit!("a"), rt::lit!("b"))?]);
     rt::print(&[rt::conv::str_int(sum_squares__int(100_i64)?)]);
     Ok(())
 }

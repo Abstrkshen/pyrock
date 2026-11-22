@@ -58,7 +58,7 @@ pub fn emit(prog: &Program, plan: &Plan, file_name: &str, py_paths: &[String]) -
             out.push('\n');
             first = false;
         }
-        writeln!(out, "thread_local! {{ static {}: std::cell::RefCell<Option<{}>> = const {{ std::cell::RefCell::new(None) }}; }}", gname(*u, name), t.rust()).unwrap();
+        writeln!(out, "static {}: rt::Global<{}> = rt::Global::new(None);", gname(*u, name), t.rust()).unwrap();
     }
     class::emit_classes(prog, plan, &mut out);
     class::emit_unions(prog, &mut out);
@@ -106,7 +106,11 @@ pub fn emit(prog: &Program, plan: &Plan, file_name: &str, py_paths: &[String]) -
     if !excs.is_empty() {
         writeln!(out, "    rt::exc::register(&[{}]);", excs.join(", ")).unwrap();
     }
-    writeln!(out, "    rt::run_main({file_name:?}, module_body)\n}}").unwrap();
+    if plan.uses_python {
+        writeln!(out, "    rt::run_main({file_name:?}, || rt::py::attached(module_body))\n}}").unwrap();
+    } else {
+        writeln!(out, "    rt::run_main({file_name:?}, module_body)\n}}").unwrap();
+    }
 
     let c_mods: Vec<&ExternModule> = m.externs.iter().enumerate().filter(|(i, x)| x.lang == Lang::C && plan.externs_used.contains(i)).map(|(_, x)| x).collect();
     let build_rs = (!c_mods.is_empty()).then(|| {
@@ -232,6 +236,10 @@ pub(crate) fn boxed(code: &str, t: Ty) -> String {
         Ty::Int => format!("rt::py::int({code})"),
         Ty::Float => format!("rt::py::float({code})"),
         Ty::Bool => format!("rt::py::bool_({code})"),
+        // A string literal becomes one interned Python string per call site.
+        Ty::Str if code.starts_with("rt::lit!(\"") && code.ends_with("\")") && !code[9..code.len() - 1].contains("\")") => {
+            format!("rt::pystr!({})", &code[9..code.len() - 1])
+        }
         Ty::Str => format!("rt::py::str_(&{})", borrow(code)),
         Ty::None if code == "()" => "rt::py::none()".into(),
         Ty::None => format!("{{ {code}; rt::py::none() }}"),
@@ -1063,7 +1071,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 }
             }
             ExprKind::Float(v) => float_lit(*v),
-            ExprKind::Str(s) => format!("rt::Str::from({s:?})"),
+            ExprKind::Str(s) => format!("rt::lit!({s:?})"),
             ExprKind::Global { unit, name } => format!("rt::gget(&{}, {name:?})?", gname(*unit, name)),
             ExprKind::Bool(b) => b.to_string(),
             ExprKind::NoneLit => "()".into(),

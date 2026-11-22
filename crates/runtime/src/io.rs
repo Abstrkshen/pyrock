@@ -3,17 +3,19 @@
 
 use crate::exc::PyResult;
 use crate::Str;
-use std::cell::RefCell;
 use std::io::{BufWriter, Write};
 
-thread_local! {
-    static OUT: RefCell<BufWriter<std::io::Stdout>> = RefCell::new(BufWriter::with_capacity(1 << 16, std::io::stdout()));
+/// The stdout buffer, shared by every thread running compiled code.
+static OUT: crate::Shared<Option<BufWriter<std::io::Stdout>>> = crate::Shared::new(None);
+
+#[inline]
+fn with_out<R>(f: impl FnOnce(&mut BufWriter<std::io::Stdout>) -> R) -> R {
+    OUT.with(|o| f(o.get_or_insert_with(|| BufWriter::with_capacity(1 << 16, std::io::stdout()))))
 }
 
 /// `print(*parts)` with the default `sep=" "` and `end="\n"`.
 pub fn print(parts: &[Str]) {
-    OUT.with(|o| {
-        let mut o = o.borrow_mut();
+    with_out(|o| {
         for (i, p) in parts.iter().enumerate() {
             if i > 0 {
                 let _ = o.write_all(b" ");
@@ -26,8 +28,7 @@ pub fn print(parts: &[Str]) {
 
 /// `print(*parts, sep=sep, end=end, flush=flush)`
 pub fn print_kw(parts: &[Str], sep: &str, end: &str, flush_now: bool) {
-    OUT.with(|o| {
-        let mut o = o.borrow_mut();
+    with_out(|o| {
         for (i, p) in parts.iter().enumerate() {
             if i > 0 {
                 let _ = o.write_all(sep.as_bytes());
@@ -41,9 +42,14 @@ pub fn print_kw(parts: &[Str], sep: &str, end: &str, flush_now: bool) {
     }
 }
 
+/// Flush buffered native output (before every CPython call, so output from
+/// both sides stays ordered): free when nothing was printed since.
+#[inline]
 pub fn flush() {
-    OUT.with(|o| {
-        let _ = o.borrow_mut().flush();
+    with_out(|o| {
+        if !o.buffer().is_empty() {
+            let _ = o.flush();
+        }
     });
 }
 

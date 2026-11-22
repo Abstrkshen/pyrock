@@ -174,7 +174,33 @@ pub fn init(script: &str, paths: &[&str]) {
     }
 }
 
+/// Run the program attached to the interpreter (holding the GIL): every
+/// bridge operation then only bumps PyO3's attach counter, and dropped
+/// objects are released at once instead of being queued for later. Python
+/// code that blocks (I/O, `time.sleep`, the asyncio selector) releases the
+/// GIL itself, as in CPython.
+pub fn attached<R>(f: impl FnOnce() -> R) -> R {
+    Python::attach(|_| f())
+}
+
 // ---- boxing native values ----
+
+/// A Python string constant, created (interned) on first use.
+pub struct Interned {
+    text: &'static str,
+    cell: std::sync::OnceLock<Py<PyAny>>,
+}
+
+impl Interned {
+    pub const fn new(text: &'static str) -> Interned {
+        Interned { text, cell: std::sync::OnceLock::new() }
+    }
+
+    #[inline]
+    pub fn get(&self) -> Obj {
+        Python::attach(|py| Obj(self.cell.get_or_init(|| pyo3::types::PyString::intern(py, self.text).clone().into_any().unbind()).clone_ref(py)))
+    }
+}
 
 pub fn int(v: i64) -> Obj {
     Python::attach(|py| own(v.into_pyobject(py).unwrap().into_any()))
@@ -742,7 +768,7 @@ pub fn kw_items(o: &Obj) -> PyResult<Vec<(String, Obj)>> {
 /// A native function value exposed to CPython (callbacks, decorators,
 /// `RunnableLambda(lambda x: ...)`). Single-threaded: CPython calls it while
 /// holding the GIL on the thread that created it.
-#[pyclass(unsendable, name = "native_function")]
+#[pyclass(name = "native_function")]
 pub struct NativeFn {
     name: String,
     #[allow(clippy::type_complexity)]
@@ -835,10 +861,19 @@ pub trait NativeObject: 'static {
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
-#[pyclass(unsendable, weakref, name = "native_object")]
+#[pyclass(weakref, name = "native_object")]
 pub struct NativeObj {
     pub inner: Box<dyn NativeObject>,
 }
+
+// SAFETY: native functions and objects may be called from any CPython thread
+// (`threading`, thread pools): CPython calls them holding the GIL, which
+// serialises every run of compiled code (see `rt::Shared`), so their `Rc`
+// state is never touched by two threads at once.
+unsafe impl Send for NativeFn {}
+unsafe impl Sync for NativeFn {}
+unsafe impl Send for NativeObj {}
+unsafe impl Sync for NativeObj {}
 
 #[pymethods]
 impl NativeObj {

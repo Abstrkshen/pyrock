@@ -27,6 +27,25 @@ pub use coll::{Dict, List, Never, Set, Tup, Tuple0};
 pub use exc::{Exc, Flow, PyResult};
 pub use io::{print, run_main};
 
+/// A string literal: one shared `Str` per call site (no allocation per use).
+#[macro_export]
+macro_rules! lit {
+    ($s:expr) => {{
+        thread_local! { static K: $crate::Str = $crate::Str::from($s); }
+        K.with(|k| k.clone())
+    }};
+}
+
+/// A string literal as a Python `str`: interned once per call site.
+#[cfg(feature = "python")]
+#[macro_export]
+macro_rules! pystr {
+    ($s:expr) => {{
+        static K: $crate::py::Interned = $crate::py::Interned::new($s);
+        K.get()
+    }};
+}
+
 /// Immutable Python `str` value; cheap clones preserve value semantics.
 pub type Str = std::rc::Rc<str>;
 
@@ -82,19 +101,46 @@ pub fn first_import(flag: &std::sync::atomic::AtomicBool) -> bool {
     !flag.swap(true, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Program state shared by every thread that runs compiled code.
+///
+/// Compiled code never runs on two threads at once: a native-only program
+/// has one thread, and in a program that embeds CPython, native code runs
+/// only while holding the GIL (the main thread holds it throughout, and
+/// CPython threads hold it whenever they call into native functions). The
+/// GIL also orders memory between those threads. `with` must not run user
+/// code inside its closure (no re-entrant access).
+pub struct Shared<T>(std::cell::UnsafeCell<T>);
+
+// SAFETY: see above (access is serialised by the GIL or by having one thread).
+unsafe impl<T> Sync for Shared<T> {}
+
+impl<T> Shared<T> {
+    pub const fn new(v: T) -> Shared<T> {
+        Shared(std::cell::UnsafeCell::new(v))
+    }
+
+    #[inline]
+    pub fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        // SAFETY: serialised access (type docs); closures never re-enter.
+        f(unsafe { &mut *self.0.get() })
+    }
+}
+
 /// A module-level variable kept in a global cell.
-pub type Global<T> = std::thread::LocalKey<std::cell::RefCell<Option<T>>>;
+pub type Global<T> = Shared<Option<T>>;
 
 /// Read a global cell (NameError while unbound, as in CPython).
 #[inline]
 pub fn gget<T: Clone + 'static>(cell: &'static Global<T>, name: &str) -> PyResult<T> {
-    cell.with(|c| c.borrow().clone()).ok_or_else(|| unbound_global(name))
+    cell.with(|c| c.clone()).ok_or_else(|| unbound_global(name))
 }
 
-/// Assign a global cell.
+/// Assign a global cell. The old value is dropped outside the cell (its
+/// destructor may run Python code that reads the global).
 #[inline]
 pub fn gset<T: 'static>(cell: &'static Global<T>, v: T) {
-    cell.with(|c| *c.borrow_mut() = Some(v));
+    let old = cell.with(|c| c.replace(v));
+    drop(old);
 }
 
 pub fn unbound_global(name: &str) -> Exc {
