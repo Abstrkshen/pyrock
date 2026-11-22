@@ -387,7 +387,11 @@ fn cargo_build(out: &Path, release: bool, quiet: bool, python: &str) -> Result<P
     // Stable location next to the generated project: .pyfast/<stem>/<stem>
     let stem = name.strip_prefix("pyfast_").and_then(|n| n.rsplit_once('_')).map(|(s, _)| s).unwrap_or(name);
     let exe = out.join(stem);
-    std::fs::copy(&built, &exe).map_err(|e| format!("copying {} to {}: {e}", built.display(), exe.display()))?;
+    // Copy next to it, then rename over it: replacing works even while the
+    // previous build is still running ("Text file busy" when copying onto it).
+    let tmp = exe.with_extension(format!("tmp{}", std::process::id()));
+    std::fs::copy(&built, &tmp).map_err(|e| format!("copying {} to {}: {e}", built.display(), tmp.display()))?;
+    std::fs::rename(&tmp, &exe).map_err(|e| format!("replacing {}: {e}", exe.display()))?;
     Ok(exe)
 }
 
