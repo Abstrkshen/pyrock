@@ -1,0 +1,7 @@
+/target
+.pyfast/
+__pycache__/
+*.pyc
+/.ignore/
+*.so
+!tests/**/*.so

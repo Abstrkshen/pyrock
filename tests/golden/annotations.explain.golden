@@ -1,0 +1,70 @@
+pyfast explain tests/golden/annotations.py   (mode: hybrid, parsed with CPython 3.12.3)
+
+Imports
+  __future__  -> cpython
+  json        -> cpython
+  typing      -> cpython
+
+Inferred generic signatures
+  add(int, int) -> int
+  add_partial(A, int) -> int where Add(A, int, R)
+  scale(float, float) -> float
+  parse_int(str) -> int
+  ratio(int, float) -> float
+  describe(str) -> str
+  maybe(bool) -> int | None
+  total(A) -> int | object
+  log(str) -> None
+
+Specializations (reachable from module entry)
+  add(a: int, b: int) -> int              native  add__int_int             effects: may_raise
+  add_partial(a: float, b: int) -> float  native  add_partial__float_int   effects: pure
+  parse_int(s: str) -> int                bridge  parse_int__str           effects: calls_python
+  scale(x: int, k: int) -> int            native  scale__int_int           effects: may_raise
+  scale(x: float, k: float) -> float      native  scale__float_float       effects: pure
+  ratio(n: int, d: int) -> float          native  ratio__int_int           effects: may_raise
+  maybe(flag: bool) -> object             bridge  maybe__bool              effects: calls_python
+  total(xs: object) -> int                bridge  total__obj               effects: calls_python
+  log(msg: str) -> None                   native  log__str                 effects: io
+  add(a: str, b: str) -> str              native  add__str_str             effects: pure
+  add_partial(a: int, b: int) -> int      native  add_partial__int_int     effects: may_raise
+
+Not reached from module entry (not compiled): describe
+
+CPython boundaries
+  tests/golden/annotations.py:3:1  P200  runtime import of `json`  [<module>]
+      no .py/.rs/.c of that name next to the source: CPython import
+  tests/golden/annotations.py:20:12  P210  json.loads(...)  [parse_int(str)]
+      CPython attribute lookup + call
+  tests/golden/annotations.py:31:1  P215  return value is int or None  [maybe(bool)]
+      boxed as a Python object (no common native type)
+  tests/golden/annotations.py:37:1  P215  variable `t` holds int and object  [total(object)]
+      boxed as a Python object (no common native type)
+  tests/golden/annotations.py:39:5  P214  for-loop over a Python iterable  [total(object)]
+      CPython iterator protocol
+  tests/golden/annotations.py:48:14  P210  json.loads(...)  [<module>]
+      CPython attribute lookup + call
+  tests/golden/annotations.py:49:14  P210  json.loads(...)  [<module>]
+      CPython attribute lookup + call
+  tests/golden/annotations.py:50:17  P210  json.loads(...)  [<module>]
+      CPython attribute lookup + call
+  tests/golden/annotations.py:53:28  P213  operator `/` on a Python object  [<module>]
+      CPython number protocol
+  tests/golden/annotations.py:54:40  P212  list literal  [<module>]
+      mutable collection kept as a Python list (preserves aliasing)
+
+Summary: 8 native, 3 bridged specialization(s); module body bridged; 0 linked Rust/C module(s)
+Runtime: embeds CPython (libpython) for the boundaries above
+Int semantics: i64 subset with checked arithmetic (OverflowError instead of promotion)
+
+Diagnostics
+  tests/golden/annotations.py:50:17  P307  warning: object value where the annotation says float
+      CPython does not enforce annotations, so the value keeps its runtime type
+  tests/golden/annotations.py:56:11  P307  warning: str value where the annotation says int
+      CPython does not enforce annotations, so the value keeps its runtime type
+  tests/golden/annotations.py:56:18  P307  warning: str value where the annotation says int
+      CPython does not enforce annotations, so the value keeps its runtime type
+  tests/golden/annotations.py:12:12  P307  warning: float value where the annotation says int
+      CPython does not enforce annotations, so the value keeps its runtime type
+  tests/golden/annotations.py:8:12  P307  warning: str value where the annotation says int
+      CPython does not enforce annotations, so the value keeps its runtime type

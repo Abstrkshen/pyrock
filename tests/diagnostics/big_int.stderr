@@ -1,0 +1,2 @@
+tests/diagnostics/big_int.py:2:7  P110  error: integer literal 123456789012345678901234567890 is outside the i64 subset
+    arbitrary-precision ints are milestone M4

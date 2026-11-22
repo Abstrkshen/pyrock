@@ -1,0 +1,9 @@
+[package]
+name = "pyfast-codegen-rust"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pyfast-ir.workspace = true
+pyfast-infer.workspace = true
+pyfast-analysis.workspace = true

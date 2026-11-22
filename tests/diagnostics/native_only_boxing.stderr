@@ -1,0 +1,2 @@
+tests/diagnostics/native_only_boxing.py:2:1  P305  error: choose(bool) returns both int and str
+    a closed union (e.g. IntOrStr) is milestone M4

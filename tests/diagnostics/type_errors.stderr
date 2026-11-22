@@ -1,0 +1,2 @@
+tests/diagnostics/type_errors.py:2:12  P301  error: unsupported operand type(s) for +: 'int' and 'str'
+    CPython would raise TypeError here

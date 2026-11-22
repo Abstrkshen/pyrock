@@ -1,0 +1,7 @@
+[package]
+name = "pyfast-infer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pyfast-ir.workspace = true

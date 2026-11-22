@@ -1,0 +1,61 @@
+#!/usr/bin/env perch
+name    "pyfast"
+about   "pyfast — ahead-of-time Python → Rust compiler"
+version "0.1.0"
+
+# Shared bindings are declared bare at top level (no globals block).
+verbose = false
+
+ROOT    = "${script_dir}"
+RELEASE = "${script_dir}/target/release/pyfast"
+
+# The manifest is mandatory. An empty block means "pure ops only, spawns
+# nothing"; add bin/host/env/read/write lines as your commands need them.
+requires
+    bin "cargo"
+    bin "bman"
+    bin "bash"
+    read ROOT
+    write ROOT
+end
+
+command install
+    description "Build pyfast in release mode and install it globally with bman"
+    dir "${script_dir}"
+    do
+        cargo build --release -p pyfast
+        bman add "${RELEASE}"
+    end
+end
+
+command build
+    description "Build the release binary into target/release/pyfast (no install)"
+    dir "${script_dir}"
+    do
+        cargo build --release -p pyfast
+    end
+end
+
+command tests
+    description "Run all tests (unit, differential vs CPython, golden, diagnostics, interop)"
+    dir "${script_dir}"
+    do
+        cargo test --workspace
+    end
+end
+
+command skill
+    description "Link skills/pyfast into the global skills dirs of Claude Code, Codex and Cursor"
+    dir "${script_dir}"
+    do
+        bash skills/install.sh
+    end
+end
+
+command samples
+    description "Compile every program in samples/ and check it against CPython"
+    dir "${script_dir}"
+    do
+        bash samples/run_all.sh
+    end
+end

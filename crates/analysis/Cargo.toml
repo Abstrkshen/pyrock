@@ -1,0 +1,9 @@
+[package]
+name = "pyfast-analysis"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pyfast-ir.workspace = true
+pyfast-infer.workspace = true
+serde.workspace = true

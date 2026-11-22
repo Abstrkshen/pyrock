@@ -1,0 +1,5 @@
+hypot: 5.0 5.0
+fib(80): 23416728348467685
+primes below 1e6: 78498
+RUST SAYS HI!
+safe_div: 3

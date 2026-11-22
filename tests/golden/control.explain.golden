@@ -1,0 +1,13 @@
+pyfast explain tests/golden/control.py   (mode: hybrid, parsed with CPython 3.12.3)
+
+Inferred generic signatures
+  sign(A) -> int where Lt(A, int)
+  count(A) -> int where Lt(int, A)
+
+Specializations (reachable from module entry)
+  sign(n: int) -> int   native  sign__int                effects: pure
+  count(n: int) -> int  native  count__int               effects: may_raise
+
+Summary: 2 native, 0 bridged specialization(s); module body native; 0 linked Rust/C module(s)
+Runtime: no CPython needed
+Int semantics: i64 subset with checked arithmetic (OverflowError instead of promotion)

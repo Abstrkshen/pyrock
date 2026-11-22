@@ -1,0 +1,11 @@
+[package]
+name = "pyfast-runtime"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Embed CPython (only enabled for programs that cross a Python boundary).
+python = ["dep:pyo3"]
+
+[dependencies]
+pyo3 = { version = "0.30", optional = true }

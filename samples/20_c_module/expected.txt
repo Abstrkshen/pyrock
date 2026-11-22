@@ -1,0 +1,5 @@
+gcd: 21 1048576
+dot3: 32.0
+checksum: 3220746824 2166136261
+is_even: True False
+lib: clib 0.1

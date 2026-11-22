@@ -1,0 +1,3 @@
+tests/diagnostics/missing_extern.py:3:7  P150  error: `cmod` has no callable function `hidden`
+tests/diagnostics/missing_extern.py:4:7  P150  error: `cmod` has no callable function `addv`
+    `addv` exists but its signature cannot cross the boundary: variadic C functions are not supported
