@@ -52,6 +52,7 @@ pub fn parse_file(path: &str, python: &str, mode: Mode) -> Result<ParseOutput, S
         python_version: String::new(),
         func_anns: HashMap::new(),
         func_sigs: HashMap::new(),
+        unit_globals: vec![],
     };
     let (unit, diags) = ld.load_unit(&entry, "__main__", path);
     let Some(unit) = unit else {
@@ -59,6 +60,12 @@ pub fn parse_file(path: &str, python: &str, mode: Mode) -> Result<ParseOutput, S
     };
     let main = ld.units[unit].init;
     let funcs: Vec<Function> = ld.funcs.into_iter().map(|f| f.expect("function slot never filled")).collect();
+    let mut globals: Vec<(usize, String)> = Vec::new();
+    for (u, g) in ld.unit_globals.iter().enumerate() {
+        let mut names: Vec<&String> = g.iter().collect();
+        names.sort();
+        globals.extend(names.into_iter().map(|n| (u, n.clone())));
+    }
     let module = Module {
         file: path.to_string(),
         funcs,
@@ -68,6 +75,7 @@ pub fn parse_file(path: &str, python: &str, mode: Mode) -> Result<ParseOutput, S
         slots: ld.slots,
         root_dir: root_dir.display().to_string(),
         imports: ld.imports,
+        globals,
     };
     Ok(ParseOutput { module: Some(module), diagnostics: diags, python_version: ld.python_version })
 }
@@ -90,6 +98,8 @@ struct Loader {
     func_anns: HashMap<FuncId, (Vec<Option<Ty>>, Option<Ty>)>,
     /// Call signatures of natively compiled functions.
     func_sigs: HashMap<FuncId, Sig>,
+    /// Per unit: module-level variables kept in global cells.
+    unit_globals: Vec<HashSet<String>>,
 }
 
 /// How arguments bind to a native function's parameters.
@@ -163,6 +173,7 @@ impl Loader {
         let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         self.units.push(Unit { name: name.into(), path: display.into(), init: usize::MAX });
         self.unit_funcs.push(HashMap::new());
+        self.unit_globals.push(HashSet::new());
         self.unit_by_path.insert(canon.clone(), uid);
         let at = |line: u32, col: u32| Span { line, col, end_line: line, end_col: col, unit: uid as u32 };
         let json = match self.dump(path) {
@@ -194,7 +205,7 @@ impl Loader {
 }
 
 /// What a module-level name refers to.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Binding {
     Func(FuncId),
     Unit(usize),
@@ -212,6 +223,16 @@ struct Lowerer<'l> {
     /// Import statements resolved in pass 1, keyed by their span.
     import_actions: HashMap<Span, Vec<ImportAction>>,
     module_vars: HashSet<String>,
+    /// Module variables of this unit kept in global cells.
+    globals: HashSet<String>,
+    /// Names declared `global` in the function being lowered.
+    fn_globals: HashSet<String>,
+    /// Synthetic locals created while lowering the current function.
+    extra_locals: Vec<String>,
+    /// `from mod import NAME` of module variables, per import statement:
+    /// (binding, unit, name). The binding is a global of this unit, assigned
+    /// once at the import (CPython copies the value at import time).
+    var_imports: HashMap<Span, Vec<(String, usize, String)>>,
     locals: HashSet<String>,
     in_module: bool,
     /// Return annotation of the function being lowered.
@@ -272,6 +293,42 @@ fn arr<'a>(v: &'a Value, k: &str) -> &'a [Value] {
 
 fn sstr<'a>(v: &'a Value, k: &str) -> &'a str {
     v[k].as_str().unwrap_or("")
+}
+
+/// Every `Name` mentioned anywhere under `v`.
+fn scan_names(v: &Value, out: &mut HashSet<String>) {
+    match v {
+        Value::Object(m) => {
+            if m.get("_t").and_then(|t| t.as_str()) == Some("Name") {
+                if let Some(id) = m.get("id").and_then(|i| i.as_str()) {
+                    out.insert(id.to_string());
+                }
+            }
+            for x in m.values() {
+                scan_names(x, out);
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|x| scan_names(x, out)),
+        _ => {}
+    }
+}
+
+/// Names declared `global` in a function body (not in nested functions).
+fn global_decls(body: &[Value], out: &mut HashSet<String>) {
+    for st in body {
+        match ty(st) {
+            "Global" => out.extend(arr(st, "names").iter().filter_map(|n| n.as_str().map(String::from))),
+            "FunctionDef" | "ClassDef" | "AsyncFunctionDef" => {}
+            _ => {
+                for k in ["body", "orelse", "finalbody"] {
+                    global_decls(arr(st, k), out);
+                }
+                for h in arr(st, "handlers") {
+                    global_decls(arr(h, "body"), out);
+                }
+            }
+        }
+    }
 }
 
 /// Collect names bound by assignment-like statements, in first-binding order.
@@ -342,6 +399,10 @@ impl<'l> Lowerer<'l> {
             bindings: HashMap::new(),
             import_actions: HashMap::new(),
             module_vars: HashSet::new(),
+            globals: HashSet::new(),
+            fn_globals: HashSet::new(),
+            extra_locals: vec![],
+            var_imports: HashMap::new(),
             locals: HashSet::new(),
             in_module: true,
             ret_ann: None,
@@ -409,10 +470,39 @@ impl<'l> Lowerer<'l> {
             }
         }
         self.module_vars = module_locals.iter().cloned().collect();
+        // Module variables that functions read (or declare `global`) live in
+        // global cells. All variables of an imported unit do, so importers can
+        // read `mod.NAME`.
+        let mut g: HashSet<String> = HashSet::new();
+        for st in body.iter().filter(|st| ty(st) == "FunctionDef") {
+            let mut fl = signature(&st["args"]).1.names;
+            collect_bindings(arr(st, "body"), &mut fl, false);
+            let mut decl = HashSet::new();
+            global_decls(arr(st, "body"), &mut decl);
+            let mut used = HashSet::new();
+            for s in arr(st, "body") {
+                scan_names(s, &mut used);
+            }
+            for n in used {
+                if self.module_vars.contains(&n) && (!fl.contains(&n) || decl.contains(&n)) {
+                    g.insert(n);
+                }
+            }
+            g.extend(decl.into_iter().filter(|n| !self.bindings.contains_key(n)));
+        }
+        for v in self.var_imports.values() {
+            g.extend(v.iter().map(|(b, _, _)| b.clone()));
+        }
+        if self.unit != 0 {
+            g.extend(self.module_vars.iter().cloned());
+        }
+        self.module_vars.extend(g.iter().cloned());
+        self.globals = g.clone();
+        self.ld.unit_globals[self.unit] = g;
 
         // Pass 2: lower function bodies, then the module body.
         let mut main_body = Vec::new();
-        self.locals = self.module_vars.clone();
+        self.locals = self.module_vars.difference(&self.globals).cloned().collect();
         self.in_module = true;
         for st in body {
             if ty(st) == "FunctionDef" {
@@ -421,9 +511,9 @@ impl<'l> Lowerer<'l> {
                 if sp != self.span(st) {
                     continue; // duplicate, already reported
                 }
-                let saved = (std::mem::take(&mut self.locals), self.in_module);
+                let saved = (std::mem::take(&mut self.locals), self.in_module, std::mem::take(&mut self.extra_locals));
                 let f = self.lower_function(id, st);
-                (self.locals, self.in_module) = saved;
+                (self.locals, self.in_module, self.extra_locals) = saved;
                 self.ld.funcs[id] = Some(f);
             } else if let Some(s) = self.lower_stmt(st) {
                 main_body.push(s);
@@ -452,6 +542,8 @@ impl<'l> Lowerer<'l> {
         });
         let init = self.ld.alloc_func();
         let name = if self.unit == 0 { "<module>".to_string() } else { format!("{}.<module>", self.ld.units[self.unit].name) };
+        let mut module_locals: Vec<String> = module_locals.into_iter().filter(|n| !self.globals.contains(n)).collect();
+        module_locals.extend(std::mem::take(&mut self.extra_locals));
         self.ld.funcs[init] = Some(Function {
             id: init,
             name,
@@ -606,7 +698,10 @@ impl<'l> Lowerer<'l> {
                         Some(&fid) => {
                             self.bindings.insert(bind, Binding::Func(fid));
                         }
-                        None => self.err("P140", sp, format!("`{module}.{attr}` is not a function of the natively compiled module `{module}`")),
+                        None if self.ld.unit_globals[u].contains(&attr) => {
+                            self.var_imports.entry(sp).or_default().push((bind, u, attr.clone()));
+                        }
+                        None => self.err("P140", sp, format!("`{module}` has no function or module-level variable `{attr}`")),
                     },
                     Some(Binding::Extern(e)) if e != usize::MAX => match self.ld.externs[e].funcs.iter().position(|f| f.name == attr) {
                         Some(i) => {
@@ -665,14 +760,20 @@ impl<'l> Lowerer<'l> {
             }
         }
         let params: Vec<String> = sig.names.clone();
+        let mut decl = HashSet::new();
+        global_decls(arr(st, "body"), &mut decl);
         let mut locals = params.clone();
         collect_bindings(arr(st, "body"), &mut locals, false);
+        locals.retain(|n| !decl.contains(n));
+        self.fn_globals = decl;
         self.locals = locals.iter().cloned().collect();
         self.in_module = false;
         let (param_ann, ret_ann) = self.ld.func_anns.get(&id).cloned().unwrap_or_default();
         self.ret_ann = ret_ann;
         let body = self.lower_block(arr(st, "body"));
         self.ret_ann = None;
+        self.fn_globals.clear();
+        locals.extend(std::mem::take(&mut self.extra_locals));
         Function { id, name: self.qual(&name), params, locals, body, span: sp, is_module: false, unit: self.unit, param_ann, ret_ann }
     }
 
@@ -706,7 +807,7 @@ impl<'l> Lowerer<'l> {
                     }
                 }
                 if names.len() == 1 {
-                    StmtKind::Assign { target: names.remove(0), value }
+                    self.bind_target(names.remove(0), value)
                 } else {
                     return Some(self.multi_assign(names, value, sp));
                 }
@@ -717,7 +818,7 @@ impl<'l> Lowerer<'l> {
                 }
                 let value = annotated(parse_ann(&st["annotation"]), self.lower_expr(&st["value"])?);
                 match self.name_target(&st["target"]) {
-                    Some(target) => StmtKind::Assign { target, value },
+                    Some(target) => self.bind_target(target, value),
                     None => return self.lower_store(&st["target"], value, sp),
                 }
             }
@@ -726,6 +827,11 @@ impl<'l> Lowerer<'l> {
                 let value = self.lower_expr(&st["value"])?;
                 let t = &st["target"];
                 match self.name_target(t) {
+                    Some(target) if !self.locals.contains(&target) => {
+                        let cur = self.lower_name(&target, sp)?;
+                        let v = Expr { kind: ExprKind::BinOp { op, left: Box::new(cur), right: Box::new(value) }, span: sp };
+                        self.bind_target(target, v)
+                    }
                     Some(target) => StmtKind::AugAssign { target, op, value },
                     None => {
                         // obj[i] += v / obj.a += v: only for side-effect-free receivers,
@@ -777,7 +883,11 @@ impl<'l> Lowerer<'l> {
             }
             "Import" | "ImportFrom" => {
                 let actions = self.import_actions.remove(&sp).unwrap_or_default();
-                let stmts: Vec<Stmt> = actions.into_iter().map(|a| Stmt { kind: StmtKind::Import(a), span: sp }).collect();
+                let mut stmts: Vec<Stmt> = actions.into_iter().map(|a| Stmt { kind: StmtKind::Import(a), span: sp }).collect();
+                for (bind, u, name) in self.var_imports.remove(&sp).unwrap_or_default() {
+                    let value = Expr { kind: ExprKind::Global { unit: u, name }, span: sp };
+                    stmts.push(Stmt { kind: StmtKind::AssignGlobal { unit: self.unit, name: bind, value }, span: sp });
+                }
                 return match stmts.len() {
                     0 => None,
                     1 => stmts.into_iter().next(),
@@ -800,8 +910,18 @@ impl<'l> Lowerer<'l> {
                         }
                         _ => vec![self.exc_type(&h["type"])?],
                     };
-                    let name = h["name"].as_str().map(String::from);
-                    handlers.push(Handler { types, name, body: self.lower_block(arr(h, "body")), span: hsp });
+                    let (name, prefix) = match h["name"].as_str() {
+                        Some(n) => {
+                            let (n, p) = self.local_target(n.to_string(), hsp);
+                            (Some(n), p)
+                        }
+                        None => (None, None),
+                    };
+                    let mut hbody = self.lower_block(arr(h, "body"));
+                    if let Some(p) = prefix {
+                        hbody.insert(0, p);
+                    }
+                    handlers.push(Handler { types, name, body: hbody, span: hsp });
                 }
                 StmtKind::Try { body, handlers, orelse: self.lower_block(arr(st, "orelse")), finalbody: self.lower_block(arr(st, "finalbody")) }
             }
@@ -836,7 +956,13 @@ impl<'l> Lowerer<'l> {
                     let ctx = self.lower_expr(&item["context_expr"])?;
                     let var = match ty(&item["optional_vars"]) {
                         "" => None,
-                        "Name" => Some(sstr(&item["optional_vars"], "id").to_string()),
+                        "Name" => {
+                            let (v, p) = self.local_target(sstr(&item["optional_vars"], "id").to_string(), sp);
+                            if let Some(p) = p {
+                                body.insert(0, p);
+                            }
+                            Some(v)
+                        }
                         _ => {
                             let vsp = self.span(&item["optional_vars"]);
                             self.unsupported(vsp, "unpacking in a `with` target", "bind one name and unpack it in the body");
@@ -847,7 +973,8 @@ impl<'l> Lowerer<'l> {
                 }
                 return body.into_iter().next();
             }
-            "Global" | "Nonlocal" => {
+            "Global" => return None, // handled by the pre-scan
+            "Nonlocal" => {
                 self.err("P142", sp, "`global`/`nonlocal` rebinding is never lowered into a native assumption");
                 return None;
             }
@@ -863,7 +990,12 @@ impl<'l> Lowerer<'l> {
     fn lower_store(&mut self, t: &Value, value: Expr, sp: Span) -> Option<Stmt> {
         let kind = match ty(t) {
             "Subscript" => StmtKind::SetItem { obj: self.lower_expr(&t["value"])?, index: self.lower_index(&t["slice"])?, value },
-            "Attribute" => StmtKind::SetAttr { obj: self.lower_expr(&t["value"])?, name: sstr(t, "attr").to_string(), value },
+            "Attribute" => match self.module_binding(&t["value"]) {
+                Some(Binding::Unit(u)) if self.ld.unit_globals[u].contains(sstr(t, "attr")) => {
+                    StmtKind::AssignGlobal { unit: u, name: sstr(t, "attr").to_string(), value }
+                }
+                _ => StmtKind::SetAttr { obj: self.lower_expr(&t["value"])?, name: sstr(t, "attr").to_string(), value },
+            },
             other => {
                 let tsp = self.span(t);
                 self.unsupported(tsp, &format!("assignment to `{other}`"), "tuple unpacking is not compiled yet");
@@ -875,12 +1007,13 @@ impl<'l> Lowerer<'l> {
 
     fn multi_assign(&mut self, names: Vec<String>, value: Expr, sp: Span) -> Stmt {
         let first = names[0].clone();
-        let mut stmts = vec![Stmt { kind: StmtKind::Assign { target: first.clone(), value }, span: sp }];
+        let mut stmts = vec![Stmt { kind: self.bind_target(first.clone(), value), span: sp }];
         for n in &names[1..] {
-            stmts.push(Stmt {
-                kind: StmtKind::Assign { target: n.clone(), value: Expr { kind: ExprKind::Local(first.clone()), span: sp } },
-                span: sp,
-            });
+            let read = match self.lower_name(&first, sp) {
+                Some(r) => r,
+                None => break,
+            };
+            stmts.push(Stmt { kind: self.bind_target(n.clone(), read), span: sp });
         }
         // Encode as an always-true `if` block to keep a single statement slot.
         Stmt { kind: StmtKind::If { test: Expr { kind: ExprKind::Bool(true), span: sp }, body: stmts, orelse: vec![] }, span: sp }
@@ -896,6 +1029,13 @@ impl<'l> Lowerer<'l> {
             self.unsupported(sp, "tuple unpacking in `for`", "iterate and index explicitly for now");
             return None;
         };
+        let (var, prefix) = self.local_target(var, sp);
+        let with_prefix = |mut body: Vec<Stmt>| {
+            if let Some(p) = prefix.clone() {
+                body.insert(0, p);
+            }
+            body
+        };
         let it = &st["iter"];
         let is_range = ty(it) == "Call"
             && ty(&it["func"]) == "Name"
@@ -906,7 +1046,7 @@ impl<'l> Lowerer<'l> {
             && (1..=3).contains(&arr(it, "args").len());
         if !is_range {
             let iter = self.lower_expr(it)?;
-            let body = self.lower_block(arr(st, "body"));
+            let body = with_prefix(self.lower_block(arr(st, "body")));
             return Some(Stmt { kind: StmtKind::ForIter { var, iter, body }, span: sp });
         }
         let mut lowered = Vec::new();
@@ -925,7 +1065,7 @@ impl<'l> Lowerer<'l> {
                 (Some(lowered.remove(0)), stop, Some(step))
             }
         };
-        let body = self.lower_block(arr(st, "body"));
+        let body = with_prefix(self.lower_block(arr(st, "body")));
         Some(Stmt { kind: StmtKind::ForRange { var, start, stop, step, body }, span: sp })
     }
 
@@ -1068,6 +1208,11 @@ impl<'l> Lowerer<'l> {
             "JoinedStr" => return self.lower_fstring(e),
             "Attribute" => {
                 let attr = sstr(e, "attr");
+                if let Some(Binding::Unit(u)) = self.module_binding(&e["value"]) {
+                    if self.ld.unit_globals[u].contains(attr) {
+                        return Some(Expr { kind: ExprKind::Global { unit: u, name: attr.to_string() }, span: sp });
+                    }
+                }
                 if let Some(b) = self.module_binding(&e["value"]) {
                     let what = match b {
                         Binding::Unit(u) if !self.ld.unit_funcs[u].contains_key(attr) => "module-level variable of a natively compiled module",
@@ -1111,6 +1256,30 @@ impl<'l> Lowerer<'l> {
         Some(Expr { kind, span: sp })
     }
 
+    /// `name = value` for a local or a global cell.
+    fn bind_target(&mut self, name: String, value: Expr) -> StmtKind {
+        if !self.locals.contains(&name) && (self.fn_globals.contains(&name) || self.globals.contains(&name)) {
+            StmtKind::AssignGlobal { unit: self.unit, name, value }
+        } else {
+            StmtKind::Assign { target: name, value }
+        }
+    }
+
+    /// A loop / `with` / `except` target that is a global: bind a synthetic
+    /// local and copy it into the global cell at the start of the body.
+    fn local_target(&mut self, name: String, sp: Span) -> (String, Option<Stmt>) {
+        if self.locals.contains(&name) || !(self.fn_globals.contains(&name) || self.globals.contains(&name)) {
+            return (name, None);
+        }
+        let tmp = format!("__g_{name}");
+        if !self.locals.contains(&tmp) {
+            self.locals.insert(tmp.clone());
+            self.extra_locals.push(tmp.clone());
+        }
+        let set = StmtKind::AssignGlobal { unit: self.unit, name, value: Expr { kind: ExprKind::Local(tmp.clone()), span: sp } };
+        (tmp, Some(Stmt { kind: set, span: sp }))
+    }
+
     /// `name` refers to a builtin exception class (not shadowed by anything local).
     fn builtin_exc(&self, name: &str) -> bool {
         is_builtin_exception(name) && !self.locals.contains(name) && !self.bindings.contains_key(name) && !self.module_vars.contains(name)
@@ -1130,7 +1299,7 @@ impl<'l> Lowerer<'l> {
             return None;
         }
         match self.bindings.get(sstr(v, "id")) {
-            Some(b @ (Binding::Unit(_) | Binding::Extern(_))) => Some(*b),
+            Some(b @ (Binding::Unit(_) | Binding::Extern(_))) => Some(b.clone()),
             _ => None,
         }
     }
@@ -1138,12 +1307,14 @@ impl<'l> Lowerer<'l> {
     fn lower_name(&mut self, id: &str, sp: Span) -> Option<Expr> {
         let kind = if self.locals.contains(id) {
             ExprKind::Local(id.to_string())
+        } else if self.fn_globals.contains(id) || self.globals.contains(id) {
+            ExprKind::Global { unit: self.unit, name: id.to_string() }
         } else if id == "__name__" {
             ExprKind::Str(if self.unit == 0 { "__main__".into() } else { self.ld.units[self.unit].name.clone() })
         } else if id == "__file__" {
             // CPython: the path as given for the entry script, absolute for imports.
             ExprKind::Str(self.ld.units[self.unit].path.clone())
-        } else if let Some(b) = self.bindings.get(id).copied() {
+        } else if let Some(b) = self.bindings.get(id).cloned() {
             match b {
                 Binding::Slot(s) => {
                     self.used_slots.insert(s);
@@ -1192,7 +1363,7 @@ impl<'l> Lowerer<'l> {
         // Direct calls by name.
         if ty(f) == "Name" && !self.locals.contains(sstr(f, "id")) {
             let id = sstr(f, "id");
-            match self.bindings.get(id).copied() {
+            match self.bindings.get(id).cloned() {
                 Some(Binding::Func(fid)) => {
                     if self.in_module {
                         if let Some(&(_, def_sp)) = self.func_ids.get(id) {

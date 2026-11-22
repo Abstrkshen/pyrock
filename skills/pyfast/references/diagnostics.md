@@ -14,9 +14,9 @@ Format: `file.py:LINE:COL  CODE  error|warning: message`, followed by indented
 | P101 | Decorators, `*args`/`**kwargs` parameters, or a non-literal default | Use `None` as the default and assign in the body |
 | P110 | Integer literal outside i64 | Use a float, or compute it in a CPython module |
 | P120 | Comprehension, generator or lambda | Use a `for` loop with `.append(...)`, or a named top-level function |
-| P140 | Module-level variable read inside a function, or `from mod import NAME` where NAME isn't a function | Pass the value as a parameter, or wrap it in a function that returns it |
+| P140 | `from mod import NAME` where the native module has no function or variable NAME | Define it in that module |
 | P141 | Module-level name rebinds a function or import | Use a different name |
-| P142 | `global` / `nonlocal` | Return the new value instead |
+| P142 | `nonlocal` | Return the new value instead (closures are phase 4) |
 | P143 | Undefined name | Define or import it |
 | P144 | Function called at module level before its `def` | Move the `def` above the call |
 | P145 | Circular import between native `.py` modules | Break the cycle |

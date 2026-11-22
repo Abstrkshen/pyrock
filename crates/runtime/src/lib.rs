@@ -76,6 +76,21 @@ pub fn first_import(flag: &std::sync::atomic::AtomicBool) -> bool {
     !flag.swap(true, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// A module-level variable kept in a global cell.
+pub type Global<T> = std::thread::LocalKey<std::cell::RefCell<Option<T>>>;
+
+/// Read a global cell (NameError while unbound, as in CPython).
+#[inline]
+pub fn gget<T: Clone + 'static>(cell: &'static Global<T>, name: &str) -> PyResult<T> {
+    cell.with(|c| c.borrow().clone()).ok_or_else(|| unbound_global(name))
+}
+
+/// Assign a global cell.
+#[inline]
+pub fn gset<T: 'static>(cell: &'static Global<T>, v: T) {
+    cell.with(|c| *c.borrow_mut() = Some(v));
+}
+
 pub fn unbound_global(name: &str) -> Exc {
     Exc::new("NameError", format!("name '{name}' is not defined"))
 }

@@ -300,6 +300,9 @@ impl State<'_> {
                 }
                 return false;
             }
+            StmtKind::AssignGlobal { value, .. } => {
+                self.expr(value, cx);
+            }
             StmtKind::With { ctx, var, body } => {
                 self.expr(ctx, cx);
                 if let Some(v) = var {
@@ -401,6 +404,7 @@ impl State<'_> {
                 Sym::Con(*ty)
             }
             ExprKind::Slot(_) | ExprKind::PyBuiltin(_) => Sym::Con(Ty::Obj),
+            ExprKind::Global { .. } => self.fresh(),
             ExprKind::NewExc { args, .. } => {
                 for a in args {
                     self.expr(a, cx);

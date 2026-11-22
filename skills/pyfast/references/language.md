@@ -4,6 +4,8 @@
 
 * Top-level `def`, including recursion. `/` and `*` parameter markers, literal defaults
   (`def f(x, n=None, *, sep=",")`) and keyword arguments at the call are native.
+* Module-level variables in functions (`RATE * x`), `global count`, `config.DEBUG`,
+  `from config import LIMIT`: typed global cells, `NameError` if read before assignment.
 * `T | None` is a native `Option<T>`: `def f(x, size=None): if size is None: size = 8`
   compiles without boxing. Arithmetic on a `None` raises CPython's `TypeError`.
 * Locals: one concrete type per specialization.
@@ -68,8 +70,7 @@ values (mixed types). These keep exact Python semantics, including aliasing.
 | `*args`, `**kwargs` parameters | Pass a list or explicit parameters |
 | Non-literal default (`def f(x=[])`) | `def f(x=None): if x is None: x = []` |
 | `a, b = b, a` / `for k, v in d.items()` | `t = a; a = b; b = t` / index the tuple: `kv[0]`, `kv[1]` |
-| Reading a module global in a function | Pass it as an argument |
-| `global` / `nonlocal` | Return the new value |
+| `nonlocal` | Return the new value (closures are phase 4) |
 | decorators | Call the wrapper explicitly |
 
 ## Making code fast

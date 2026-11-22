@@ -30,6 +30,10 @@ These constructs become plain Rust with no Python objects involved:
   CPython keep their original object, so `except json.JSONDecodeError` works through
   `isinstance`. `return`/`break`/`continue` inside `try` run `finally` first.
 * `__name__` and `__file__`.
+* Module-level variables read inside functions, `global x` in functions, `mod.NAME` /
+  `mod.NAME = v` on a natively compiled module, and `from mod import NAME` (copied at import,
+  as CPython does). Such variables live in typed global cells; reading one before its
+  assignment ran raises `NameError`.
 
 ## Semantics that are preserved
 
@@ -86,7 +90,8 @@ variadic functions, `static` C functions) are listed in `explain`. Calling one g
 | P120 | Comprehensions and lambdas (closures are M6) |
 | P145 | Circular import between natively compiled modules |
 | P150 | Rust/C module has no callable function of that name (with the reason if its signature was skipped) |
-| P140/P141/P142 | Module globals read in functions, function rebinding, `global`/`nonlocal` |
+| P140 | `from mod import NAME` where the native module has no such function or variable |
+| P141/P142 | Rebinding a module-level function or import name; `nonlocal` (closures are phase 4) |
 | P143/P144 | Undefined name; call before definition |
 | P2xx | A CPython boundary, in `--mode native-only` only (see above). P220 is a warning: a local `.py` was imported through CPython |
 | P301 (raise) | `raise` of a value that is not an exception |
@@ -99,4 +104,4 @@ variadic functions, `static` C functions) are listed in `explain`. Calling one g
 Not yet supported in either mode: classes defined in natively compiled files (an imported
 `.py` that defines a class falls back to CPython; a class in the entry file is rejected),
 comprehensions, lambdas, closures, `*args`/`**kwargs` parameters, non-literal defaults,
-tuple unpacking, and reading module-level variables from functions.
+and tuple unpacking.

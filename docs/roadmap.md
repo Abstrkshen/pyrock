@@ -27,8 +27,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] `with` (CPython context managers; native ones once classes land), `__file__`
 - [x] Default parameter values, keyword arguments to native functions, `print(sep=, end=, flush=)`
 - [x] `Optional[T]` as a native `Option<T>`; `x is None` folded per specialization
-- [ ] Tuple unpacking (`a, b = f()`, `for k, v in ...`)
-- [ ] Module-level constants readable inside functions (today P140)
+- [x] Module-level variables readable inside functions, `global`, `mod.NAME`, `from mod import NAME`
+- Tuple unpacking and `*args`/`**kwargs` moved to phase 2 (they need native tuples).
 
 ## Phase 2: Native collections
 
@@ -37,6 +37,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [ ] Methods, `len`, `in`, indexing, slicing, iteration
 - [ ] Builtins: `enumerate`, `zip`, `sorted`, `sum`, `reversed`, `list()`, `dict()`
 - [ ] List / dict / set comprehensions (inlined as loops)
+- [ ] Tuple unpacking (`a, b = f()`, `for k, v in d.items()`, starred targets, swaps)
+- [ ] `*args` / `**kwargs` parameters
 - [ ] Escape rule: a collection that reaches Python is a Python object from creation
 
 ## Phase 3: Classes
@@ -143,3 +145,22 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 * Tests: `tests/differential/optional.py`, `tests/differential/call_args.py` (the latter
   passes `--mode native-only`), `tests/diagnostics/call_errors.py`. Golden change: `maybe()`
   in `annotations.py` is now native `-> int | None` instead of a boxed object.
+
+### Phase 1.4: module globals (2026-11-22)
+
+* A pre-scan finds module variables that functions read or declare `global`; every variable
+  of an imported native module is one too. They become typed global cells
+  (`thread_local! RefCell<Option<T>>`, read with `rt::gget` which raises `NameError` while
+  unbound, written with `rt::gset`). HIR: `ExprKind::Global`, `StmtKind::AssignGlobal`.
+* The type of a global joins every assignment in the program (module bodies, `global`
+  writes in functions, `mod.NAME = v` from other modules) in `Program::globals`, inside the
+  same fixed point as specialization.
+* `from mod import NAME` binds a global of the importer, assigned once at the import
+  statement (CPython copies the value at import time; a later `mod.NAME = v` does not
+  change it).
+* Loop, `with` and `except ... as` targets that are globals bind a synthetic local that is
+  copied into the cell at the start of the body.
+* Tests: `tests/differential/globals.py` (+ `_settings.py`): constants in functions, a
+  `global` counter, cross-module reads/writes, from-import copy semantics, a loop variable
+  read by a function, `NameError` before assignment. Passes `--mode native-only`.
+  `tests/diagnostics/rebinding.py` now covers P141 (P140 for reads is gone).

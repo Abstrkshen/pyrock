@@ -78,9 +78,14 @@ pub struct Spec {
     pub maybe_unbound: HashSet<String>,
 }
 
+/// A module-level variable kept in a global cell: (unit, name).
+pub type GlobalKey = (usize, String);
+
 pub struct Program<'m> {
     pub module: &'m Module,
     pub mode: Mode,
+    /// Types of global cells, joined over every assignment in the program.
+    pub globals: BTreeMap<GlobalKey, Slot>,
     pub specs: Vec<Spec>,
     pub index: HashMap<SpecKey, usize>,
     pub diagnostics: Vec<Diagnostic>,
@@ -182,13 +187,13 @@ pub fn short_circuit(locals: &BTreeMap<String, Slot>, op: BoolOpKind, values: &[
 impl Program<'_> {
     /// Type of `e` under the locals of `spec`. Returns `None` when unknown or ill-typed.
     pub fn type_of(&self, spec: &Spec, e: &Expr) -> Option<Ty> {
-        let mut ctx = Ctx { prog: self, locals: &spec.locals, requests: None, diags: None };
+        let mut ctx = Ctx { prog: self, locals: &spec.locals, requests: None, diags: None, gassigns: vec![] };
         ctx.expr(e)
     }
 }
 
 pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
-    let mut prog = Program { module, mode, specs: vec![], index: HashMap::new(), diagnostics: vec![] };
+    let mut prog = Program { module, mode, globals: BTreeMap::new(), specs: vec![], index: HashMap::new(), diagnostics: vec![] };
     let main_key = SpecKey { func: module.main, args: vec![] };
     add_spec(&mut prog, main_key);
 
@@ -199,7 +204,16 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
         let mut i = 0;
         while i < prog.specs.len() {
             let mut requests = Vec::new();
-            let (locals, ret, falls) = analyze(&prog, i, &mut requests, None);
+            let (locals, ret, falls, gassigns) = analyze(&prog, i, &mut requests, None);
+            for (key, t) in gassigns {
+                let boxing = prog.boxing();
+                let slot = prog.globals.entry(key).or_insert(Slot::Unknown);
+                let joined = slot.join(t, boxing);
+                if joined != *slot {
+                    *slot = joined;
+                    changed = true;
+                }
+            }
             let s = &mut prog.specs[i];
             if !s.analyzed || s.locals != locals || s.ret != ret || s.falls_through != falls {
                 s.analyzed = true;
@@ -335,8 +349,9 @@ fn analyze(
     idx: usize,
     requests: &mut Requests,
     diags: Option<&mut Vec<Diagnostic>>,
-) -> (BTreeMap<String, Slot>, Slot, bool) {
+) -> (BTreeMap<String, Slot>, Slot, bool, Vec<(GlobalKey, Ty)>) {
     let spec = &prog.specs[idx];
+    let mut gassigns;
     let f = &prog.module.funcs[spec.key.func];
     let mut locals = spec.locals.clone();
     let mut ret;
@@ -345,9 +360,10 @@ fn analyze(
     loop {
         let before = locals.clone();
         ret = Slot::Unknown;
-        let mut ctx = Ctx { prog, locals: &locals, requests: Some(requests), diags: None };
+        let mut ctx = Ctx { prog, locals: &locals, requests: Some(requests), diags: None, gassigns: vec![] };
         let mut assigns = Vec::new();
         falls = ctx.block(&f.body, &mut assigns, &mut ret);
+        gassigns = std::mem::take(&mut ctx.gassigns);
         for (name, t) in assigns {
             let s = locals.entry(name).or_insert(Slot::Unknown);
             *s = s.join(t, prog.boxing());
@@ -360,10 +376,10 @@ fn analyze(
     if let Some(d) = diags {
         let mut ret2 = Slot::Unknown;
         let mut sink = Vec::new();
-        let mut ctx = Ctx { prog, locals: &locals, requests: None, diags: Some(d) };
+        let mut ctx = Ctx { prog, locals: &locals, requests: None, diags: Some(d), gassigns: vec![] };
         ctx.block(&f.body, &mut sink, &mut ret2);
     }
-    (locals, ret, falls)
+    (locals, ret, falls, gassigns)
 }
 
 struct Ctx<'a, 'p> {
@@ -371,6 +387,8 @@ struct Ctx<'a, 'p> {
     locals: &'a BTreeMap<String, Slot>,
     requests: Option<&'a mut Requests>,
     diags: Option<&'a mut Vec<Diagnostic>>,
+    /// Assignments to global cells seen in this pass.
+    gassigns: Vec<(GlobalKey, Ty)>,
 }
 
 impl Ctx<'_, '_> {
@@ -491,6 +509,11 @@ impl Ctx<'_, '_> {
                 // raises still falls through when its own end is reachable.
                 return self.block(finalbody, assigns, ret) && falls;
             }
+            StmtKind::AssignGlobal { unit, name, value } => {
+                if let Some(t) = self.expr(value) {
+                    self.gassigns.push(((*unit, name.clone()), t));
+                }
+            }
             StmtKind::Raise(e) => {
                 if let Some(e) = e {
                     if let Some(t) = self.expr(e) {
@@ -557,6 +580,7 @@ impl Ctx<'_, '_> {
             ExprKind::Bool(_) => Some(Ty::Bool),
             ExprKind::NoneLit => Some(Ty::None),
             ExprKind::Local(n) => self.locals.get(n).and_then(|s| s.known()),
+            ExprKind::Global { unit, name } => self.prog.globals.get(&(*unit, name.clone())).and_then(|s| s.known()),
             ExprKind::BinOp { op, left, right } => {
                 let l = self.expr(left);
                 let r = self.expr(right);

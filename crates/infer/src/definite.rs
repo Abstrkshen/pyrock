@@ -81,6 +81,7 @@ fn stmt(s: &Stmt, mut cur: Set, out: &mut HashSet<String>) -> Option<Set> {
             }
             return None;
         }
+        StmtKind::AssignGlobal { value, .. } => expr(value, &cur, out),
         StmtKind::With { ctx, var, body } => {
             expr(ctx, &cur, out);
             let mut inner = cur.clone();

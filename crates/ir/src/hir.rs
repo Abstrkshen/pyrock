@@ -22,6 +22,8 @@ pub struct Module {
     pub root_dir: String,
     /// How each import was resolved, for the explain report.
     pub imports: Vec<ImportRecord>,
+    /// Module-level variables stored in global cells: (unit, name).
+    pub globals: Vec<(usize, String)>,
 }
 
 impl Module {
@@ -206,6 +208,9 @@ pub enum StmtKind {
     Raise(Option<Expr>),
     /// `with a as x, b as y: body` (one item per statement after lowering).
     With { ctx: Expr, var: Option<String>, body: Vec<Stmt> },
+    /// Assignment to a module-level variable kept in a global cell
+    /// (module body, `global x` in a function, or `mod.x = v`).
+    AssignGlobal { unit: usize, name: String, value: Expr },
     Break,
     Continue,
     Pass,
@@ -251,6 +256,8 @@ pub enum ExprKind {
     Bool(bool),
     NoneLit,
     Local(String),
+    /// Read of a module-level variable kept in a global cell (NameError while unbound).
+    Global { unit: usize, name: String },
     /// `args` are in parameter order (keyword arguments and defaults already
     /// placed). `order`, when not empty, lists argument indices in Python's
     /// evaluation (source) order; defaults are not listed (they are literals).

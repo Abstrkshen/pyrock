@@ -64,6 +64,16 @@ pub fn emit(prog: &Program, plan: &Plan, file_name: &str, py_paths: &[String]) -
             writeln!(out, "static SLOT_{i}_{}: rt::py::Slot = rt::py::Slot::new({:?});", ident(&s.binding), s.binding).unwrap();
         }
     }
+    // Module-level variables read by functions (or other modules).
+    let mut first = true;
+    for (u, name) in &m.globals {
+        let Some(t) = prog.globals.get(&(*u, name.clone())).and_then(|s| s.known()) else { continue };
+        if first {
+            out.push('\n');
+            first = false;
+        }
+        writeln!(out, "thread_local! {{ static {}: std::cell::RefCell<Option<{}>> = const {{ std::cell::RefCell::new(None) }}; }}", gname(*u, name), t.rust()).unwrap();
+    }
     for s in &prog.specs {
         let f = &m.funcs[s.key.func];
         if f.is_module && f.unit != 0 {
@@ -122,6 +132,11 @@ fn rid(name: &str) -> String {
         n if RAW.contains(&n) => format!("r#{n}"),
         n => n.to_string(),
     }
+}
+
+/// Rust name of a global cell.
+fn gname(unit: usize, name: &str) -> String {
+    format!("G{unit}_{}", ident(name))
 }
 
 fn ident(s: &str) -> String {
@@ -607,6 +622,11 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     writeln!(out, "{ind}{}()?;", sp.mangled).unwrap();
                 }
             }
+            StmtKind::AssignGlobal { unit, name, value } => {
+                let (code, t) = self.expr(value);
+                let gt = self.prog.globals.get(&(*unit, name.clone())).and_then(|s| s.known()).unwrap_or(t);
+                writeln!(out, "{ind}rt::gset(&{}, {});", gname(*unit, name), coerce(code, t, gt)).unwrap();
+            }
             StmtKind::Break => writeln!(out, "{ind}{}", self.jump("break", "Break")).unwrap(),
             StmtKind::Continue => writeln!(out, "{ind}{}", self.jump("continue", "Continue")).unwrap(),
             StmtKind::Pass => {}
@@ -754,6 +774,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             }
             ExprKind::Float(v) => float_lit(*v),
             ExprKind::Str(s) => format!("rt::Str::from({s:?})"),
+            ExprKind::Global { unit, name } => format!("rt::gget(&{}, {name:?})?", gname(*unit, name)),
             ExprKind::Bool(b) => b.to_string(),
             ExprKind::NoneLit => "()".into(),
             ExprKind::Local(n) => {

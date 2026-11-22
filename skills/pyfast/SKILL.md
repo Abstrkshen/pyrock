@@ -84,8 +84,8 @@ the rewrites that make code compile.
 
 ## Writing Python for pyfast: key rules
 
-* Put all logic in top-level functions. Module-level variables can't be read inside functions,
-  so pass them as arguments.
+* Put logic in top-level functions. Module-level variables can be read (and, with `global`,
+  assigned) inside functions; they are typed global cells.
 * Keep each variable to one type. `x = 0` then `x = "a"` boxes it (hybrid) or is P304
   (native-only).
 * Return one type on every path. Returning `None` on one path boxes the result (P305/P215).

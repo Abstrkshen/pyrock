@@ -1,2 +1,1 @@
-tests/diagnostics/rebinding.py:6:20  P140  error: read of module-level variable `LIMIT` inside a function
-    module globals may be rebound at runtime; pass the value as a parameter instead
+tests/diagnostics/rebinding.py:4:1  P141  error: module-level name `f` rebinds a function or import; global rebinding is not compiled natively

@@ -1,8 +1,9 @@
 LIMIT = 10
 
-def f(n):
-    total = 0
-    total = total + 0.5
-    return total + LIMIT
 
-print(f(1))
+def f(n):
+    return n + LIMIT
+
+
+f = 3
+print(f)

@@ -354,6 +354,7 @@ fn stmt_exprs(s: &Stmt) -> Vec<&Expr> {
         StmtKind::SetItem { obj, index, value } => vec![obj, index, value],
         StmtKind::SetAttr { obj, value, .. } => vec![obj, value],
         StmtKind::Raise(Some(e)) => vec![e],
+        StmtKind::AssignGlobal { value, .. } => vec![value],
         StmtKind::With { ctx, .. } => vec![ctx],
         StmtKind::Try { handlers, .. } => handlers
             .iter()
