@@ -73,6 +73,9 @@ pub enum Comp {
     Coro(Ty),
     /// A generator yielding `T` (`rt::gen::Gen<T>`).
     Gen(Ty),
+    /// `int | float`: a number that is an int on some paths and a float on
+    /// others (`rt::Num`).
+    Num,
     /// A dict used like a struct: string keys, each with its own value type.
     /// The literal's keys come first (always present, in order); keys
     /// assigned later are optional (present or not, in per-instance insertion
@@ -166,6 +169,7 @@ impl Ty {
             Comp::ExtStruct(_, _, name) => (name.to_string(), name.to_string(), name.to_string()),
             Comp::Coro(t) => (format!("Coroutine[{}]", t.py_name()), format!("rt::aio::Coro<{}>", t.rust()), format!("coro_{}", t.mangle())),
             Comp::Gen(t) => (format!("Generator[{}]", t.py_name()), format!("rt::gen::Gen<{}>", t.rust()), format!("gen_{}", t.mangle())),
+            Comp::Num => ("int | float".to_string(), "rt::Num".to_string(), "num".to_string()),
             Comp::Record(fs) => {
                 let mangle = format!("rec_{}", fs.iter().map(|f| format!("{}{}_{}", f.key.len(), if f.optional { "o" } else { "" }, f.ty.mangle())).collect::<Vec<_>>().join("_"));
                 // Keys can be any text: the Rust name is a hash of keys and types.
@@ -263,6 +267,19 @@ impl Ty {
     pub fn all_records() -> Vec<Ty> {
         let i = interner().lock().unwrap();
         i.entries.iter().enumerate().filter(|(_, e)| matches!(e.comp, Comp::Record(_))).map(|(k, _)| Ty::C(TyId(k as u32))).collect()
+    }
+
+    pub fn num() -> Ty {
+        Ty::comp(Comp::Num)
+    }
+
+    pub fn is_num(self) -> bool {
+        matches!(self.as_comp(), Some(Comp::Num))
+    }
+
+    /// int, float, bool or `int | float`.
+    pub fn is_number(self) -> bool {
+        self.is_numeric() || self.is_num()
     }
 
     pub fn gen(t: Ty) -> Ty {

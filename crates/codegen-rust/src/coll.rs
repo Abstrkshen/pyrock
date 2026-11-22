@@ -11,6 +11,9 @@ pub(crate) fn convert(code: &str, from: Ty, to: Ty) -> String {
     if from == to {
         return code.to_string();
     }
+    if to.is_num() && from.is_numeric() {
+        return crate::to_num(code, from);
+    }
     if from.is_never() {
         return format!("{{ let __n: rt::Never = {code}; match __n {{}} }}");
     }
@@ -113,6 +116,7 @@ pub(crate) fn to_arg(code: &str, t: Ty) -> String {
         Ty::Bool => format!("rt::fmt::Arg::Bool({code})"),
         Ty::Str => format!("rt::fmt::Arg::Str({code})"),
         Ty::Obj => format!("rt::fmt::Arg::Py({code})"),
+        t if t.is_num() => format!("rt::fmt::Arg::from({code})"),
         Ty::None => format!("{{ {code}; rt::fmt::other(&(), \"NoneType\") }}"),
         t => match t.as_opt() {
             Some(inner) => format!("match {code} {{ Some(__x) => {}, None => rt::fmt::other(&(), \"NoneType\") }}", to_arg("__x", inner)),
@@ -641,6 +645,10 @@ impl FnEmitter<'_, '_> {
                 let e = native::iter_elem(vals[0].1).unwrap_or(Ty::Int);
                 let e = if e.is_never() { Ty::Int } else { e };
                 let elems = |v: &(String, Ty)| iter_vec_as(&v.0, v.1, e);
+                if t.is_num() {
+                    let start = vals.get(1).map(|v| crate::to_num(&v.0, v.1)).unwrap_or_else(|| "rt::Num::I(0)".into());
+                    return format!("{{ let mut __a = {start}; for __x in {} {{ __a = rt::num::add(__a, {})?; }} __a }}", iter_vec(&vals[0].0, vals[0].1), crate::to_num("__x", e));
+                }
                 if t == Ty::Int {
                     let start = vals.get(1).map(|v| crate::as_int(&v.0, v.1)).unwrap_or_else(|| "0".into());
                     let items = if e == Ty::Bool { format!("{}.into_iter().map(|b| b as i64).collect()", elems(&vals[0])) } else { elems(&vals[0]) };
@@ -759,6 +767,8 @@ impl FnEmitter<'_, '_> {
                 let (a, at) = &vals[0];
                 match (at, t) {
                     (Ty::Int | Ty::Bool, _) => crate::as_int(a, *at),
+                    (n, Ty::Int) if n.is_num() => format!("rt::num::round({a})?"),
+                    (n, _) if n.is_num() => format!("rt::num::round_to({a}, {})?", crate::as_int(&vals[1].0, vals[1].1)),
                     (_, Ty::Int) => format!("rt::conv::round_int({a})?"),
                     _ => format!("rt::conv::round_to({a}, {})", crate::as_int(&vals[1].0, vals[1].1)),
                 }

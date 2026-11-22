@@ -2022,7 +2022,8 @@ impl Ctx<'_, '_> {
                     self.escape(right);
                     return Some(Ty::Obj);
                 }
-                if l.as_comp().is_some_and(|c| !matches!(c, Comp::Opt(_))) || r.as_comp().is_some_and(|c| !matches!(c, Comp::Opt(_))) {
+                let coll = |t: Ty| t.as_comp().is_some_and(|c| !matches!(c, Comp::Opt(_) | Comp::Num));
+                if coll(l) || coll(r) {
                     let t = native::coll_binop(*op, ops::base(l), ops::base(r), self.boxing());
                     if t.is_none() {
                         self.report(

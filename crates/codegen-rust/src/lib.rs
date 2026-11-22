@@ -218,6 +218,17 @@ fn as_int(code: &str, t: Ty) -> String {
     match t {
         Ty::Bool => format!("({code} as i64)"),
         Ty::Obj => format!("rt::py::to_i64(&{})?", borrow(code)),
+        t if t.is_num() => format!("{code}.to_index()?"),
+        _ => code.to_string(),
+    }
+}
+
+/// A number as an `int | float` value.
+pub(crate) fn to_num(code: &str, t: Ty) -> String {
+    match t {
+        Ty::Int => format!("rt::Num::I({code})"),
+        Ty::Bool => format!("rt::Num::I({code} as i64)"),
+        Ty::Float => format!("rt::Num::F({code})"),
         _ => code.to_string(),
     }
 }
@@ -225,6 +236,7 @@ fn as_int(code: &str, t: Ty) -> String {
 /// Coerce a numeric value to f64 (int/bool -> float, correctly rounded).
 fn as_float(code: &str, t: Ty) -> String {
     match t {
+        t if t.is_num() => format!("{code}.to_f64()"),
         Ty::Bool => format!("({code} as i64 as f64)"),
         Ty::Int => format!("({code} as f64)"),
         Ty::Obj => format!("rt::py::to_f64(&{})?", borrow(code)),
@@ -272,6 +284,9 @@ fn coerce(code: String, from: Ty, to: Ty) -> String {
 fn coerce_basic(code: String, from: Ty, to: Ty) -> String {
     if from == to {
         return code;
+    }
+    if to.is_num() && from.is_numeric() {
+        return to_num(&code, from);
     }
     if to.as_opt().is_some() {
         return match from {
@@ -1126,7 +1141,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 let (r, rt) = if t == Ty::Obj { (r, rt) } else { unopt(r, rt, &msg_r) };
                 if t == Ty::Obj {
                     format!("rt::py::binop({:?}, {}, {})?", py_op(*op), boxed(&l, lt), boxed(&r, rt))
-                } else if t.as_comp().is_some_and(|c| !matches!(c, Comp::Opt(_))) {
+                } else if t.as_comp().is_some_and(|c| !matches!(c, Comp::Opt(_) | Comp::Num)) {
                     self.coll_binop(*op, &l, lt, &r, rt, t)
                 } else {
                     self.binop(*op, &l, lt, &r, rt, t)
@@ -1146,6 +1161,8 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     (UnaryOp::Pos, Ty::Obj) => format!("rt::py::unary(\"pos\", {c})?"),
                     (UnaryOp::Invert, Ty::Obj) => format!("rt::py::unary(\"invert\", {c})?"),
                     (UnaryOp::Neg, Ty::Int) => format!("rt::int::neg({c})?"),
+                    (UnaryOp::Neg, t) if t.is_num() => format!("rt::num::neg({c})?"),
+                    (UnaryOp::Pos, t) if t.is_num() => c.clone(),
                     (UnaryOp::Neg, Ty::Bool) => format!("(-({c} as i64))"),
                     (UnaryOp::Neg, _) => format!("(-{c})"),
                     (UnaryOp::Pos, _) => as_int(&c, ot),
@@ -1438,6 +1455,10 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             };
             return format!("rt::fmt::percent(&{}, &[{args}])?", borrow(l));
         }
+        // `int | float` operands: dispatch at run time.
+        if lt.is_num() || rt.is_num() {
+            return format!("rt::num::{}({}, {})?", op.rt_fn(), to_num(l, lt), to_num(r, rt));
+        }
         match t {
             Ty::Str => match (lt, rt) {
                 (Ty::Str, Ty::Str) => format!("rt::string::concat(&{}, &{})", borrow(l), borrow(r)),
@@ -1469,6 +1490,9 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
 
     /// One comparison, including native collections.
     fn compare_any(&mut self, op: CmpOp, l: &str, lt: Ty, r: &str, rt: Ty) -> String {
+        if (lt.is_num() || rt.is_num()) && lt.as_opt().unwrap_or(lt).is_number() && rt.as_opt().unwrap_or(rt).is_number() {
+            return compare(op, l, lt, r, rt);
+        }
         if pyfast_infer::spec::class_like(lt) || pyfast_infer::spec::class_like(rt) {
             return self.compare_class(op, l, lt, r, rt);
         }
@@ -1614,6 +1638,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 match at {
                     Ty::Int => format!("rt::int::abs({c})?"),
                     Ty::Bool => format!("({c} as i64)"),
+                    t if t.is_num() => format!("rt::num::abs({c})?"),
                     Ty::Obj => format!("rt::py::unary(\"abs\", {c})?"),
                     _ => format!("{c}.abs()"),
                 }
@@ -1624,6 +1649,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     Ty::Int => c.clone(),
                     Ty::Bool => format!("({c} as i64)"),
                     Ty::Float => format!("rt::conv::int_from_float({c})?"),
+                    t if t.is_num() => format!("{c}.to_int()?"),
                     Ty::Obj => format!("rt::py::int_of(&{})?", borrow(c)),
                     _ => format!("rt::conv::int_from_str(&{})?", borrow(c)),
                 },
@@ -1652,10 +1678,18 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 // Python keeps the first extreme element: replace only on strict improvement.
                 let cmp = if b == Builtin::Min { "<" } else { ">" };
                 let m = self.fresh();
-                let mut code = format!("{{ let mut {m} = {}; ", vals[0].0);
-                for (c, _) in &vals[1..] {
+                // Mixed ints and floats: `int | float`, compared exactly.
+                let num = t.is_num();
+                let first = if num { to_num(&vals[0].0, vals[0].1) } else { vals[0].0.clone() };
+                let mut code = format!("{{ let mut {m} = {first}; ");
+                for (c, ct) in &vals[1..] {
                     let v = self.fresh();
-                    write!(code, "let {v} = {c}; if {v} {cmp} {m} {{ {m} = {v}; }} ").unwrap();
+                    if num {
+                        let f = if b == Builtin::Min { "lt" } else { "gt" };
+                        write!(code, "let {v} = {}; if rt::num::{f}({v}, {m}) {{ {m} = {v}; }} ", to_num(c, *ct)).unwrap();
+                    } else {
+                        write!(code, "let {v} = {c}; if {v} {cmp} {m} {{ {m} = {v}; }} ").unwrap();
+                    }
                 }
                 write!(code, "{m} }}").unwrap();
                 code
@@ -1716,6 +1750,9 @@ fn cmp_sym(op: CmpOp) -> &'static str {
 fn compare(op: CmpOp, l: &str, lt: Ty, r: &str, rt: Ty) -> String {
     let int_like = |t: Ty| matches!(t, Ty::Int | Ty::Bool);
     let any_obj = lt == Ty::Obj || rt == Ty::Obj;
+    if (lt.is_num() || rt.is_num()) && lt.is_number() && rt.is_number() && !matches!(op, CmpOp::In | CmpOp::NotIn | CmpOp::Is | CmpOp::IsNot) {
+        return format!("rt::num::{}({}, {})", op.rt_fn(), to_num(l, lt), to_num(r, rt));
+    }
     if !any_obj && (lt.as_opt().is_some() || rt.as_opt().is_some()) {
         return compare_opt(op, l, lt, r, rt);
     }

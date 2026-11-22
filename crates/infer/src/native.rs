@@ -22,6 +22,11 @@ pub fn ty_join(a: Ty, b: Ty, boxing: bool) -> Option<Ty> {
     if b.is_never() {
         return Some(a);
     }
+    // An int on some paths and a float on others: `int | float`.
+    let intfloat = |t: Ty| matches!(t, Ty::Int | Ty::Float) || t.is_num();
+    if intfloat(a) && intfloat(b) {
+        return Some(Ty::num());
+    }
     match (a, b) {
         (Ty::None, x) | (x, Ty::None) => return Some(Ty::opt(x)),
         _ => {}
@@ -142,6 +147,7 @@ pub fn record_field_ok(t: Ty) -> bool {
     match t {
         Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::None | Ty::Obj => true,
         Ty::C(_) => match t.as_comp() {
+            Some(Comp::Num) => true,
             Some(Comp::List(e) | Comp::Set(e) | Comp::TupleVar(e) | Comp::Opt(e)) => e.is_never() || record_field_ok(e),
             Some(Comp::Dict(k, v)) => (k.is_never() || record_field_ok(k)) && (v.is_never() || record_field_ok(v)),
             Some(Comp::Tuple(ts)) => ts.iter().all(|x| record_field_ok(*x)),
@@ -580,6 +586,7 @@ pub fn builtin(name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing: bool) -
         match (e, s) {
             (Ty::Int | Ty::Bool, Ty::Int | Ty::Bool) => Some(Ok(Ty::Int)),
             (Ty::Float | Ty::Int | Ty::Bool, Ty::Float | Ty::Int | Ty::Bool) => Some(Ok(Ty::Float)),
+            _ if e.is_number() && s.is_number() => Some(Ok(Ty::num())),
             _ => None,
         }
     };
@@ -683,6 +690,9 @@ pub fn builtin(name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing: bool) -
                 (Ty::Float, 2) if args[1] == Ty::None => Some(Ok(Ty::Int)),
                 (Ty::Float, 2) => Some(Ok(Ty::Float)),
                 (Ty::Int | Ty::Bool, _) => Some(Ok(Ty::Int)),
+                (t, 1) if t.is_num() => Some(Ok(Ty::Int)),
+                (t, 2) if t.is_num() && args[1] == Ty::None => Some(Ok(Ty::Int)),
+                (t, 2) if t.is_num() && int_like(base(args[1])) => Some(Ok(Ty::num())),
                 _ => None,
             }
         }
@@ -777,7 +787,7 @@ pub const READ_ONLY_CALLS: &[&str] = &[
 /// A native `math` function for these argument types (`None`: not native,
 /// e.g. a Python object argument or a function pyfast does not implement).
 pub fn math_call(name: &str, args: &[Ty], kwargs: &[(String, Ty)]) -> Option<Result<Ty, String>> {
-    let num = |t: Ty| matches!(t, Ty::Int | Ty::Float | Ty::Bool);
+    let num = |t: Ty| t.is_number();
     let int = |t: Ty| matches!(t, Ty::Int | Ty::Bool);
     if !args.iter().all(|t| num(*t)) || !kwargs.iter().all(|(_, t)| num(*t)) {
         return None;

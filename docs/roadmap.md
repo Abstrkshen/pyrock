@@ -83,7 +83,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] Native functions and objects callable from CPython threads
 - [x] Per-key types for dicts with fixed string keys (record dicts → structs)
 - [x] Native `math` module
-- [ ] A native `int | float` value (a variable that holds both now boxes)
+- [x] A native `int | float` value (a variable that holds both now boxes)
 
 ## Throughout
 
@@ -565,3 +565,15 @@ Each bridged operation cost ~400 ns.
   one path and a `float` on another (boxed; a native `int | float` is the next item).
 * Tests: `tests/differential/math_native.py`, more cases in
   `tests/differential/record_dicts.py`.
+
+### Phase 7.4: `int | float` (2026-11-22)
+
+* A value that is an int on some paths and a float on others (`x = plat["x"]` then
+  `x = x + math.sin(t)`) is `rt::Num` (`I(i64) | F(f64)`, type `int | float`) instead of a
+  CPython object. Arithmetic, comparisons, `abs`/`int`/`float`/`round`/`min`/`max`/`sum`,
+  `math` functions, formatting and printing dispatch on the variant with exactly the int
+  or float semantics (`760` stays `760`; `7.0 // 2` is `3.0`; mixed comparisons are exact),
+  so it also works with `--mode native-only`.
+* `raylib-breakout`: CPython operators 103 → 33, 55 native functions (the rest is mostly
+  ctypes code in `svgload.py` and the raylib API).
+* Test: `tests/differential/int_or_float.py`.

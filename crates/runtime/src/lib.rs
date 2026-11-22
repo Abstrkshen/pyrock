@@ -18,6 +18,7 @@ pub mod gen;
 pub mod fmt;
 pub mod int;
 pub mod math;
+pub mod num;
 pub mod io;
 #[cfg(feature = "python")]
 pub mod py;
@@ -25,6 +26,7 @@ pub mod stackful;
 pub mod string;
 
 pub use coll::{Dict, List, Never, Set, Tup, Tuple0};
+pub use num::Num;
 pub use exc::{Exc, Flow, PyResult};
 pub use io::{print, run_main};
 

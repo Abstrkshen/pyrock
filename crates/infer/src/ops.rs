@@ -28,6 +28,14 @@ pub fn binop(op: BinOp, l: Ty, r: Ty, rhs_literal: Option<i64>) -> Option<Ty> {
     if l == Ty::Obj || r == Ty::Obj {
         return Some(Ty::Obj); // CPython operator protocol
     }
+    // `int | float` operands: the result's kind is only known at run time.
+    if (l.is_num() || r.is_num()) && l.is_number() && r.is_number() {
+        return match op {
+            Add | Sub | Mul | FloorDiv | Mod | Pow => Some(Ty::num()),
+            Div => Some(Ty::Float),
+            _ => None,
+        };
+    }
     match op {
         // No native type supports `@` (TypeError, as in CPython).
         MatMul => None,
@@ -82,6 +90,7 @@ pub fn unary(op: UnaryOp, t: Ty) -> Option<Ty> {
         UnaryOp::Neg | UnaryOp::Pos => match t {
             Ty::Bool | Ty::Int => Some(Ty::Int),
             Ty::Float => Some(Ty::Float),
+            t if t.is_num() => Some(t),
             _ => None,
         },
         UnaryOp::Invert => intlike(t).then_some(Ty::Int),
@@ -91,6 +100,9 @@ pub fn unary(op: UnaryOp, t: Ty) -> Option<Ty> {
 pub fn compare(op: CmpOp, l: Ty, r: Ty) -> bool {
     if l == Ty::Obj || r == Ty::Obj {
         return true;
+    }
+    if (base(l).is_num() || base(r).is_num()) && base(l).is_number() && base(r).is_number() {
+        return !matches!(op, CmpOp::In | CmpOp::NotIn);
     }
     let optional = |t: Ty| t == Ty::None || t.as_opt().is_some();
     if l.as_comp().is_some_and(|c| !matches!(c, pyfast_ir::Comp::Opt(_))) || r.as_comp().is_some_and(|c| !matches!(c, pyfast_ir::Comp::Opt(_))) {
@@ -188,6 +200,8 @@ pub fn builtin(b: Builtin, args: &[Ty], boxing: bool) -> Result<Ty, String> {
             }
             if args.iter().all(|&t| t == args[0]) && (args[0].is_numeric() || args[0] == Ty::Str) {
                 Ok(args[0])
+            } else if args.iter().all(|t| matches!(t, Ty::Int | Ty::Float) || t.is_num()) {
+                Ok(Ty::num()) // max(3, 2.5) is the int 3, max(2, 2.5) the float 2.5
             } else if any_obj || boxing {
                 Ok(Ty::Obj) // CPython's own min/max over boxed values
             } else {
