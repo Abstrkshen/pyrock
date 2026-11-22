@@ -66,8 +66,9 @@ count: int = json.loads("41")        # native i64 from here on
   `x: float, k: float` returns the int `6`. A mismatch, such as passing a `str` to `a: int`,
   is warning P307, not an error, because CPython doesn't enforce annotations either.
 * `int`, `float`, `str`, `bool`, `None`, `object`/`Any` and string forward references are
-  understood. Other annotations (`list[int]`, `Optional[int]`, classes) are accepted and don't
-  constrain anything yet.
+  understood. On variables, container annotations (`parts: list[str] = []`,
+  `REGISTRY: dict[str, Agent] = {}`, `best: Optional[str] = None`) give a still-empty
+  container its element types. Other annotations are accepted and don't constrain anything.
 * `typing`, `typing_extensions` and `__future__` imports used only in annotations are dropped,
   so they never touch CPython.
 

@@ -1132,6 +1132,51 @@ impl<'l> Lowerer<'l> {
         out
     }
 
+    /// A container (or optional) annotation on a variable: `list[str]`,
+    /// `dict[str, Agent]`, `set[int]`, `tuple[int, ...]`, `Optional[T]` /
+    /// `T | None`, with scalar, class or container arguments.
+    fn container_ann(&self, v: &Value) -> Option<Ty> {
+        let elem = |me: &Self, v: &Value| -> Option<Ty> {
+            if let Some(t) = parse_ann(v) {
+                return Some(t);
+            }
+            if ty(v) == "Name" {
+                if let Some(&(cid, _)) = me.class_ids.get(sstr(v, "id")) {
+                    return Some(Ty::class(cid, &me.ld.classes[cid as usize].rust));
+                }
+            }
+            me.container_ann(v)
+        };
+        match ty(v) {
+            "Subscript" => {
+                let base = match ty(&v["value"]) {
+                    "Name" => sstr(&v["value"], "id"),
+                    "Attribute" => sstr(&v["value"], "attr"),
+                    _ => return None,
+                };
+                let args: Vec<&Value> = if ty(&v["slice"]) == "Tuple" { arr(&v["slice"], "elts").iter().collect() } else { vec![&v["slice"]] };
+                match (base, args.as_slice()) {
+                    ("list" | "List", [a]) => Some(Ty::list(elem(self, a)?)),
+                    ("set" | "Set", [a]) => Some(Ty::set(elem(self, a)?)),
+                    ("dict" | "Dict", [k, val]) => Some(Ty::dict(elem(self, k)?, elem(self, val)?)),
+                    ("tuple" | "Tuple", [a, e]) if ty(e) == "Constant" && e["value"]["type"] == "ellipsis" => Some(Ty::tuple_var(elem(self, a)?)),
+                    ("Optional", [a]) => Some(Ty::opt(elem(self, a)?)),
+                    _ => None,
+                }
+            }
+            "BinOp" if ty(&v["op"]) == "BitOr" => {
+                let (l, r) = (&v["left"], &v["right"]);
+                let is_none = |x: &Value| ty(x) == "Constant" && x["value"]["kind"] == "none";
+                match (is_none(l), is_none(r)) {
+                    (false, true) => Some(Ty::opt(elem(self, l)?)),
+                    (true, false) => Some(Ty::opt(elem(self, r)?)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn extern_missing(&mut self, e: usize, attr: &str, sp: Span) {
         let m = &self.ld.externs[e];
         let why = m.skipped.iter().find(|(n, _)| n == attr).map(|(_, w)| w.clone());
@@ -1233,7 +1278,16 @@ impl<'l> Lowerer<'l> {
                 if st["value"].is_null() {
                     return None; // bare annotation: no runtime effect
                 }
-                let value = annotated(parse_ann(&st["annotation"]), self.lower_expr(&st["value"])?);
+                let value = self.lower_expr(&st["value"])?;
+                // `parts: list[str] = []`: a container annotation gives the
+                // (still empty) value its element types.
+                let value = match self.container_ann(&st["annotation"]) {
+                    Some(ty) if parse_ann(&st["annotation"]).is_none() => {
+                        let span = value.span;
+                        Expr { kind: ExprKind::Annotated { ty, value: Box::new(value) }, span }
+                    }
+                    _ => annotated(parse_ann(&st["annotation"]), value),
+                };
                 match self.name_target(&st["target"]) {
                     Some(target) => self.bind_target(target, value),
                     None => return self.lower_store(&st["target"], value, sp),

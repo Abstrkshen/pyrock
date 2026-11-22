@@ -90,6 +90,10 @@ pub struct Spec {
     pub gen_falls: bool,
     /// The specializations its latest analysis calls (resolved keys).
     pub calls: Vec<SpecKey>,
+    /// Reads of `T | None` locals (by span) where every path has excluded
+    /// `None` (`if x is None: continue`, `if x is not None: ...`): typed `T`
+    /// and unwrapped by codegen.
+    pub narrowed: BTreeSet<Span>,
 }
 
 /// A module-level variable kept in a global cell: (unit, name).
@@ -287,11 +291,21 @@ pub fn static_truth(locals: &BTreeMap<String, Slot>, e: &Expr) -> Option<bool> {
                 Some(if rest[0].0 == CmpOp::Is { is } else { !is })
             }
             ExprKind::Unary { op: UnaryOp::Not, operand } => static_truth(locals, operand).map(|v| !v),
+            // `if x:` on a local that is exactly `None` in this specialization.
+            ExprKind::Local(n) if locals.get(n).and_then(|s| s.known()) == Some(Ty::None) => Some(false),
             ExprKind::BoolOp { op, values } => {
-                // Decided only if every operand is decided (no side effects to skip).
-                let vs: Option<Vec<bool>> = values.iter().map(|v| static_truth(locals, v)).collect();
-                let vs = vs?;
-                Some(if *op == BoolOpKind::And { vs.iter().all(|v| *v) } else { vs.iter().any(|v| *v) })
+                // Decided when the operands before the deciding one are all
+                // decided (they are side-effect-free tests): `x is not None and
+                // f(x)` is false when `x` is always None, without calling `f`.
+                let and = *op == BoolOpKind::And;
+                for v in values {
+                    match static_truth(locals, v)? {
+                        false if and => return Some(false),
+                        true if !and => return Some(true),
+                        _ => {}
+                    }
+                }
+                Some(and)
             }
             _ => None,
         }
@@ -349,8 +363,12 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
         let mut i = 0;
         while i < prog.specs.len() {
             let mut requests = Vec::new();
-            let (locals, ret, falls, gassigns, ret_widen, Extra { fassigns, news, gen_ret, send_widen, gen_falls }) = analyze(&prog, i, &mut requests, None);
+            let (locals, ret, falls, gassigns, ret_widen, Extra { fassigns, news, gen_ret, send_widen, gen_falls, narrowed }) = analyze(&prog, i, &mut requests, None);
             prog.specs[i].gen_falls = gen_falls;
+            if prog.specs[i].narrowed != narrowed {
+                prog.specs[i].narrowed = narrowed;
+                changed = true;
+            }
             let calls: Vec<SpecKey> = requests.iter().map(|(k, _)| prog.resolve_key(k.clone())).collect();
             if prog.specs[i].calls != calls {
                 prog.specs[i].calls = calls;
@@ -603,7 +621,7 @@ fn add_spec(prog: &mut Program, key: SpecKey) {
     let maybe_unbound = definite::maybe_unbound(f);
     let id = prog.specs.len();
     prog.index.insert(key.clone(), id);
-    prog.specs.push(Spec { id, key, mangled, ret: Slot::Unknown, falls_through: true, analyzed: false, locals, maybe_unbound, ret_floor: Slot::Unknown, gen_send: Slot::Unknown, gen_ret: Slot::Unknown, gen_falls: true, calls: vec![] });
+    prog.specs.push(Spec { id, key, mangled, ret: Slot::Unknown, falls_through: true, analyzed: false, locals, maybe_unbound, ret_floor: Slot::Unknown, gen_send: Slot::Unknown, gen_ret: Slot::Unknown, gen_falls: true, calls: vec![], narrowed: BTreeSet::new() });
 }
 
 type Requests = Vec<(SpecKey, Span)>;
@@ -635,11 +653,12 @@ fn analyze(
     let mut gen_ret;
     let mut send_widen;
     let mut gen_falls = true;
+    let mut narrowed;
     loop {
         let before = locals.clone();
         ret = spec.ret_floor;
         gen_ret = Slot::Unknown;
-        let mut ctx = Ctx { prog, locals: &locals, requests: Some(requests), diags: None, gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![], generator: f.is_generator, yields: vec![], cur_send, gen_returns: vec![], send_widen: vec![] };
+        let mut ctx = Ctx { prog, locals: &locals, requests: Some(requests), diags: None, gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![], generator: f.is_generator, yields: vec![], cur_send, gen_returns: vec![], send_widen: vec![], nn: Some(BTreeSet::new()), nn_reads: vec![], narrowed: None };
         let mut assigns = Vec::new();
         falls = ctx.block(&f.body, &mut assigns, &mut ret);
         // A generator's "return type" is what it yields; what it returns is
@@ -658,6 +677,7 @@ fn analyze(
             falls = true;
         }
         send_widen = std::mem::take(&mut ctx.send_widen);
+        narrowed = narrowed_reads(std::mem::take(&mut ctx.nn_reads));
         gassigns = std::mem::take(&mut ctx.gassigns);
         ret_widen = std::mem::take(&mut ctx.ret_widen);
         fassigns = std::mem::take(&mut ctx.fassigns);
@@ -677,10 +697,88 @@ fn analyze(
     if let Some(d) = diags {
         let mut ret2 = Slot::Unknown;
         let mut sink = Vec::new();
-        let mut ctx = Ctx { prog, locals: &locals, requests: None, diags: Some(d), gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![], generator: f.is_generator, yields: vec![], cur_send, gen_returns: vec![], send_widen: vec![] };
+        let mut ctx = Ctx { prog, locals: &locals, requests: None, diags: Some(d), gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![], generator: f.is_generator, yields: vec![], cur_send, gen_returns: vec![], send_widen: vec![], nn: Some(BTreeSet::new()), nn_reads: vec![], narrowed: None };
         ctx.block(&f.body, &mut sink, &mut ret2);
     }
-    (locals, ret, falls, gassigns, ret_widen, Extra { fassigns, news: news_acc, gen_ret, send_widen, gen_falls })
+    (locals, ret, falls, gassigns, ret_widen, Extra { fassigns, news: news_acc, gen_ret, send_widen, gen_falls, narrowed })
+}
+
+/// Read sites narrowed on every visit.
+fn narrowed_reads(reads: Vec<(Span, bool)>) -> BTreeSet<Span> {
+    let no: BTreeSet<Span> = reads.iter().filter(|r| !r.1).map(|r| r.0).collect();
+    reads.into_iter().filter(|r| r.1 && !no.contains(&r.0)).map(|r| r.0).collect()
+}
+
+/// Locals a statement list may assign (loop variables, `with`/`except`
+/// targets included), at any depth: they lose their narrowing around loops
+/// and `try`.
+fn assigned_locals(stmts: &[Stmt], out: &mut BTreeSet<String>) {
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Assign { target, .. } | StmtKind::AugAssign { target, .. } => {
+                out.insert(target.clone());
+            }
+            StmtKind::If { body, orelse, .. } => {
+                assigned_locals(body, out);
+                assigned_locals(orelse, out);
+            }
+            StmtKind::While { body, .. } => assigned_locals(body, out),
+            StmtKind::ForRange { var, body, .. } | StmtKind::ForIter { var, body, .. } => {
+                out.insert(var.clone());
+                assigned_locals(body, out);
+            }
+            StmtKind::Try { body, handlers, orelse, finalbody } => {
+                assigned_locals(body, out);
+                for h in handlers {
+                    if let Some(n) = &h.name {
+                        out.insert(n.clone());
+                    }
+                    assigned_locals(&h.body, out);
+                }
+                assigned_locals(orelse, out);
+                assigned_locals(finalbody, out);
+            }
+            StmtKind::With { var, body, .. } => {
+                if let Some(v) = var {
+                    out.insert(v.clone());
+                }
+                assigned_locals(body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether control never reaches the end of `stmts` (it ends in `return`,
+/// `raise`, `break` or `continue`, or an `if` whose branches all do).
+fn block_exits(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match &s.kind {
+        StmtKind::Return(_) | StmtKind::Raise(_) | StmtKind::Break | StmtKind::Continue => true,
+        StmtKind::If { body, orelse, .. } => block_exits(body) && block_exits(orelse),
+        _ => false,
+    })
+}
+
+/// The locals a test proves not `None` when it is true, and when it is false.
+fn test_facts(e: &Expr) -> (Vec<String>, Vec<String>) {
+    match &e.kind {
+        ExprKind::Compare { first, rest } if rest.len() == 1 && matches!(rest[0].0, CmpOp::Is | CmpOp::IsNot) => {
+            let var = match (&first.kind, &rest[0].1.kind) {
+                (ExprKind::Local(n), ExprKind::NoneLit) | (ExprKind::NoneLit, ExprKind::Local(n)) => n.clone(),
+                _ => return (vec![], vec![]),
+            };
+            if rest[0].0 == CmpOp::Is { (vec![], vec![var]) } else { (vec![var], vec![]) }
+        }
+        // `if x:` (None is falsy).
+        ExprKind::Local(n) => (vec![n.clone()], vec![]),
+        ExprKind::Unary { op: UnaryOp::Not, operand } => {
+            let (t, f) = test_facts(operand);
+            (f, t)
+        }
+        ExprKind::BoolOp { op: BoolOpKind::And, values } => (values.iter().flat_map(|v| test_facts(v).0).collect(), vec![]),
+        ExprKind::BoolOp { op: BoolOpKind::Or, values } => (vec![], values.iter().flat_map(|v| test_facts(v).1).collect()),
+        _ => (vec![], vec![]),
+    }
 }
 
 /// More results of `analyze`.
@@ -690,6 +788,7 @@ struct Extra {
     gen_ret: Slot,
     send_widen: Vec<(SpecKey, Ty)>,
     gen_falls: bool,
+    narrowed: BTreeSet<Span>,
 }
 
 /// What a generator's `yield` expressions evaluate to: `None` (from `next`)
@@ -740,6 +839,13 @@ struct Ctx<'a, 'p> {
     gen_returns: Vec<Ty>,
     /// Send types callers need from generator functions (`g.send(v)`).
     send_widen: Vec<(SpecKey, Ty)>,
+    /// Flow-sensitive analysis (inference passes): the `T | None` locals
+    /// known not to be `None` at the current point.
+    nn: Option<BTreeSet<String>>,
+    /// Reads of optional locals seen in this pass, and whether each was narrowed.
+    nn_reads: Vec<(Span, bool)>,
+    /// Outside a flow pass (codegen's `type_of`): the narrowed read sites.
+    narrowed: Option<&'a BTreeSet<Span>>,
 }
 
 /// How a `CallObj` node executes.
@@ -922,6 +1028,44 @@ impl Ctx<'_, '_> {
 
     fn local_ty(&self, n: &str) -> Option<Ty> {
         self.locals.get(n).and_then(|s| s.known())
+    }
+
+    /// A read of local `n`: a `T | None` local is `T` where `None` has been
+    /// excluded on every path to this read.
+    fn local_read(&mut self, n: &str, sp: Span) -> Option<Ty> {
+        let t = self.local_ty(n)?;
+        let Some(inner) = t.as_opt() else { return Some(t) };
+        let narrowed = match &self.nn {
+            Some(set) => {
+                let y = set.contains(n);
+                self.nn_reads.push((sp, y));
+                y
+            }
+            None => self.narrowed.is_some_and(|s| s.contains(&sp)),
+        };
+        Some(if narrowed { inner } else { t })
+    }
+
+    /// After `target = <t>`: narrowed when `t` can't be `None`.
+    fn nn_assign(&mut self, target: &str, t: Option<Ty>) {
+        if let Some(set) = &mut self.nn {
+            match t {
+                Some(t) if t != Ty::None && t != Ty::Obj && t.as_opt().is_none() => set.insert(target.to_string()),
+                _ => set.remove(target),
+            };
+        }
+    }
+
+    fn nn_add(&mut self, names: &[String]) {
+        if let Some(set) = &mut self.nn {
+            set.extend(names.iter().cloned());
+        }
+    }
+
+    fn nn_kill(&mut self, names: &BTreeSet<String>) {
+        if let Some(set) = &mut self.nn {
+            set.retain(|n| !names.contains(n));
+        }
     }
 
     /// Widen the type of a place (joined with its current type).
@@ -1128,12 +1272,14 @@ impl Ctx<'_, '_> {
     fn stmt(&mut self, s: &Stmt, assigns: &mut Vec<(String, Ty)>, ret: &mut Slot) -> bool {
         match &s.kind {
             StmtKind::Assign { target, value } => {
-                if let Some(t) = self.expr(value) {
+                let vt = self.expr(value);
+                if let Some(t) = vt {
                     assigns.push((target.clone(), t));
                     if let Some(dest) = self.local_ty(target) {
                         self.flow(value, t, dest);
                     }
                 }
+                self.nn_assign(target, vt);
             }
             StmtKind::AugAssign { target, op, value } => {
                 let cur = Expr { kind: ExprKind::Local(target.clone()), span: s.span };
@@ -1141,9 +1287,11 @@ impl Ctx<'_, '_> {
                     kind: ExprKind::BinOp { op: *op, left: Box::new(cur), right: Box::new(value.clone()) },
                     span: s.span,
                 };
-                if let Some(t) = self.expr(&e) {
+                let vt = self.expr(&e);
+                if let Some(t) = vt {
                     assigns.push((target.clone(), t));
                 }
+                self.nn_assign(target, vt);
             }
             StmtKind::Expr(e) => {
                 self.expr(e);
@@ -1182,16 +1330,42 @@ impl Ctx<'_, '_> {
                     Some(false) => return self.block(orelse, assigns, ret),
                     None => {}
                 }
+                // `None` narrowing: each branch starts with what the test
+                // proves; afterwards, what holds at the end of every branch
+                // that can reach the next statement.
+                let (tf, ff) = test_facts(test);
+                let start = self.nn.clone();
+                self.nn_add(&tf);
                 let a = self.block(body, assigns, ret);
+                let end_a = std::mem::replace(&mut self.nn, start.clone());
+                self.nn_add(&ff);
                 let b = self.block(orelse, assigns, ret);
+                let end_b = self.nn.take();
+                let (exit_a, exit_b) = (!a || block_exits(body), !b || block_exits(orelse));
+                self.nn = match (exit_a, exit_b) {
+                    (true, true) => start,
+                    (true, false) => end_b,
+                    (false, true) => end_a,
+                    (false, false) => match (end_a, end_b) {
+                        (Some(x), Some(y)) => Some(x.intersection(&y).cloned().collect()),
+                        _ => None,
+                    },
+                };
                 return a || b;
             }
             StmtKind::While { test, body } => {
+                // Locals assigned in the loop may hold `None` again at the test.
+                let mut kill = BTreeSet::new();
+                assigned_locals(body, &mut kill);
+                self.nn_kill(&kill);
                 self.expr(test);
                 if static_truth(self.locals, test) == Some(false) {
                     return true;
                 }
+                let start = self.nn.clone();
+                self.nn_add(&test_facts(test).0);
                 self.block(body, assigns, ret);
+                self.nn = start;
                 // `while True:` without break never falls through.
                 if matches!(test.kind, ExprKind::Bool(true)) && !contains_break(body) {
                     return false;
@@ -1206,12 +1380,22 @@ impl Ctx<'_, '_> {
                     }
                 }
                 assigns.push((var.clone(), Ty::Int));
+                let mut kill = BTreeSet::from([var.clone()]);
+                assigned_locals(body, &mut kill);
+                self.nn_kill(&kill);
+                let start = self.nn.clone();
                 self.block(body, assigns, ret);
+                self.nn = start;
             }
             StmtKind::ForIter { var, iter, body, is_async: true } if self.expr(iter).is_some_and(|t| t.as_agen().is_some()) => {
                 let y = self.expr(iter).and_then(|t| t.as_agen()).unwrap();
                 assigns.push((var.clone(), y));
+                let mut kill = BTreeSet::from([var.clone()]);
+                assigned_locals(body, &mut kill);
+                self.nn_kill(&kill);
+                let start = self.nn.clone();
                 self.block(body, assigns, ret);
+                self.nn = start;
             }
             StmtKind::ForIter { var, iter, body, is_async: true } => {
                 // A native instance is iterated through its Python wrapper.
@@ -1221,7 +1405,12 @@ impl Ctx<'_, '_> {
                     self.report(Diagnostic::error("P301", iter.span, format!("'async for' requires an object with __aiter__ method, got {t}")).note("CPython would raise TypeError here"));
                 }
                 assigns.push((var.clone(), Ty::Obj));
+                let mut kill = BTreeSet::from([var.clone()]);
+                assigned_locals(body, &mut kill);
+                self.nn_kill(&kill);
+                let start = self.nn.clone();
                 self.block(body, assigns, ret);
+                self.nn = start;
             }
             StmtKind::ForIter { var, iter, body, .. } => {
                 if let Some(t) = self.expr(iter).filter(|t| t.as_record().is_some()) {
@@ -1251,7 +1440,15 @@ impl Ctx<'_, '_> {
                         None => self.report(Diagnostic::error("P301", iter.span, format!("'{it}' object is not iterable")).note("CPython would raise TypeError here")),
                     }
                 }
+                let mut kill = BTreeSet::from([var.clone()]);
+                assigned_locals(body, &mut kill);
+                self.nn_kill(&kill);
+                let start = self.nn.clone();
+                if let Some(e) = it.and_then(native::iter_elem) {
+                    self.nn_assign(var, Some(e));
+                }
                 self.block(body, assigns, ret);
+                self.nn = start;
             }
             StmtKind::SetItem { obj, index, value } => self.set_item(obj, index, value),
             StmtKind::SetAttr { obj, value, name } if self.expr(obj).is_some_and(|t| t.as_ext_struct().is_some()) => {
@@ -1336,7 +1533,20 @@ impl Ctx<'_, '_> {
             StmtKind::Import(ImportAction::Py(_)) => {}
             StmtKind::Break | StmtKind::Continue | StmtKind::Pass => {}
             StmtKind::Try { body, handlers, orelse, finalbody } => {
+                let entry = self.nn.clone();
                 let mut falls = self.block(body, assigns, ret) && self.block(orelse, assigns, ret);
+                // A handler or `finally` may start anywhere in the body.
+                let mut kill = BTreeSet::new();
+                assigned_locals(body, &mut kill);
+                assigned_locals(orelse, &mut kill);
+                for h in handlers {
+                    if let Some(n) = &h.name {
+                        kill.insert(n.clone());
+                    }
+                    assigned_locals(&h.body, &mut kill);
+                }
+                self.nn = entry;
+                self.nn_kill(&kill);
                 for h in handlers {
                     for t in &h.types {
                         if let ExcType::Obj(e) = t {
@@ -1355,6 +1565,11 @@ impl Ctx<'_, '_> {
                 }
                 // A body that may raise reaches the handlers; one that never
                 // raises still falls through when its own end is reachable.
+                let mut fkill = BTreeSet::new();
+                for h in handlers {
+                    assigned_locals(&h.body, &mut fkill);
+                }
+                self.nn_kill(&fkill);
                 return self.block(finalbody, assigns, ret) && falls;
             }
             StmtKind::AssignGlobal { unit, name, value } => {
@@ -1392,7 +1607,12 @@ impl Ctx<'_, '_> {
                     assigns.push((v.clone(), Ty::Obj));
                 }
                 // `__exit__` may suppress an exception and continue after the block.
+                let mut kill = var.iter().cloned().collect::<BTreeSet<String>>();
+                assigned_locals(body, &mut kill);
+                let entry = self.nn.clone();
                 self.block(body, assigns, ret);
+                self.nn = entry;
+                self.nn_kill(&kill);
             }
         }
         true
@@ -2172,7 +2392,7 @@ impl Ctx<'_, '_> {
             ExprKind::Str(_) => Some(Ty::Str),
             ExprKind::Bool(_) => Some(Ty::Bool),
             ExprKind::NoneLit => Some(Ty::None),
-            ExprKind::Local(n) => self.local_ty(n),
+            ExprKind::Local(n) => self.local_read(n, e.span),
             ExprKind::Global { unit, name } => self.prog.globals.get(&(*unit, name.clone())).and_then(|s| s.known()),
             ExprKind::BinOp { op, left, right } => {
                 let l = self.expr(left);
@@ -2298,7 +2518,16 @@ impl Ctx<'_, '_> {
                     let tys: Vec<Option<Ty>> = values[..n].iter().map(|v| self.expr(v)).collect();
                     return tys[n - 1];
                 }
-                let tys: Vec<Option<Ty>> = values.iter().map(|v| self.expr(v)).collect();
+                // `x is not None and x.f()`: later operands run only when the
+                // earlier ones were true (`and`) or false (`or`).
+                let start = self.nn.clone();
+                let mut tys: Vec<Option<Ty>> = Vec::new();
+                for v in values {
+                    tys.push(self.expr(v));
+                    let (tf, ff) = test_facts(v);
+                    self.nn_add(if *op == BoolOpKind::And { &tf } else { &ff });
+                }
+                self.nn = start;
                 let tys: Vec<Ty> = tys.into_iter().collect::<Option<_>>()?;
                 self.merge(&tys, e, "`and`/`or`")
             }
@@ -2309,11 +2538,26 @@ impl Ctx<'_, '_> {
                     Some(false) => return self.expr(orelse),
                     None => {}
                 }
+                let (tf, ff) = test_facts(test);
+                let start = self.nn.clone();
+                self.nn_add(&tf);
                 let a = self.expr(body);
+                self.nn = start.clone();
+                self.nn_add(&ff);
                 let b = self.expr(orelse);
+                self.nn = start;
                 self.merge(&[a?, b?], e, "conditional expression")
             }
             ExprKind::ExternCall { ext, func, args } => self.extern_args(e, *ext, *func, args),
+            ExprKind::Annotated { ty, value } if ty.as_comp().is_some() => {
+                // A container annotation on a native value: its element types
+                // join the annotation's (`parts: list[str] = []`).
+                let v = self.expr(value)?;
+                match native::ty_join(v, *ty, false) {
+                    Some(j) if v != Ty::Obj && j != Ty::Obj => Some(j),
+                    _ => Some(v),
+                }
+            }
             ExprKind::Annotated { ty, value } => {
                 let v = self.expr(value)?;
                 // Checked unbox (TypeError unless the object is exactly a `ty`).
@@ -2350,6 +2594,11 @@ impl Ctx<'_, '_> {
                 let t = self.expr(obj)?;
                 if t == Ty::Obj {
                     return Some(Ty::Obj);
+                }
+                // A value that cannot exist (an element of a list that never
+                // receives one, in an early round): so is its attribute.
+                if t.is_never() {
+                    return Some(Ty::never());
                 }
                 if let Some((ext, si)) = t.as_ext_struct() {
                     let st = &self.prog.module.externs[ext].structs[si];
@@ -2630,6 +2879,20 @@ impl Ctx<'_, '_> {
     }
 
     fn call_obj(&mut self, e: &Expr, func: &Expr, args: &[Expr], kwargs: &[(String, Expr)]) -> Option<Ty> {
+        // A method call on a value that cannot exist (`for s in xs` over a
+        // list that is still empty in this round) cannot return: Never,
+        // not a Python object (joins never narrow, so `object` would stick).
+        if let ExprKind::GetAttr { obj, .. } = &func.kind {
+            if matches!(obj.kind, ExprKind::Local(_)) && self.expr(obj).is_some_and(|t| t.is_never()) {
+                for a in args {
+                    self.expr(a);
+                }
+                for (_, v) in kwargs {
+                    self.expr(v);
+                }
+                return Some(Ty::never());
+            }
+        }
         match self.classify(func, args, kwargs) {
             CallClass::UserMethod { func: fid, kind } => {
                 let ExprKind::GetAttr { obj, name } = &func.kind else { unreachable!() };
@@ -2890,6 +3153,9 @@ impl<'m> Program<'m> {
             cur_send: gen_send_ty(spec),
             gen_returns: vec![],
             send_widen: vec![],
+            nn: None,
+            nn_reads: vec![],
+            narrowed: Some(&spec.narrowed),
         }
     }
 }

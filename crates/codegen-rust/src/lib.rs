@@ -1057,6 +1057,21 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             let lets: String = parts.iter().map(|p| format!("let _ = {p}; ")).collect();
             return (format!("{{ {lets}unreachable!() }}"), t);
         }
+        // A call or attribute on a receiver that cannot exist.
+        if t.is_never() {
+            let recv = match &e.kind {
+                ExprKind::GetAttr { obj, .. } => Some(obj.as_ref()),
+                ExprKind::CallObj { func, .. } => match &func.kind {
+                    ExprKind::GetAttr { obj, .. } if matches!(obj.kind, ExprKind::Local(_)) => Some(obj.as_ref()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(obj) = recv.filter(|o| self.ty(o).is_never()) {
+                let (o, _) = self.expr(obj);
+                return (format!("{{ let __n: rt::Never = {o}; match __n {{}} }}"), t);
+            }
+        }
         let is_class = pyfast_infer::spec::class_like;
         let code = match &e.kind {
             ExprKind::GetAttr { .. } | ExprKind::Slot(_) if self.prog.math_const_of(e).is_some() => self.prog.math_const_of(e).unwrap().to_string(),
@@ -1171,8 +1186,12 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             }
             ExprKind::Local(n) if self.is_cell(n) => format!("rt::cget(&{}, {n:?})?", rid(n)),
             ExprKind::Local(n) => {
-                let copy = !t.is_clone();
-                if self.spec.maybe_unbound.contains(n) {
+                // A `T | None` local read where inference proved it isn't None
+                // (`if x is None: continue`): stored as an Option, read as T.
+                let declared = self.spec.locals.get(n).and_then(|s| s.known()).unwrap_or(t);
+                let narrowed = declared != t && declared.as_opt() == Some(t) && self.spec.narrowed.contains(&e.span);
+                let copy = !declared.is_clone();
+                let code = if self.spec.maybe_unbound.contains(n) {
                     let err = if self.func.is_module { "unbound_global" } else { "unbound_local" };
                     let r = rid(n);
                     let base = if copy { r } else { format!("{r}.clone()") };
@@ -1181,6 +1200,11 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     rid(n)
                 } else {
                     format!("{}.clone()", rid(n))
+                };
+                if narrowed {
+                    format!("rt::unopt({code}, \"'NoneType' object\")?")
+                } else {
+                    code
                 }
             }
             ExprKind::BinOp { op, left, right } => {
@@ -1357,6 +1381,9 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                         Ty::Str => format!("rt::py::unbox_annotated::<rt::Str>(&{}, \"str\")?", borrow(&c)),
                         _ => format!("rt::py::unbox_annotated::<bool>(&{}, \"bool\")?", borrow(&c)),
                     }
+                } else if vt != t && vt != Ty::Obj {
+                    // A container annotation widened the element types.
+                    crate::coll::convert(&c, vt, t)
                 } else {
                     c
                 };

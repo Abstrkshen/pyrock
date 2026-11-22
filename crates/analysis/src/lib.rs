@@ -370,6 +370,8 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, native_imports: &BTree
             };
             push("P210", e.span, format!("{}(...)", name_of(func)), reason);
         }
+        // A receiver that cannot exist (an element of a list that never gets one).
+        ExprKind::GetAttr { obj, .. } if ty(obj).is_some_and(|t| t.is_never()) => {}
         ExprKind::GetAttr { name, obj } if ty(obj) == Some(Ty::Obj) || ty(obj).is_some_and(|t| !pyfast_infer::spec::class_like(t) && t.as_ext_struct().is_none() && !matches!(t.as_comp(), Some(Comp::Type(..)))) => {
             push("P210", e.span, format!("attribute `.{name}`"), "dynamic receiver: CPython attribute lookup")
         }

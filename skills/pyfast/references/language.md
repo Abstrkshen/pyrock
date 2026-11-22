@@ -20,7 +20,9 @@ The full, authoritative list is `docs/subset.md` in the repo. This is the workin
   slicing, comprehensions, unpacking (`a, *b = xs`, `for k, v in d.items()`), string
   methods, and builtins such as `sorted`, `sum`, `enumerate`, `zip`, `min`/`max`,
   `any`/`all`, `round`, `repr`.
-* `T | None` is a native `Option<T>`: `def f(x, size=None): if size is None: size = 8`
+* `T | None` is a native `Option<T>`, and `is None` checks narrow it:
+  after `if name is None: continue` (or inside `if name is not None and ...:`, `if name:`),
+  `name` is a plain `str`. `def f(x, size=None): if size is None: size = 8`
   compiles without boxing.
 * `try`/`except`/`else`/`finally`, `raise`, `assert`, following CPython's exception
   hierarchy. Exceptions from CPython keep their object (`except json.JSONDecodeError`).

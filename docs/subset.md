@@ -9,7 +9,10 @@ These constructs become plain Rust with no Python objects involved:
   once where the `def` runs, so a mutable default is shared as in CPython). Calls may pass keyword arguments; arguments are still
   evaluated in source order.
 * `T | None`: a value that is `None` on some paths and a `T` on others is a native
-  `Option<T>` (no boxing, also in native-only mode). Using it where a `T` is needed checks it
+  `Option<T>` (no boxing, also in native-only mode). Checks narrow it flow-sensitively: after
+  `if x is None: continue` / `return` / `x = default`, inside `if x is not None:`, `if x:`,
+  the right side of `x is not None and ...` and `a if x is not None else b`, reads of `x` are
+  a plain `T`. Using it where a `T` is needed checks it
   and raises CPython's `TypeError` on `None`. `x is None` on a value whose type is exactly
   `None` (or can never be `None`) in a specialization is decided at compile time, so
   `if size is None: size = 10` with a `None` default compiles to straight-line code.
@@ -106,6 +109,8 @@ These constructs become plain Rust with no Python objects involved:
   `int | float` (each operation keeps exact int or float semantics).
 * `math` functions and constants on native numbers (with CPython's domain/range errors);
   an `import math` used only that way needs no CPython.
+* Container annotations on variables (`parts: list[str] = []`, `REG: dict[str, Agent] = {}`,
+  `x: Optional[str] = None`) give a still-empty container its element types.
 * Dicts with literal string keys (`{"x": 1.0, "name": "a"}`) are compiled as structs with
   one type per key (keys added later are optional fields). Reads, writes, `get`, `in`,
   `len`, `del` of added keys, printing, `==` and iterating keys are native; other dict uses

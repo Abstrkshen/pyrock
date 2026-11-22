@@ -106,12 +106,12 @@ measurement in [coverage.md](coverage.md). Not started unless marked.
 Problems found while building `.ignore/samples/ollama-agents` (its `FINDINGS.md`; repros in
 its `repro/` folder), which block ordinary app code:
 
-- [ ] F-01: `x is None` checks don't narrow `str | None` for later uses (P301/P307)
-- [ ] F-02: an empty module-level dict filled later (`AGENTS = {}`) gives unknown value
+- [x] F-01: `x is None` checks don't narrow `str | None` for later uses (P301/P307)
+- [x] F-02: an empty module-level dict filled later (`AGENTS = {}`) gives unknown value
       types; `AGENTS: dict[str, Agent] = {}` is ignored (P215)
-- [ ] F-03: a list attribute appended in one method and read in another has an unresolved
+- [x] F-03: a list attribute appended in one method and read in another has an unresolved
       element type (P215)
-- [ ] F-05: annotations on local variables (`parts: list[str] = []`) are ignored
+- [x] F-05: annotations on local variables (`parts: list[str] = []`) are ignored
 
 Language coverage (ordered by how much code each one blocks in the standard library):
 
@@ -808,3 +808,30 @@ Each bridged operation cost ~400 ns.
 * Tests: `tests/differential/nested_imports.py`, `tests/differential/default_values.py`;
   `tests/diagnostics/call_errors` no longer reports P101. `cargo test --workspace` passes;
   `ollama-agents` README session passes.
+
+### Phase 8: the ollama-agents findings (2026-11-23)
+
+`.ignore/samples/ollama-agents/FINDINGS.md` lists problems hit while writing a real app. All
+of its repros (`repro/r1.py` … `r21.py`) now pass `pyfast check --mode native-only`, and the
+runnable ones print the same as CPython.
+
+* F-02, F-03 (and F-04, already fixed): one cause. In early inference rounds a list that
+  is filled later is still `list[Never]`, so a loop variable over it is `Never`; a method
+  call or attribute read on it was typed `object`, and since joins never narrow, the
+  variables it flowed into (`out += s.to_json()`) stayed boxed. A call or attribute read on
+  a `Never` receiver is now `Never` (code generation emits the unreachable match), and it is
+  not reported as a CPython boundary.
+* F-01: flow-sensitive `None` narrowing. Inference tracks which `T | None` locals are known
+  not to be `None` (after `if x is None: continue`/`return`/`x = v`, inside `if x is not
+  None:` / `if x:`, in later operands of `and`/`or`, in the branches of `a if c else b`;
+  facts are dropped for locals assigned in loops and around `try`/`with`). Each read site
+  narrowed on every path is recorded on the specialization; it is typed `T` and code
+  generation unwraps it. Compile-time folding of tests now also decides `if x:` on a value
+  that is always `None` and `and`/`or` chains decided by a leading operand, so code that
+  only runs for a non-`None` value isn't type-checked in a specialization where it's
+  always `None`.
+* F-05: container annotations on variables (`list[T]`, `dict[K, V]`, `set[T]`,
+  `tuple[T, ...]`, `Optional[T]`, `T | None`, with class names) join into the value's type.
+* Tests: `tests/differential/late_element_types.py`, `none_narrowing.py`,
+  `local_annotations.py` (all also pass native-only). `cargo test --workspace`, samples
+  21/21, demos 3/3.
