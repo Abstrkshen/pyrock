@@ -1473,6 +1473,10 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             _ => {
                 let j = pyfast_infer::native::ty_join(lt, rt, false);
                 match j {
+                    // Python objects inside (`list[object] == list[str]`): CPython decides.
+                    None if lt.mentions_obj() || rt.mentions_obj() => {
+                        format!("rt::py::compare_bool({:?}, {}, {})?", op.rt_fn(), boxed(l, lt), boxed(r, rt))
+                    }
                     None => {
                         let v = matches!(op, CmpOp::NotEq);
                         format!("{{ let _ = {l}; let _ = {r}; {v} }}")

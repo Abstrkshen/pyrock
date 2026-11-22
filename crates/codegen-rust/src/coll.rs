@@ -804,6 +804,13 @@ impl FnEmitter<'_, '_> {
         if e.is_never() {
             return format!("{{ let _ = ({x}, {c}); false }}");
         }
+        // `T | None` needle, elements that are never None: None is not found.
+        if let (Some(inner), None) = (xt.as_opt(), e.as_opt()) {
+            if e != Ty::Obj {
+                let found = self.contains("__p", inner, "__c", ct);
+                return format!("{{ let __c = {c}; match {x} {{ Some(__p) => {found}, None => false }} }}");
+            }
+        }
         let probe = convert(x, xt, e);
         let probe = borrow(&probe).to_string();
         match ct.as_comp() {

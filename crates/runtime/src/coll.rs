@@ -1183,7 +1183,7 @@ pub fn sum_float(v: Vec<f64>, start: f64) -> f64 {
 
 /// Characters of a str, for iteration.
 pub fn chars(s: &Str) -> Vec<Str> {
-    s.chars().map(|c| Str::from(c.to_string())).collect()
+    s.chars().map(crate::string::char_str).collect()
 }
 
 /// `range(start, stop, step)` as a vector (for `list(range(...))` and friends).

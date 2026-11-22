@@ -95,6 +95,7 @@ These constructs become plain Rust with no Python objects involved:
   methods (all-`object` specializations), assign scalar fields, print, compare and hash them,
   and gets the same Python object back each time (identity). Fields that hold mutable
   containers become Python objects so both sides see the same list.
+* `from mod import Class` and `mod.Class(...)` for classes of natively compiled modules.
 * Module-level variables read inside functions, `global x` in functions, `mod.NAME` /
   `mod.NAME = v` on a natively compiled module, and `from mod import NAME` (copied at import,
   as CPython does). Such variables live in typed global cells; reading one before its

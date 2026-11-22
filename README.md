@@ -95,6 +95,16 @@ Specializations (reachable from module entry)
 $ pyfast run examples/generics.py
 ```
 
+## Demos
+
+Three small apps in [demos/](demos/), each with a README and checked in CI:
+
+| Demo | What it shows |
+|---|---|
+| [backend](demos/backend/) | A JSON API on asyncio: native store, routing and validation; stdlib sockets and `json` through CPython |
+| [ai](demos/ai/) | A BPE tokenizer in Python, a bigram model in Rust (`ngram.rs`), sampling in C (`sampling.c`); no CPython at all (`--mode native-only`) |
+| [gui](demos/gui/) | 300 colliding balls: native physics (17x CPython) drawn with raylib |
+
 ## Commands
 
 | Command | What it does |

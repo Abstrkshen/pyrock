@@ -1,0 +1,9 @@
+(200, {'status': 'ok'})
+['buy milk', 'fix bug', 'write docs']
+(400, {'error': 'title must not be empty'})
+(200, {'id': 1, 'title': 'write docs', 'done': True, 'tags': ['docs', 'work']})
+(200, {'todos': [{'id': 2, 'title': 'fix bug', 'done': False, 'tags': ['work']}]})
+(404, {'error': 'todo 99 not found'})
+(405, {'error': 'DELETE not allowed'})
+(200, {'total': 3, 'done': 1, 'open': 2, 'top_tags': ['work', 'docs', 'home']})
+(404, {'error': 'no route for /nope'})

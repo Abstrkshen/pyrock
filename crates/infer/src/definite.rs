@@ -60,6 +60,9 @@ fn stmt(s: &Stmt, mut cur: Set, out: &mut HashSet<String>) -> Option<Set> {
             expr(obj, &cur, out);
             expr(value, &cur, out);
         }
+        // A constant test runs one branch (synthetic `if True:` blocks hold unpacking).
+        StmtKind::If { test, body, .. } if matches!(test.kind, ExprKind::Bool(true)) => return block(body, cur, out),
+        StmtKind::If { test, orelse, .. } if matches!(test.kind, ExprKind::Bool(false)) => return block(orelse, cur, out),
         StmtKind::If { test, body, orelse } => {
             expr(test, &cur, out);
             let a = block(body, cur.clone(), out);

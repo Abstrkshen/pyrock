@@ -4,8 +4,8 @@
 # The `pyfast` on PATH is this repo's fresh debug build, not the installed one.
 #
 # usage: scripts/readme_check.sh [--bench] [DIR...]
-#   DIR defaults to every directory with a README.md under .ignore/samples/
-#   and examples/. `pyfast bench` lines are skipped unless --bench is given.
+#   DIR defaults to every directory with a README.md under .ignore/samples/,
+#   examples/ and demos/. `pyfast bench` lines are skipped unless --bench is given.
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -21,7 +21,7 @@ for a in "$@"; do
     case "$a" in --bench) bench=1 ;; *) dirs+=("$a") ;; esac
 done
 if [[ ${#dirs[@]} -eq 0 ]]; then
-    for r in "$ROOT"/.ignore/samples/*/README.md "$ROOT"/examples/*/README.md; do
+    for r in "$ROOT"/.ignore/samples/*/README.md "$ROOT"/examples/*/README.md "$ROOT"/demos/*/README.md; do
         [[ -f "$r" ]] && dirs+=("$(dirname "$r")")
     done
 fi

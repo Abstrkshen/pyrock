@@ -62,6 +62,23 @@ fn s(v: impl Into<String>) -> Str {
     Str::from(v.into())
 }
 
+thread_local! {
+    /// The 256 Latin-1 one-character strings, shared (CPython caches them too):
+    /// iterating or indexing a string does not allocate per character.
+    static LATIN1: Vec<Str> = (0..256u32).map(|i| Str::from(char::from_u32(i).unwrap().to_string())).collect();
+}
+
+/// A one-character string.
+#[inline]
+pub fn char_str(c: char) -> Str {
+    let u = c as u32;
+    if u < 256 {
+        LATIN1.with(|t| t[u as usize].clone())
+    } else {
+        Str::from(c.to_string())
+    }
+}
+
 /// `s[i]` (code point indexing; O(1) for ASCII strings).
 pub fn index(a: &Str, i: i64) -> PyResult<Str> {
     let err = || Exc::new("IndexError", "string index out of range");
@@ -71,14 +88,14 @@ pub fn index(a: &Str, i: i64) -> PyResult<Str> {
         if !(0..n).contains(&j) {
             return Err(err());
         }
-        return Ok(s(&a[j as usize..j as usize + 1]));
+        return Ok(char_str(a.as_bytes()[j as usize] as char));
     }
     let n = a.chars().count() as i64;
     let j = if i < 0 { i + n } else { i };
     if !(0..n).contains(&j) {
         return Err(err());
     }
-    Ok(s(a.chars().nth(j as usize).unwrap().to_string()))
+    Ok(char_str(a.chars().nth(j as usize).unwrap()))
 }
 
 /// `s[a:b:c]`
@@ -503,7 +520,7 @@ pub fn chr(i: i64) -> PyResult<Str> {
     u32::try_from(i)
         .ok()
         .and_then(char::from_u32)
-        .map(|c| s(c.to_string()))
+        .map(char_str)
         .ok_or_else(|| Exc::new("ValueError", "chr() arg not in range(0x110000)"))
 }
 

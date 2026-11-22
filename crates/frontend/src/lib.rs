@@ -954,10 +954,14 @@ impl<'l> Lowerer<'l> {
                         Some(&fid) => {
                             self.bindings.insert(bind, Binding::Func(fid));
                         }
+                        None if self.ld.unit_classes[u].contains_key(&attr) => {
+                            let c = self.ld.unit_classes[u][&attr];
+                            self.bindings.insert(bind, Binding::Class(c));
+                        }
                         None if self.ld.unit_globals[u].contains(&attr) => {
                             self.var_imports.entry(sp).or_default().push((bind, u, attr.clone()));
                         }
-                        None => self.err("P140", sp, format!("`{module}` has no function or module-level variable `{attr}`")),
+                        None => self.err("P140", sp, format!("`{module}` has no function, class or module-level variable `{attr}`")),
                     },
                     Some(Binding::Extern(e)) if e != usize::MAX => match self.ld.externs[e].funcs.iter().position(|f| f.name == attr) {
                         Some(i) => {

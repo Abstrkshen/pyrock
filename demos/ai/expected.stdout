@@ -1,0 +1,7 @@
+merges: 40 first: ['e ', 'he ', 'the ', 'n ', 's ']
+tokens: 121 of 72 words; ratio 0.494
+roundtrip: True
+pairs: 80 vocab: 296
+perplexity: 19.82
+generated: the brown fox jum the brown fox jum
+entropy after 'the': 7.361 bits

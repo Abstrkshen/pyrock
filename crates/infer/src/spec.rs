@@ -1196,6 +1196,9 @@ impl Ctx<'_, '_> {
                         }
                         self.flow(value, vt, vv);
                     }
+                    // Hybrid: keys that are not natively hashable (Python
+                    // objects) make the dict a Python dict.
+                    _ if boxing => self.widen(obj, Ty::Obj),
                     _ => self.report(Diagnostic::error("P304", value.span, format!("storing [{kt}] = {vt} into a {ot} natively"))),
                 }
             }

@@ -77,8 +77,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 ## Throughout
 
 - [x] Install without depending on the repo path (runtime crate shipped with the binary)
-- [ ] Demo apps compiled and checked in CI: backend (JSON API handlers), AI (tokenizer +
-      C/Rust inference glue), GUI (raylib through its C API)
+- [x] Demo apps compiled and checked in CI: backend (JSON API handlers), AI (tokenizer +
+      C/Rust inference glue), GUI (raylib; through the `raylib` Python package, see the log)
 
 ## Log
 
@@ -435,3 +435,34 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
   `PYFAST_RUNTIME` still overrides it.
 * Checked by copying the binary out of the repo and running a program with it; every test
   suite now builds against the extracted copy.
+
+### Demo apps (2026-11-22)
+
+`demos/`, checked by `demos/run_all.sh` (exact stdout) and by the README check (every
+README command, verbatim) in CI:
+
+* `demos/backend`: a todo JSON API on `asyncio.start_server` with a native store module
+  (classes, dataclass, user exception), native routing and query parsing (`str`
+  annotations unbox the request text once), and a self-test client sending concurrent
+  requests. Output identical to CPython.
+* `demos/ai`: a BPE tokenizer in Python (native), a bigram language model in Rust
+  (`ngram.rs`: struct handle, `HashMap`, slices, `Vec<f64>`), softmax/argmax/entropy in C
+  (`sampling.c`: arrays with write-back, `-lm`). Compiles with `--mode native-only`. CPython
+  reference implementations of the Rust/C modules (`reference/`) reproduce the output.
+  `bench_bpe.py`: 2.7x CPython.
+* `demos/gui`: 300 balls with pairwise elastic collisions (`sim.py`, native) drawn with the
+  `raylib` package. `headless.py` (no window, checked exactly): 16.7x CPython. CI runs the
+  window version under `xvfb-run` for 120 frames. The raylib *C API* variant was not built:
+  this machine has no system raylib and building it from source was not permitted here, so
+  the demo uses the Python package (drawing calls through CPython) instead.
+* Fixes found by the demos:
+  * `from mod import SomeClass` for a class of a native module.
+  * Hybrid mode: a dict given a CPython-object key becomes a Python dict (was P304).
+  * Equality between native values containing CPython objects and other native values
+    (`list[object] == list[str]`) is decided by CPython (was statically `False`).
+  * `x in xs` with `x: T | None` (None is never found in a list of `T`).
+  * Definite assignment: synthetic `if True:` blocks (unpacking targets) run their body,
+    so `for k, v in d.items()` targets are no longer "maybe unbound" (`Option` + checks).
+  * One-character strings (iteration, indexing, `chr`) share 256 cached `Latin-1` values
+    instead of allocating per character (BPE benchmark 1.85x → 2.7x).
+* Test: `tests/differential/hybrid_mixing.py`.
