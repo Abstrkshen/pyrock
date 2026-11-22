@@ -64,15 +64,15 @@ print(geometry.circle_area(2.0), circle_area(1.0))
 
 Limits of native Python modules:
 
-* You can call a module's **functions**, but you can't read its module-level variables
-  (`geometry.PI`), because module globals aren't compiled yet. Wrap the value in a function, or
-  make it a local constant.
+* Its functions, classes and module-level variables are all usable: `geometry.Point(1, 2)`,
+  `from geometry import Point`, `geometry.PI`, `from geometry import PI` (copied at import,
+  as Python does), `geometry.PI = 3.0` (a typed global cell).
 * Circular imports between native modules are rejected (P145).
 * Relative imports (`from . import x`) and `from x import *` aren't supported.
 * Imports must be at module level, not inside a function.
 
-**Fallback.** If an imported `.py` uses something pyfast can't compile, such as a `class`,
-`try`, a comprehension or a lambda, hybrid mode imports that file through CPython instead and
+**Fallback.** If an imported `.py` uses something pyfast can't compile, such as a class with
+a metaclass or a CPython base class, hybrid mode imports that file through CPython instead and
 warns:
 
 ```
@@ -115,12 +115,45 @@ vecmath.checked_div(1, 0)                # RuntimeError: division by zero in Rus
 | `&str`, `String` | `str` |
 | `()` | `None` |
 | `Result<T, E>` (return only) | `T`. `Err(e)` raises `RuntimeError(str(e))`. `E` must implement `Display` |
+| `Vec<T>`, `&[T]`, `&Vec<T>` | any iterable of `T` (list, tuple, `array.array`, numpy array, ...); a returned `Vec<T>` is a `list` |
+| `&mut [T]`, `&mut Vec<T>` | a list or other mutable sequence; changes are written back after the call |
+| `Vec<u8>`, `&[u8]` | `bytes`, `bytearray` or a list of ints; a returned `Vec<u8>` is `bytes` |
+| `Option<T>` | `T` or `None` |
+| `(A, B, ...)` | `tuple` |
+| `HashMap<K, V>`, `BTreeMap<K, V>` | `dict` |
+| `impl Fn(A) -> R`, `&dyn Fn(A) -> R` | a function, lambda or closure, compiled natively for those argument types; an exception inside it propagates out of the call |
+| `pub struct S` (`#[derive(Clone)]`) | a handle: `S.new(...)` (an `impl` fn `new`), `pub` fields as attributes, `&self`/`&mut self` methods as methods |
 
-The file is compiled as a module of the generated crate (`#[path = "..."] mod rs_vecmath;`),
-so it can contain any private helpers, structs, `use std::...` and so on. Only the `pub fn`
-signatures have to stick to the table. Functions with generics, references to other types,
-structs or slices in their signature are skipped. `explain` lists them with the reason, and
-calling one gives P150. The `.rs` file can't depend on external crates yet.
+```rust
+// geo.rs
+// pyfast: dep itoa = "1"
+pub fn scale_all(xs: &mut [f64], k: f64) { for x in xs.iter_mut() { *x *= k; } }
+pub fn apply(xs: Vec<i64>, f: impl Fn(i64) -> i64) -> Vec<i64> { xs.into_iter().map(f).collect() }
+
+#[derive(Debug, Clone)]
+pub struct Counter { pub name: String, pub count: i64 }
+impl Counter {
+    pub fn new(name: &str) -> Counter { Counter { name: name.to_string(), count: 0 } }
+    pub fn incr(&mut self, by: i64) { self.count += by; }
+}
+```
+
+```python
+import geo
+xs = [1.0, 2.0]
+geo.scale_all(xs, 10.0)                 # xs is now [10.0, 20.0]
+print(geo.apply([1, 2], lambda v: v * 3))
+c = geo.Counter.new("hits")
+c.incr(2)
+print(c.count)
+```
+
+The file is compiled as a module of the generated crate (`#[path = "..."] mod rs_geo;`), so
+it can contain private helpers, structs and `use` lines. External crates are added with a
+`// pyfast: dep NAME = "VERSION"` comment (any Cargo dependency spec after the `=`).
+Struct handles are shared by reference and must stay native: passing one to CPython is
+P231. Generic, `async` and `unsafe` functions are skipped; `explain` lists them with the
+reason, and calling one gives P150.
 
 ## Importing C files
 
@@ -145,17 +178,30 @@ print(fastc.version())        # a Python str
   definitions in `x.c`.
 * The `.c` file is compiled with the system C compiler (through the `cc` crate) and linked
   in, along with `libm`.
-* Supported types are the integer types (`int`, `long`, `int64_t`, `size_t`, `unsigned`, ...),
-  `float`/`double`, `bool`, `const char *` (to and from `str`) and `void`.
-* Checks at the boundary: an int that doesn't fit the C type raises `OverflowError`, and a
-  string containing a NUL byte raises `ValueError`.
-* Pointers other than `const char *`, structs, variadic functions and `static` functions
-  aren't callable. `explain` lists them as skipped.
+* Libraries: `// pyfast: link NAME` adds `-lNAME`; `// pyfast: pkg-config NAME` adds the
+  package's compile and link flags.
+
+| C type | Python side |
+|---|---|
+| integer types (`int`, `long`, `int64_t`, `size_t`, `unsigned`, `char`, ...) | `int`, range-checked (`OverflowError`) |
+| `float`, `double` | `float` |
+| `bool` / `_Bool` | `bool` |
+| `const char *` / `char *` | `str` (a NUL inside raises `ValueError`) |
+| `void` | `None` |
+| `T *data, int n` / `const T *data, size_t n` (pointer followed by a length) | one argument: a sequence of `T`; a non-`const` pointer writes the changes back |
+| `typedef struct { ... } S;` by value | `S(field, ...)` creates it; fields are attributes; a returned struct is an `S` |
+| `R (*f)(A, ...)` | a function, lambda or closure (through a generated `extern "C"` trampoline; it must not be kept after the call) |
+
+Unions, variadic functions (`...`) and `static` functions aren't callable; `explain` lists
+them as skipped.
 
 C strings returned from C are copied into a Python `str` immediately. pyfast doesn't free
 them, so return static or long-lived strings.
 
 ## Importing anything else (CPython)
+
+`import math` is compiled natively when every use is a call or constant on native numbers
+(`math.sqrt(x)`, `math.pi`); then no CPython is needed for it.
 
 If nothing local matches, the import happens in an **embedded CPython interpreter** at
 runtime. This covers the standard library, pure-Python packages in site-packages, and

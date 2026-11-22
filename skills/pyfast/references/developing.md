@@ -72,3 +72,9 @@ reserves `test` and doesn't accept hyphens in command names.)
 | `PYFAST_TARGET_DIR` | Cargo target dir (default `$XDG_CACHE_HOME/pyfast/target` or `~/.cache/pyfast/target`) |
 | `PYFAST_RUNTIME` | Path to a runtime crate (default: the copy embedded in the binary by `crates/driver/build.rs`, extracted to `<cache>/pyfast/runtime/<content hash>/`) |
 | `UPDATE_SNAPSHOTS=1` | Re-bless test snapshots |
+
+## Where the project stands
+
+`docs/status.md` summarizes the current features, measured speedups and known differences;
+`docs/roadmap.md` logs every step (what changed, how it was verified). Update both when a
+change is user-visible.

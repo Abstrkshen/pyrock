@@ -303,8 +303,13 @@ behaviour is reproduced:
 | `float.rs` | `repr` identical to CPython (`1e+16`, `1e-05`, `-0.0`, `inf`), and Python's float `//`, `%` and `**` edge cases |
 | `string.rs`, `conv.rs` | `str()`, `int("..")`, `float("..")`, `repr`, `in`, repetition, with Python's error messages |
 | `exc.rs` | `Exc { kind, msg }`. An uncaught one prints a short `Traceback` header and `Kind: message`, then exits with status 1 |
-| `io.rs` | Buffered `print`, flushed at exit and **before every CPython call** so output stays in order |
-| `ext.rs` | Checked conversions for Rust/C calls (`int_to`, `cstring`, `from_cstr`, `rust_err`) |
+| `io.rs` | Buffered `print`, flushed at exit and before every CPython call so output stays in order; `run_main`, and the finalization of module variables at exit (CPython's shutdown order) |
+| `coll.rs` | `List`, `Dict` (insertion-ordered), `Set`, tuples: shared `Rc<RefCell<..>>` so aliasing matches Python |
+| `num.rs` | `Num`: a value that is an int on some paths and a float on others, with exact int or float semantics per operation |
+| `stackful.rs`, `gen.rs` | Generators run on their own stack (`corosensei`): `yield` suspends it; `send`/`throw`/`close`; an abandoned generator is closed |
+| `aio.rs`, `agen.rs` | `async def` bodies and async generators, driven by asyncio through a small Python driver; `await` of a Python awaitable suspends the body's stack |
+| `math.rs` | The `math` module with CPython's errors |
+| `ext.rs` | Checked conversions for Rust/C calls (`int_to`, `cstring`, `from_cstr`, `rust_err`, callbacks) |
 | `py.rs` | The CPython bridge (PyO3), described below |
 
 ### The CPython bridge
@@ -314,8 +319,14 @@ behaviour is reproduced:
 * `init` starts the interpreter once, sets `sys.path` to the paths captured at build time and
   makes stdout unbuffered, so native and Python output don't interleave out of order.
 * `Obj` is an owned Python object reference. `getattr`, `call`, `binop`, `compare`, `iter`,
-  `list`, `dict` and the others each acquire the interpreter, perform the one operation and
-  release it. Native loops never hold the GIL.
+  `list`, `dict` and the others perform one operation each. The program runs attached to
+  the interpreter (`rt::py::attached` around the module body), so an operation only bumps
+  PyO3's attach counter and a dropped object is released at once. String constants are
+  interned once per call site (`rt::pystr!`).
+* State shared by every thread that runs compiled code (module globals, stdout, the
+  exception-class registry) lives in `rt::Shared` cells, sound because compiled code only
+  runs while holding the GIL; native functions and objects can be called from CPython
+  threads.
 * `Slot` is a lazily filled static for each CPython import. `import` fills it, and `get`
   reads it, raising `NameError` if it was never imported.
 * Python exceptions are converted to `Exc` with their full qualified type name

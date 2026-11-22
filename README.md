@@ -4,7 +4,10 @@ An ahead-of-time compiler that turns ordinary, unannotated Python into readable 
 infers generic function signatures, specializes each function for the concrete types it is
 called with, and builds a native executable with Cargo. It explains every decision it makes.
 
-Status: **prototype, covering milestones M0–M2 of [Project.md](Project.md) plus Rust/C imports.**
+Status: **prototype.** Classes, closures, exceptions, native collections, generators and
+async/await compile natively, as does Rust and C interop with structs, slices and callbacks.
+The current state, with measured speedups and known differences, is in
+[docs/status.md](docs/status.md); the history is in [docs/roadmap.md](docs/roadmap.md).
 In hybrid mode (the default), anything that can't be compiled natively crosses into an
 embedded CPython at an explicit, reported boundary. `--mode native-only` rejects those
 boundaries instead.
@@ -15,9 +18,9 @@ A plain `import x` (or `from x import f`) is resolved next to the importing file
 
 | Found | What happens |
 |---|---|
-| `x.py` | Compiled natively as part of the same binary. Its module body runs once, at the first import. If it uses unsupported syntax, hybrid mode imports it through CPython instead and warns (P220). |
-| `x.rs` | Linked into the binary with `#[path] mod`. Every `pub fn` whose parameters and return type are integers, `f32`/`f64`, `bool`, `&str`/`String` or `()` is callable. A `Result<T, E>` return raises `RuntimeError(str(e))`. |
-| `x.c` | Compiled with the system C compiler (`cc` crate). Signatures come from `x.h` when it exists, otherwise from the non-static definitions in `x.c`. Integer types, `float`/`double`, `bool`, `const char *` and `void` cross the boundary. |
+| `x.py` | Compiled natively as part of the same binary (functions, classes, module variables). Its module body runs once, at the first import. If it uses unsupported syntax, hybrid mode imports it through CPython instead and warns (P220). |
+| `x.rs` | Linked into the binary with `#[path] mod`. `pub fn` with scalars, strings, `Vec`/slices (`&mut` written back), `Option`, tuples, `HashMap`, callbacks (`impl Fn`), `pub struct` handles with methods, and `Result` (errors raise). Crates via `// pyfast: dep`. |
+| `x.c` | Compiled with the system C compiler (`cc` crate). Signatures come from `x.h` when it exists, otherwise from the non-static definitions in `x.c`. Scalars, strings, pointer+length arrays, `typedef struct` values and function pointers cross the boundary; `// pyfast: link` / `pkg-config` add libraries. |
 | nothing | A CPython import at runtime: the stdlib, site-packages and C-extension packages (numpy, ...). The build interpreter's `sys.path` is embedded, so a venv works. |
 
 ```python
@@ -68,15 +71,18 @@ count: int = json.loads("41")        # native i64 from here on
 
 ## The CPython bridge
 
-* Lists, dicts, tuples, method calls, iteration, subscripts, keyword arguments, and builtins
-  without a native version (`sorted`, `sum`, `round`, ...) use real Python objects. Mutation
-  and aliasing therefore behave exactly as in Python.
-* In hybrid mode, a variable or return value that takes several types (`x = 1; x = "s"`, or a
-  function that sometimes returns `None`) is boxed as a Python object instead of rejected.
+* Values from CPython imports (stdlib, site-packages, numpy, ...) are Python objects; every
+  operation on them goes through CPython, so they behave exactly as in Python.
+* In hybrid mode, a variable that takes types pyfast can't unify (`x = 1; x = "s"`) is
+  boxed as a Python object instead of rejected. (`int`/`float` mixes, `T | None` and dicts
+  with fixed string keys stay native.)
+* Native values passed to CPython keep working there: functions become callables, instances
+  become objects, generators and coroutines become iterators and awaitables. Native
+  functions can be called from CPython threads.
 * Python exceptions keep their type and message (e.g.
   `json.decoder.JSONDecodeError: Expecting value...`).
-* Native code never holds the interpreter during pure Rust loops. Programs without
-  boundaries don't link libpython at all.
+* A program that embeds CPython holds the GIL while native code runs; CPython threads run
+  while it waits. Programs without boundaries don't link libpython at all.
 
 ```console
 $ pyfast explain examples/generics.py
@@ -134,7 +140,7 @@ Python source ─► CPython ast (JSON protocol v1) ─► scope-resolved HIR
 | `crates/infer` | Operator table, definite assignment, generic schemes, specialization fixed point |
 | `crates/analysis` | Call graph, recursion detection, effects, native/bridge tiers, and the CPython boundary list |
 | `crates/codegen-rust` | One Rust function per specialization |
-| `crates/runtime` | Python semantics in Rust (checked ints, floor/mod, float repr, exceptions), FFI conversions, and the PyO3 bridge (`python` feature) |
+| `crates/runtime` | Python semantics in Rust (checked ints, floor/mod, float repr, exceptions, `int \| float`), collections, generators and coroutines (stackful, `corosensei`), `math`, FFI conversions, and the PyO3 bridge (`python` feature). Embedded in the `pyfast` binary |
 | `crates/driver` | The `pyfast` CLI |
 
 ## Tests
@@ -143,7 +149,8 @@ Python source ─► CPython ast (JSON protocol v1) ─► scope-resolved HIR
 cargo test --workspace                 # unit + differential + golden + diagnostics
 UPDATE_SNAPSHOTS=1 cargo test -p pyfast --test suites   # re-bless snapshots
 bash samples/run_all.sh                # every sample vs CPython
-bash scripts/readme_check.sh           # every sample README's commands, verbatim
+bash demos/run_all.sh                  # the demo apps vs their expected output
+bash scripts/readme_check.sh           # every sample and demo README's commands, verbatim
 ```
 
 Progress towards compiling real backend, AI and GUI apps is tracked in
@@ -159,13 +166,15 @@ Progress towards compiling real backend, AI and GUI apps is tracked in
 ## Benchmarks
 
 `pyfast bench benchmarks/numeric_loop.py --runs 3` on an Intel Core 7 240H, with Python
-3.12.3 and rustc 1.96.0: CPython median 626 ms, native median 13 ms, stdout identical. This is
-one integer/float/recursion workload measured with wall-clock time including process startup.
-It is not a general speedup claim. Code that spends its time in bridged Python calls
-won't be faster, and each boundary crossing has its own cost.
+3.12.3 and rustc 1.96.0: CPython median 626 ms, native median 13 ms, stdout identical. More
+measurements (16–19x on game-style physics and state updates, 2.7x on string-heavy code) are
+in [docs/status.md](docs/status.md). These are wall-clock times including process startup,
+not a general speedup claim. Code that spends its time in bridged Python calls won't be
+faster, and each boundary crossing has its own cost.
 
 More documentation:
 
+* [docs/status.md](docs/status.md): the current state, measured speedups, known differences
 * [docs/imports.md](docs/imports.md): how to import Python, Rust, C and CPython modules
 * [docs/how-it-works.md](docs/how-it-works.md): each compiler stage with real generated code
 * [docs/subset.md](docs/subset.md): the supported subset, known divergences and diagnostic codes

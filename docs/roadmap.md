@@ -4,6 +4,9 @@ Goal: compile enough of the Python that **backend, AI and GUI apps** actually us
 existing **C and Rust projects** easy to use from it. Not all of Python: anything dynamic
 keeps running in the embedded CPython, at a reported boundary.
 
+For a summary of where things stand now (features, measured speed, known differences), see
+[status.md](status.md).
+
 This file tracks progress. Each step has an acceptance gate, and the log at the bottom
 records what changed and how it was verified. `Project.md` §13 milestone M6 ("collections,
 classes, closures, callbacks") is split into the phases below.

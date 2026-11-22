@@ -128,7 +128,7 @@ These constructs become plain Rust with no Python objects involved:
 
 ## Known divergences (documented, tested where possible)
 
-| Behaviour | CPython | pyfast M1 | Planned fix |
+| Behaviour | CPython | pyfast | Planned fix |
 |---|---|---|---|
 | int results outside i64 | promotes to bigint | `OverflowError` | M4: arbitrary precision / promotion |
 | `int ** negative_int` with a non-literal exponent | float | `NotImplementedError` | M4: union return |
@@ -138,6 +138,8 @@ These constructs become plain Rust with no Python objects involved:
 | Dict views (`keys()`, ...) | support set operations | iteration, `len`, `in`, printing only | — |
 | `RecursionError` threshold | counts every frame | counts recursive frames only | — |
 | Python object returned into an `int`/`str`/`bool` annotation it doesn't match | annotation ignored | `TypeError` at the unbox | — (deliberate: unboxing must not change the value) |
+| CPython threads during long native loops | interleave (GIL switch interval) | run only while compiled code waits (I/O, `sleep`, `join`, the event loop) | — (the GIL is held while native code runs) |
+| Order of finalizing several imported modules that define functions, at exit | depends on the garbage collector (changes once `.pyc` files are cached) | one fixed order | — |
 
 ## Bridged through CPython (hybrid mode)
 
