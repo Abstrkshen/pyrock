@@ -30,6 +30,31 @@ These constructs become plain Rust with no Python objects involved:
   CPython keep their original object, so `except json.JSONDecodeError` works through
   `isinstance`. `return`/`break`/`continue` inside `try` run `finally` first.
 * `__name__` and `__file__`.
+* Native collections: `list[T]` (shared `Rc<RefCell<Vec<T>>>`, so aliases see mutations),
+  `dict[K, V]` (insertion-ordered; keys are int/str/bool/None/tuples of those), `set[T]`,
+  fixed tuples (Rust tuples) and `tuple[T, ...]`, with indexing (negative indices,
+  `IndexError`/`KeyError` as in CPython), slicing, `del`, `in`, `==`/`<`, `+`/`*`, `+=`, set
+  algebra, `dict |`, live `keys()`/`values()`/`items()` views, and the methods `append`,
+  `extend`, `insert`, `pop`, `remove`, `index`, `count`, `sort(reverse=)`, `reverse`, `copy`,
+  `clear`, `get`, `setdefault`, `update`, `popitem`, `add`, `discard`, `union`, ...
+* Element types are inferred from use: `xs = []` then `xs.append(1)` is a `list[int]`; mixed
+  elements give `list[object]` (the list stays native, its elements are Python objects).
+* Strings: indexing, slicing (code points; O(1) for ASCII), and `split`, `rsplit`, `join`,
+  `strip`/`lstrip`/`rstrip`, `replace`, `find`/`rfind`/`index`/`count`, `startswith`/`endswith`,
+  `upper`/`lower`/`title`/`capitalize`/`swapcase`, `is*` predicates, `center`/`ljust`/`rjust`/
+  `zfill`, `partition`, `splitlines`, `removeprefix`/`removesuffix`, `expandtabs`.
+* Builtins over iterables: `len`, `sorted(reverse=)`, `sum`, `min`/`max`, `any`, `all`, `list`,
+  `tuple`, `set`, `dict`, `reversed`, `enumerate`, `zip`, `range(...)` as a value, `repr`,
+  `ascii`, `ord`, `chr`, `divmod`, `round`, `hex`/`oct`/`bin`, and `isinstance(x, int)` on a
+  native value (decided at compile time).
+* Unpacking: `a, b = ...`, nested and starred targets (`first, *rest = xs`), swaps,
+  `for k, v in d.items()`, `with ... as (a, b)`, with CPython's `ValueError` texts.
+* Comprehensions: list, set and dict comprehensions and generator expressions (generators are
+  evaluated eagerly), with nested `for` and `if` clauses; their variables do not leak.
+* Escape rule: a native mutable container that reaches arbitrary Python code (an argument of
+  a CPython call, stored into a Python object) is a Python object from creation, so Python
+  can keep or mutate it with the aliasing CPython has. A short list of read-only consumers
+  (`json.dumps`, `statistics.*`, ...) receives a copy instead.
 * Module-level variables read inside functions, `global x` in functions, `mod.NAME` /
   `mod.NAME = v` on a natively compiled module, and `from mod import NAME` (copied at import,
   as CPython does). Such variables live in typed global cells; reading one before its
@@ -54,6 +79,9 @@ These constructs become plain Rust with no Python objects involved:
 | `int ** negative_int` with a non-literal exponent | float | `NotImplementedError` | M4: union return |
 | negative float `**` fractional power | complex | `NotImplementedError` | out of scope |
 | Traceback body | full frames | last line only | source-map-driven tracebacks |
+| Set iteration / printing order | hash order | insertion order | — (string hashes are randomised in CPython anyway) |
+| Generator expressions | lazy | evaluated eagerly into a list | — |
+| Dict views (`keys()`, ...) | support set operations | iteration, `len`, `in`, printing only | — |
 | `RecursionError` threshold | counts every frame | counts recursive frames only | — |
 | Python object returned into an `int`/`str`/`bool` annotation it doesn't match | annotation ignored | `TypeError` at the unbox | — (deliberate: unboxing must not change the value) |
 
@@ -66,7 +94,7 @@ under `--mode native-only`.
 * `import x` / `from x import y`, where no `x.py`, `x.rs` or `x.c` exists next to the file (P200)
 * Attribute access, method calls, calls of Python objects, keyword arguments (P210)
 * Builtins without a native implementation, e.g. `sorted`, `sum`, `round`, `isinstance`, `repr` (P210/P211)
-* List, dict, tuple and set literals, subscripts and slices, item and attribute assignment (P212)
+* Containers that escape to Python, subscripts/slices of Python objects, attribute assignment (P212)
 * Operators and comparisons involving a Python object (P213), and `for x in <iterable>` (P214)
 * Variables or returns with no single native type (P215: boxed)
 * `with` statements (CPython context-manager protocol, P216), and `except` clauses naming a
@@ -103,5 +131,4 @@ variadic functions, `static` C functions) are listed in `explain`. Calling one g
 
 Not yet supported in either mode: classes defined in natively compiled files (an imported
 `.py` that defines a class falls back to CPython; a class in the entry file is rejected),
-comprehensions, lambdas, closures, `*args`/`**kwargs` parameters, non-literal defaults,
-and tuple unpacking.
+lambdas, closures, `*args`/`**kwargs` parameters, non-literal defaults.

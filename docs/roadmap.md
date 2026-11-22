@@ -32,14 +32,16 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 
 ## Phase 2: Native collections
 
-- [ ] `list[T]` as a shared handle (`Rc<RefCell<Vec<T>>>`), so aliasing matches CPython
-- [ ] `dict[K, V]` (insertion-ordered), `tuple`, `set[T]`
-- [ ] Methods, `len`, `in`, indexing, slicing, iteration
-- [ ] Builtins: `enumerate`, `zip`, `sorted`, `sum`, `reversed`, `list()`, `dict()`
-- [ ] List / dict / set comprehensions (inlined as loops)
-- [ ] Tuple unpacking (`a, b = f()`, `for k, v in d.items()`, starred targets, swaps)
+- [x] `list[T]` as a shared handle (`Rc<RefCell<Vec<T>>>`), so aliasing matches CPython
+- [x] `dict[K, V]` (insertion-ordered, live views), `tuple` (fixed and `tuple[T, ...]`), `set[T]`
+- [x] Methods, `len`, `in`, indexing, slicing, iteration, `del`, operators
+- [x] Builtins: `enumerate`, `zip`, `sorted`, `sum`, `reversed`, `list()`, `dict()`, `min`/`max`, `any`/`all`, `round`, `divmod`, ...
+- [x] Native string indexing, slicing and methods
+- [x] List / dict / set comprehensions and generator expressions (inlined as loops)
+- [x] Tuple unpacking (`a, b = f()`, `for k, v in d.items()`, starred targets, swaps)
+- [x] Escape rule: a collection that reaches Python is a Python object from creation
 - [ ] `*args` / `**kwargs` parameters
-- [ ] Escape rule: a collection that reaches Python is a Python object from creation
+- [ ] Native f-string format specs and `%` / `str.format` for common cases
 
 ## Phase 3: Classes
 
@@ -164,3 +166,35 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
   `global` counter, cross-module reads/writes, from-import copy semantics, a loop variable
   read by a function, `NameError` before assignment. Passes `--mode native-only`.
   `tests/diagnostics/rebinding.py` now covers P141 (P140 for reads is gone).
+
+### Phase 2.1: native collections (2026-11-22)
+
+* Runtime (`crates/runtime/src/coll.rs`): `List<T>` (shared `Rc<RefCell<Vec<T>>>`),
+  `Dict<K, V>` (insertion-ordered table with tombstones; iteration raises CPython's
+  `RuntimeError` if the size changes), `Set<T>`, `Tup<T>` (`tuple[T, ...]`), `Tuple0`, live
+  dict views `Keys`/`Values`/`Items`, and `Never` (element type of a container that never
+  receives one). Traits `PyEq`/`PyOrd` give Python equality and ordering; `PyFmt` prints
+  like CPython. Strings gained native indexing, slicing and ~40 methods (`string.rs`).
+* Types: `Comp::{List, Dict, Set, Tuple, TupleVar, View, Never}`. `native::ty_join` joins
+  element types (`list[int] ⊔ list[str] = list[object]`), so containers are never copied
+  because their element types disagree.
+* Inference widens *places*: `xs.append(1)` widens `xs`; stores through `xs[i] = v`,
+  `d[k] = v`, `d.setdefault(k, []).append(x)` widen the container; assignments of mutable
+  values join both ways (aliases share one Rust type); callees that widen a parameter widen
+  the caller's argument; callers that need a wider return type widen the callee's return
+  floor (`Spec::ret_floor`). Fresh literals are built directly at the expected type.
+* Escape: a mutable native container that flows into arbitrary CPython code is widened to
+  `object` (it is a Python object from creation), so `random.shuffle(xs)` mutates the list
+  every alias sees. Read-only consumers (`native::READ_ONLY_CALLS`, e.g. `json.dumps`) get a
+  copy. Calls whose argument types are not known yet are `Pending`, never misclassified as
+  bridge calls (which would escape the receiver for good).
+* Unpacking lowers to `ExprKind::Unpack` (a fixed tuple with an optional starred list) plus
+  per-target assignments; comprehensions to `ExprKind::Comp`, built in a block expression
+  with renamed (non-leaking) variables.
+* `print(a, b)` evaluates all arguments before `str()` when one is mutable (as CPython).
+* The planner now uses types: a method call, subscript, `for` loop or literal is a boundary
+  only when it touches a Python object; it also computes reachable specializations (only
+  those are emitted) and enables CPython when any reachable type holds `object`.
+* Tests: `tests/differential/containers.py`, `tests/differential/escape.py`. Golden change:
+  `total(xs)` in `annotations.py` is now native `total(list[int])`; diagnostics change: a
+  list passed only to `json.dumps` stays native in native-only mode.
