@@ -28,6 +28,17 @@ pub(crate) fn convert(code: &str, from: Ty, to: Ty) -> String {
             f => format!("Some({})", convert(code, f, x)),
         };
     }
+    if let Some(ms) = to.union_members() {
+        let ur = to.rust();
+        if from.class_id().is_some() {
+            return format!("{ur}::{}({code})", from.rust());
+        }
+        if let Some(fs) = from.union_members() {
+            let fr = from.rust();
+            let arms: Vec<String> = fs.iter().filter(|f| ms.contains(f)).map(|f| format!("{fr}::{0}(x) => {ur}::{0}(x)", f.rust())).collect();
+            return format!("match {code} {{ {} }}", arms.join(", "));
+        }
+    }
     match (from.as_comp(), to.as_comp()) {
         (Some(Comp::List(a)), Some(Comp::List(b))) => {
             format!("rt::List::from_vec({code}.to_vec().into_iter().map(|__e| {}).collect())", convert("__e", a, b))

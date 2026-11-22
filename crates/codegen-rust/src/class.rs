@@ -137,6 +137,37 @@ pub(crate) fn emit_classes(prog: &Program, plan: &Plan, out: &mut String) {
     }
 }
 
+/// An enum for every union of native classes, with delegating trait impls.
+pub(crate) fn emit_unions(prog: &Program, out: &mut String) {
+    for u in Ty::all_unions() {
+        let ms = u.union_members().unwrap();
+        if !ms.iter().all(|m| m.class_id().is_some_and(|c| prog.instantiated.contains(&c) || prog.fields.keys().any(|(k, _)| *k == c))) {
+            continue;
+        }
+        let r = u.rust();
+        let vs: Vec<&str> = ms.iter().map(|m| m.rust()).collect();
+        writeln!(out, "\n/// `{}`\n#[derive(Clone)]\npub enum {r} {{", u.py_name()).unwrap();
+        for v in &vs {
+            writeln!(out, "    {v}({v}),").unwrap();
+        }
+        writeln!(out, "}}\n").unwrap();
+        let arms = |body: &str| vs.iter().map(|v| format!("Self::{v}(x) => {body}")).collect::<Vec<_>>().join(", ");
+        let pair_arms = |body: &str, other: &str| {
+            let mut a: Vec<String> = vs.iter().map(|v| format!("(Self::{v}(a), Self::{v}(b)) => {body}")).collect();
+            a.push(format!("_ => {other}"));
+            a.join(", ")
+        };
+        writeln!(out, "impl Default for {r} {{\n    fn default() -> Self {{\n        Self::{}(Default::default())\n    }}\n}}", vs[0]).unwrap();
+        writeln!(out, "impl {r} {{\n    pub fn is(&self, o: &Self) -> bool {{\n        match (self, o) {{ {} }}\n    }}\n}}", pair_arms("a.is(b)", "false")).unwrap();
+        writeln!(out, "impl rt::conv::PyFmt for {r} {{\n    fn py_repr(&self) -> rt::Str {{\n        match self {{ {} }}\n    }}\n    fn py_str(&self) -> rt::Str {{\n        match self {{ {} }}\n    }}\n}}", arms("rt::conv::repr_of(x)"), arms("rt::conv::str_of(x)")).unwrap();
+        writeln!(out, "impl rt::coll::PyEq for {r} {{\n    fn py_eq(&self, o: &Self) -> bool {{\n        match (self, o) {{ {} }}\n    }}\n}}", pair_arms("rt::coll::PyEq::py_eq(a, b)", "false")).unwrap();
+        writeln!(out, "impl rt::coll::PyOrd for {r} {{\n    fn py_cmp(&self, o: &Self) -> rt::PyResult<std::cmp::Ordering> {{\n        match (self, o) {{ {} }}\n    }}\n}}", pair_arms("rt::coll::PyOrd::py_cmp(a, b)", "Err(rt::Exc::new(\"TypeError\", \"'<' not supported between instances of different classes\"))")).unwrap();
+        writeln!(out, "impl rt::Truthy for {r} {{\n    fn truthy(&self) -> bool {{\n        match self {{ {} }}\n    }}\n}}", arms("rt::Truthy::truthy(x)")).unwrap();
+        writeln!(out, "impl PartialEq for {r} {{\n    fn eq(&self, o: &Self) -> bool {{\n        rt::coll::PyEq::py_eq(self, o)\n    }}\n}}\nimpl Eq for {r} {{}}").unwrap();
+        writeln!(out, "impl std::hash::Hash for {r} {{\n    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {{\n        match self {{ {} }}\n    }}\n}}", arms("std::hash::Hash::hash(x, h)")).unwrap();
+    }
+}
+
 fn dataclass_repr(prog: &Program, c: ClassId, short: &str) -> String {
     let parts: Vec<String> = fields(prog, c)
         .iter()
@@ -222,6 +253,25 @@ impl FnEmitter<'_, '_> {
     /// A method call on a native instance or class object.
     pub(crate) fn method_call(&mut self, e: &Expr, obj: &Expr, func: FuncId, kind: MethodKind, args: &[Expr], kwargs: &[(String, Expr)]) -> String {
         let (o, ot) = self.expr(obj);
+        self.method_call_on(e, o, ot, func, kind, args, kwargs)
+    }
+
+    /// `recv.name(...)` on a union: dispatch per variant.
+    pub(crate) fn union_method(&mut self, e: &Expr, obj: &Expr, name: &str, args: &[Expr], kwargs: &[(String, Expr)], t: Ty) -> String {
+        let (o, ot) = self.expr(obj);
+        let ur = ot.rust();
+        let mut arms = Vec::new();
+        for m in ot.union_members().unwrap() {
+            let c = m.class_id().unwrap();
+            let meth = self.prog.module.find_method(c, name).cloned().unwrap();
+            let rt = self.prog.method_type(self.spec, m, meth.func, meth.kind, args, kwargs).unwrap_or(t);
+            let call = self.method_call_on(e, "__m".into(), m, meth.func, meth.kind, args, kwargs);
+            arms.push(format!("{ur}::{}(__m) => {}", m.rust(), crate::coll::convert(&call, rt, t)));
+        }
+        format!("{{ let __u = {o}; match __u {{ {} }} }}", arms.join(", "))
+    }
+
+    pub(crate) fn method_call_on(&mut self, e: &Expr, o: String, ot: Ty, func: FuncId, kind: MethodKind, args: &[Expr], kwargs: &[(String, Expr)]) -> String {
         if func == usize::MAX {
             // super().__init__(msg) in an exception subclass.
             let (msg, mt) = self.expr(&args[0]);
@@ -250,6 +300,38 @@ impl FnEmitter<'_, '_> {
 
     /// Dunder `name` on a native instance with already-evaluated operands.
     pub(crate) fn dunder(&mut self, recv: (String, Ty), name: &str, others: Vec<(String, Ty)>) -> Option<String> {
+        if let Some(ms) = recv.1.union_members() {
+            if !ms.iter().all(|m| self.prog.module.find_method(m.class_id().unwrap(), name).is_some()) {
+                return None;
+            }
+            // Evaluate the other operands once, then dispatch on the variant.
+            let mut lets = String::new();
+            let mut tmps = Vec::new();
+            for (i, (c, t)) in others.iter().enumerate() {
+                write!(lets, "let __d{i} = {c}; ").unwrap();
+                tmps.push((format!("__d{i}"), *t));
+            }
+            let results: Vec<(String, Ty)> = ms
+                .iter()
+                .map(|m| {
+                    let c = m.class_id().unwrap();
+                    let f = self.prog.module.find_method(c, name).unwrap().func;
+                    let key = SpecKey { func: f, args: std::iter::once(*m).chain(tmps.iter().map(|o| o.1)).collect() };
+                    let s = self.prog.spec(&key);
+                    let rt = s.and_then(|s| match s.ret {
+                        pyfast_infer::Slot::Known(t) => Some(t),
+                        pyfast_infer::Slot::Boxed(..) => Some(Ty::Obj),
+                        _ => None,
+                    });
+                    let args: Vec<String> = std::iter::once("__m".to_string()).chain(tmps.iter().map(|o| if o.1.is_clone() { format!("{}.clone()", o.0) } else { o.0.clone() })).collect();
+                    (format!("{}({})?", s.map(|s| s.mangled.clone()).unwrap_or_default(), args.join(", ")), rt.unwrap_or(Ty::None))
+                })
+                .collect();
+            let joined = results.iter().skip(1).try_fold(results[0].1, |a, r| pyfast_infer::native::ty_join(a, r.1, true)).unwrap_or(Ty::Obj);
+            let ur = recv.1.rust();
+            let arms: Vec<String> = ms.iter().zip(&results).map(|(m, (code, rt))| format!("{ur}::{}(__m) => {}", m.rust(), crate::coll::convert(code, *rt, joined))).collect();
+            return Some(format!("{{ let __u = {}; {lets}match __u {{ {} }} }}", recv.0, arms.join(", ")));
+        }
         let c = recv.1.class_id()?;
         let m = self.prog.module.find_method(c, name)?;
         let key = SpecKey { func: m.func, args: std::iter::once(recv.1).chain(others.iter().map(|o| o.1)).collect() };
@@ -261,6 +343,20 @@ impl FnEmitter<'_, '_> {
     /// `obj.name` on a native instance or class object.
     pub(crate) fn attr(&mut self, obj: &Expr, name: &str, t: Ty) -> String {
         let (o, ot) = self.expr(obj);
+        if let Some(ms) = ot.union_members() {
+            let ur = ot.rust();
+            let mut arms = Vec::new();
+            for m in ms {
+                let mt = self.prog.attr_type(self.spec, m, name).unwrap_or(t);
+                let code = self.attr_code("__m".into(), m, name, mt);
+                arms.push(format!("{ur}::{}(__m) => {}", m.rust(), crate::coll::convert(&code, mt, t)));
+            }
+            return format!("{{ let __u = {o}; match __u {{ {} }} }}", arms.join(", "));
+        }
+        self.attr_code(o, ot, name, t)
+    }
+
+    fn attr_code(&mut self, o: String, ot: Ty, name: &str, t: Ty) -> String {
         let m = self.prog.module;
         let class_var = |c: ClassId| -> Option<(String, Ty)> {
             let owner = m.find_class_var(c, name)?;
@@ -303,6 +399,20 @@ impl FnEmitter<'_, '_> {
     /// `obj.name = value` on a native instance.
     pub(crate) fn set_attr(&mut self, obj: &Expr, name: &str, value: &Expr, ind: &str) -> String {
         let ot = self.ty(obj);
+        if let Some(ms) = ot.union_members() {
+            let (v, vt) = self.expr(value);
+            let o = self.expr(obj).0;
+            let ur = ot.rust();
+            let arms: Vec<String> = ms
+                .iter()
+                .map(|m| {
+                    let c = m.class_id().unwrap();
+                    let ft = self.prog.fields.get(&(c, name.to_string())).and_then(|s| s.known()).unwrap_or(vt);
+                    format!("{ur}::{}(__m) => {{ __m.0.borrow_mut().{} = Some({}); }}", m.rust(), field_ident(name), crate::coll::convert("__v.clone()", vt, ft))
+                })
+                .collect();
+            return format!("{ind}{{\n{ind}    let __v = {v};\n{ind}    match {o} {{ {} }}\n{ind}}}", arms.join(", "));
+        }
         let c = ot.class_id().unwrap();
         let m = self.prog.module;
         let setter = m.mro(c).into_iter().find_map(|k| m.class(k).methods.iter().find(|mm| mm.name == name && mm.kind == MethodKind::Setter).cloned());

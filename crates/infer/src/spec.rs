@@ -471,6 +471,15 @@ pub enum CallClass {
     UserMethod { func: FuncId, kind: MethodKind },
     /// `cls(...)` on a class object value.
     Construct(ClassId),
+    /// A method call on a union of native classes (dispatched per variant).
+    UnionMethod(String),
+    /// `isinstance(u, C)` on a union: decided by the variant at run time.
+    RuntimeIsinstance(Vec<ClassId>),
+}
+
+/// A native instance or a union of them.
+pub fn class_like(t: Ty) -> bool {
+    t.class_id().is_some() || t.union_members().is_some()
 }
 
 /// `x` in `type(x)`.
@@ -484,7 +493,7 @@ pub fn type_call_arg(e: &Expr) -> Option<&Expr> {
 /// Whether a type contains an instance of a native class.
 pub fn has_class(t: Ty) -> bool {
     match t.as_comp() {
-        Some(Comp::Class(..)) => true,
+        Some(Comp::Class(..) | Comp::Union(_)) => true,
         Some(Comp::List(x) | Comp::Set(x) | Comp::Opt(x) | Comp::TupleVar(x)) => has_class(x),
         Some(Comp::Dict(k, v) | Comp::View(_, k, v)) => has_class(k) || has_class(v),
         Some(Comp::Tuple(ts)) => ts.iter().any(|t| has_class(*t)),
@@ -719,7 +728,7 @@ impl Ctx<'_, '_> {
             }
             StmtKind::ForIter { var, iter, body } => {
                 let it = match self.expr(iter) {
-                    Some(t) if t.class_id().is_some() => match self.dunder(iter, t, "__iter__", &[]) {
+                    Some(t) if class_like(t) => match self.dunder(iter, t, "__iter__", &[]) {
                         Some(r) => r,
                         None => {
                             self.report(Diagnostic::error("P301", iter.span, format!("'{t}' object is not iterable")));
@@ -747,6 +756,14 @@ impl Ctx<'_, '_> {
             StmtKind::SetItem { obj, index, value } => self.set_item(obj, index, value),
             StmtKind::SetAttr { obj, value, name } => {
                 if let Some(ot) = self.expr(obj) {
+                    if let Some(ms) = ot.union_members() {
+                        if let Some(vt) = self.expr(value) {
+                            for m in ms {
+                                self.fassigns.push(((m.class_id().unwrap(), name.clone()), vt));
+                            }
+                        }
+                        return true;
+                    }
                     if let Some(c) = ot.class_id() {
                         if let Some(m) = self.prog.module.find_method(c, name).cloned() {
                             if m.kind == MethodKind::Property {
@@ -867,7 +884,7 @@ impl Ctx<'_, '_> {
             self.expr(value);
             return;
         };
-        if ot.class_id().is_some() {
+        if class_like(ot) {
             if self.dunder(obj, ot, "__setitem__", &[index, value]).is_none() {
                 self.report(Diagnostic::error("P301", obj.span, format!("'{ot}' object does not support item assignment")));
             }
@@ -982,6 +999,9 @@ impl Ctx<'_, '_> {
     fn classify(&mut self, func: &Expr, args: &[Expr], kwargs: &[(String, Expr)]) -> CallClass {
         if let ExprKind::GetAttr { obj, name } = &func.kind {
             if let Some(t) = self.expr(obj) {
+                if t.union_members().is_some() {
+                    return CallClass::UnionMethod(name.clone());
+                }
                 let class = t.class_id().or(match t.as_comp() {
                     Some(Comp::Type(c, _)) => Some(c),
                     _ => None,
@@ -1035,6 +1055,13 @@ impl Ctx<'_, '_> {
                         if a[0] == Ty::Obj {
                             return CallClass::Bridge;
                         }
+                        if let Some(ms) = a[0].union_members() {
+                            let hits: Vec<bool> = ms.iter().map(|m| cs.iter().any(|k| self.prog.module.is_subclass(m.class_id().unwrap(), *k))).collect();
+                            if hits.iter().all(|h| *h) || hits.iter().all(|h| !*h) {
+                                return CallClass::StaticBool(hits[0]);
+                            }
+                            return CallClass::RuntimeIsinstance(cs);
+                        }
                         let v = a[0].class_id().is_some_and(|c| cs.iter().any(|k| self.prog.module.is_subclass(c, *k)));
                         return CallClass::StaticBool(v);
                     }
@@ -1065,7 +1092,7 @@ impl Ctx<'_, '_> {
         match op {
             CmpOp::Is | CmpOp::IsNot => {}
             CmpOp::In | CmpOp::NotIn => {
-                if b.class_id().is_some() {
+                if class_like(b) {
                     if self.dunder(e, b, "__contains__", &[ae]).is_none() {
                         self.report(Diagnostic::error("P301", e.span, format!("argument of type '{b}' is not iterable")));
                     }
@@ -1172,6 +1199,24 @@ impl Ctx<'_, '_> {
 
     /// Dunder method `name` on a native instance: `Some(result)` when defined.
     fn dunder(&mut self, e: &Expr, recv: Ty, name: &str, others: &[&Expr]) -> Option<Option<Ty>> {
+        if let Some(ms) = recv.union_members() {
+            if !ms.iter().all(|m| self.prog.module.find_method(m.class_id().unwrap(), name).is_some()) {
+                return None;
+            }
+            let mut out: Option<Ty> = None;
+            for m in ms {
+                let r = self.dunder(e, m, name, others)?;
+                let Some(r) = r else { return Some(None) };
+                out = Some(match out {
+                    None => r,
+                    Some(prev) => match native::ty_join(prev, r, self.boxing()) {
+                        Some(j) => j,
+                        None => return Some(None),
+                    },
+                });
+            }
+            return Some(out);
+        }
         let c = recv.class_id()?;
         let m = self.prog.module.find_method(c, name)?.clone();
         let bound: Vec<Expr> = others.iter().map(|x| (*x).clone()).collect();
@@ -1220,6 +1265,17 @@ impl Ctx<'_, '_> {
 
     /// `obj.name` on a native instance (or a class object).
     fn attr(&mut self, e: &Expr, recv: Ty, name: &str) -> Option<Ty> {
+        if let Some(ms) = recv.union_members() {
+            let mut out: Option<Ty> = None;
+            for mt in ms {
+                let r = self.attr(e, mt, name)?;
+                out = Some(match out {
+                    None => r,
+                    Some(prev) => native::ty_join(prev, r, self.boxing()).or(self.boxing().then_some(Ty::Obj))?,
+                });
+            }
+            return out;
+        }
         let m = self.prog.module;
         if let Some(Comp::Type(c, _)) = recv.as_comp() {
             return match m.find_class_var(c, name) {
@@ -1295,7 +1351,7 @@ impl Ctx<'_, '_> {
                 let l = self.expr(left);
                 let r = self.expr(right);
                 let (l, r) = (l?, r?);
-                if l.class_id().is_some() || r.class_id().is_some() {
+                if class_like(l) || class_like(r) {
                     let n = dunder_name(*op);
                     if let Some(t) = self.dunder(e, l, &format!("__{n}__"), &[right]) {
                         return t;
@@ -1350,7 +1406,7 @@ impl Ctx<'_, '_> {
                 if t.is_never() {
                     return Some(Ty::never());
                 }
-                if t.class_id().is_some() && *op != UnaryOp::Not {
+                if class_like(t) && *op != UnaryOp::Not {
                     let n = match op {
                         UnaryOp::Neg => "__neg__",
                         UnaryOp::Pos => "__pos__",
@@ -1364,7 +1420,7 @@ impl Ctx<'_, '_> {
                         }
                     };
                 }
-                if t.class_id().is_some() {
+                if class_like(t) {
                     // `not obj` uses __bool__/__len__ (requested at construction).
                     return Some(Ty::Bool);
                 }
@@ -1383,7 +1439,7 @@ impl Ctx<'_, '_> {
                 for (op, c) in rest {
                     let r = self.expr(c);
                     if let (Some(a), Some(b)) = (l, r) {
-                        if a.class_id().is_some() || b.class_id().is_some() {
+                        if class_like(a) || class_like(b) {
                             self.compare_classes(c, *op, a, prev, b, c);
                         } else if a == Ty::Obj || b == Ty::Obj {
                             self.escape(prev);
@@ -1489,7 +1545,7 @@ impl Ctx<'_, '_> {
                 if t == Ty::Obj {
                     return Some(Ty::Obj);
                 }
-                if t.class_id().is_some() || matches!(t.as_comp(), Some(Comp::Type(..))) {
+                if class_like(t) || matches!(t.as_comp(), Some(Comp::Type(..))) {
                     return self.attr(e, t, name);
                 }
                 if !t.has_mutable() {
@@ -1635,7 +1691,7 @@ impl Ctx<'_, '_> {
                 if ot.is_never() {
                     return Some(Ty::never());
                 }
-                if ot.class_id().is_some() {
+                if class_like(ot) {
                     return match self.dunder(e, ot, "__getitem__", &[index]) {
                         Some(t) => t,
                         None => {
@@ -1684,7 +1740,7 @@ impl Ctx<'_, '_> {
                 let tys: Option<Vec<Ty>> = tys.into_iter().collect();
                 let tys = tys?;
                 match callee {
-                    Callee::Builtin(b) if tys.first().is_some_and(|t| t.class_id().is_some()) && matches!(b, Builtin::Len | Builtin::Abs | Builtin::Int | Builtin::Float) => {
+                    Callee::Builtin(b) if tys.first().is_some_and(|t| class_like(*t)) && matches!(b, Builtin::Len | Builtin::Abs | Builtin::Int | Builtin::Float) => {
                         let n = match b {
                             Builtin::Len => "__len__",
                             Builtin::Abs => "__abs__",
@@ -1699,7 +1755,7 @@ impl Ctx<'_, '_> {
                             }
                         }
                     }
-                    Callee::Builtin(b @ (Builtin::Str | Builtin::Bool | Builtin::Print | Builtin::PrintKw)) if tys.iter().any(|t| t.class_id().is_some()) => {
+                    Callee::Builtin(b @ (Builtin::Str | Builtin::Bool | Builtin::Print | Builtin::PrintKw)) if tys.iter().any(|t| class_like(*t)) => {
                         Some(if matches!(b, Builtin::Str) { Ty::Str } else if matches!(b, Builtin::Bool) { Ty::Bool } else { Ty::None })
                     }
                     Callee::Builtin(b) => match ops::builtin(*b, &tys, self.boxing()) {
@@ -1757,6 +1813,28 @@ impl Ctx<'_, '_> {
                 self.method_call(e, recv, name, fid, kind, args, kwargs)
             }
             CallClass::Construct(c) => self.new_instance(e, c, args, kwargs),
+            CallClass::RuntimeIsinstance(_) => {
+                self.expr(&args[0])?;
+                Some(Ty::Bool)
+            }
+            CallClass::UnionMethod(name) => {
+                let ExprKind::GetAttr { obj, .. } = &func.kind else { unreachable!() };
+                let recv = self.expr(obj)?;
+                let mut out: Option<Ty> = None;
+                for m in recv.union_members().unwrap() {
+                    let c = m.class_id().unwrap();
+                    let Some(meth) = self.prog.module.find_method(c, &name).cloned() else {
+                        self.report(Diagnostic::error("P301", e.span, format!("'{}' object has no attribute '{name}'", self.prog.module.class(c).name)).note("every class of the union needs the method"));
+                        return None;
+                    };
+                    let r = self.method_call(e, m, &name, meth.func, meth.kind, args, kwargs)?;
+                    out = Some(match out {
+                        None => r,
+                        Some(prev) => native::ty_join(prev, r, self.boxing()).or(self.boxing().then_some(Ty::Obj))?,
+                    });
+                }
+                out
+            }
             CallClass::Pending => {
                 // Evaluate the parts (requests, flows) without deciding yet.
                 for a in args.iter().chain(kwargs.iter().map(|(_, v)| v)) {
@@ -1855,17 +1933,17 @@ impl<'m> Program<'m> {
             ctx.requests = Some(&mut reqs);
             match &st.kind {
                 StmtKind::SetItem { obj, index, value } => {
-                    if self.type_of(spec, obj).is_some_and(|t| t.class_id().is_some()) {
+                    if self.type_of(spec, obj).is_some_and(class_like) {
                         ctx.set_item(obj, index, value);
                     }
                 }
                 StmtKind::ForIter { iter, .. } => {
-                    if let Some(t) = self.type_of(spec, iter).filter(|t| t.class_id().is_some()) {
+                    if let Some(t) = self.type_of(spec, iter).filter(|t| class_like(*t)) {
                         ctx.dunder(iter, t, "__iter__", &[]);
                     }
                 }
                 StmtKind::SetAttr { obj, name, value } => {
-                    if let Some(t) = self.type_of(spec, obj).filter(|t| t.class_id().is_some()) {
+                    if let Some(t) = self.type_of(spec, obj).filter(|t| class_like(*t)) {
                         let mut a = Vec::new();
                         let mut r = Slot::Unknown;
                         let _ = (name, value, t);
@@ -1876,6 +1954,18 @@ impl<'m> Program<'m> {
             }
         }
         reqs.into_iter().map(|(k, _)| k).filter(|k| self.module.funcs[k.func].class.is_some()).collect()
+    }
+
+    /// Type of `recv.name` (a native instance attribute) in `spec`.
+    pub fn attr_type(&self, spec: &Spec, recv: Ty, name: &str) -> Option<Ty> {
+        let mut ctx = self.ctx_for(spec);
+        ctx.attr(&Expr { kind: ExprKind::NoneLit, span: Span::default() }, recv, name)
+    }
+
+    /// Result type of method `name` called on instance type `recv` with these arguments.
+    pub fn method_type(&self, spec: &Spec, recv: Ty, func: FuncId, kind: MethodKind, args: &[Expr], kwargs: &[(String, Expr)]) -> Option<Ty> {
+        let mut ctx = self.ctx_for(spec);
+        ctx.method_call(&Expr { kind: ExprKind::NoneLit, span: Span::default() }, recv, "", func, kind, args, kwargs)
     }
 
     /// Arguments of a call of `func` bound to its parameters (the receiver

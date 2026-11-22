@@ -33,6 +33,11 @@ pub fn ty_join(a: Ty, b: Ty, boxing: bool) -> Option<Ty> {
         return ty_join(a, y, boxing).map(Ty::opt);
     }
     let elem = |x: Ty, y: Ty| ty_join(x, y, boxing).or(boxing.then_some(Ty::Obj));
+    // Instances of different native classes: a closed union (a Rust enum).
+    let classy = |t: Ty| t.class_id().is_some() || t.union_members().is_some();
+    if classy(a) && classy(b) {
+        return Some(Ty::union(vec![a, b]));
+    }
     match (a.as_comp()?, b.as_comp()?) {
         (Comp::List(x), Comp::List(y)) => Some(Ty::list(elem(x, y)?)),
         (Comp::Set(x), Comp::Set(y)) => {

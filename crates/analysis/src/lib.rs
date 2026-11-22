@@ -333,7 +333,7 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
             };
             push("P210", e.span, format!("{}(...)", name_of(func)), reason);
         }
-        ExprKind::GetAttr { name, obj } if ty(obj) == Some(Ty::Obj) || ty(obj).is_some_and(|t| t.class_id().is_none() && !matches!(t.as_comp(), Some(Comp::Type(..)))) => {
+        ExprKind::GetAttr { name, obj } if ty(obj) == Some(Ty::Obj) || ty(obj).is_some_and(|t| !pyfast_infer::spec::class_like(t) && !matches!(t.as_comp(), Some(Comp::Type(..)))) => {
             push("P210", e.span, format!("attribute `.{name}`"), "dynamic receiver: CPython attribute lookup")
         }
         ExprKind::List(_) if ty(e) == Some(Ty::Obj) => push("P212", e.span, "list literal".into(), "kept as a Python list"),

@@ -50,7 +50,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] `@dataclass` (fields, literal defaults, `field(default_factory=list/dict/set)`, `__post_init__`, repr, ==)
 - [x] Single inheritance, method overriding, `super()`, `isinstance` with native classes
 - [x] User-defined exception classes (raise, `except MyError as e` with attributes, hierarchy matching)
-- [ ] Dynamic classes (metaclasses, `__getattr__`, `setattr`) fall back to CPython
+- [x] Polymorphism: instances of different classes in one place form a closed union (a Rust enum) with per-variant dispatch
+- [x] Dynamic classes (metaclasses, Python base classes) in an imported module fall back to CPython with the module (P220); in the entry file they are rejected with a diagnostic
 
 ## Phase 4: Closures and callbacks
 
@@ -271,3 +272,15 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
   specialization's types decide is dead (`if False`, `x is None` with `x: None`), so dead
   branches no longer add boundaries or link libpython.
 * Test: `tests/differential/classes2.py` (passes `--mode native-only`).
+
+### Phase 3.3: polymorphism (2026-11-22)
+
+* Joining two native class types gives a closed union `Comp::Union` (`Rect | Circle`),
+  emitted as `enum U_Rect_Circle { Rect(Rect), Circle(Circle) }` with delegating `PyFmt`,
+  `PyEq`, `PyOrd`, `Truthy`, `Hash` impls. A list of mixed shapes is a native
+  `list[Rect | Circle]`.
+* Attribute reads, method calls, dunders and attribute writes on a union `match` on the
+  variant and call that class's own specialization; results are joined. `isinstance(u, C)`
+  is decided statically when all variants agree, else by a `matches!` on the variant.
+* Classes stay closed over the program: a union never holds a Python object.
+* Test: `tests/differential/polymorphism.py` (passes `--mode native-only`).

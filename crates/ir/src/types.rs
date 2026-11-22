@@ -61,6 +61,8 @@ pub enum Comp {
     View(ViewKind, Ty, Ty),
     /// A native class object itself (`cls` in a classmethod, `Point` as a value).
     Type(ClassId, &'static str),
+    /// A closed union of native class instances (`Square | Circle`), a Rust enum.
+    Union(Vec<Ty>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -124,6 +126,7 @@ impl Ty {
             ),
             Comp::Class(_, rust) => (rust.to_string(), rust.to_string(), rust.to_string()),
             Comp::Type(_, rust) => (format!("type[{rust}]"), "()".to_string(), format!("type_{rust}")),
+            Comp::Union(ts) => (join(ts, Ty::py_name, " | "), format!("U_{}", join(ts, Ty::rust, "_")), format!("u_{}", join(ts, Ty::mangle, "_"))),
             Comp::Func(ps, r) => (
                 format!("Callable[[{}], {}]", join(ps, Ty::py_name, ", "), r.py_name()),
                 format!("rt::Func<({}), {}>", ps.iter().map(|p| format!("{},", p.rust())).collect::<String>(), r.rust()),
@@ -168,6 +171,36 @@ impl Ty {
         Ty::comp(Comp::Tuple(items))
     }
 
+    /// A union of native class instance types (flattened, sorted, deduplicated).
+    pub fn union(ts: Vec<Ty>) -> Ty {
+        let mut all: Vec<Ty> = Vec::new();
+        for t in ts {
+            match t.as_comp() {
+                Some(Comp::Union(inner)) => all.extend(inner),
+                _ => all.push(t),
+            }
+        }
+        all.sort_by_key(|t| t.class_id());
+        all.dedup();
+        if all.len() == 1 {
+            return all[0];
+        }
+        Ty::comp(Comp::Union(all))
+    }
+
+    pub fn union_members(self) -> Option<Vec<Ty>> {
+        match self.as_comp() {
+            Some(Comp::Union(ts)) => Some(ts),
+            _ => None,
+        }
+    }
+
+    /// Every union type created so far (codegen emits an enum for each).
+    pub fn all_unions() -> Vec<Ty> {
+        let i = interner().lock().unwrap();
+        i.entries.iter().enumerate().filter(|(_, e)| matches!(e.comp, Comp::Union(_))).map(|(k, _)| Ty::C(TyId(k as u32))).collect()
+    }
+
     pub fn never() -> Ty {
         Ty::comp(Comp::Never)
     }
@@ -203,7 +236,7 @@ impl Ty {
             Some(Comp::List(_) | Comp::Dict(..) | Comp::Set(_) | Comp::Class(..)) => true,
             Some(Comp::Tuple(ts)) => ts.iter().any(|t| t.has_mutable()),
             Some(Comp::TupleVar(t) | Comp::Opt(t)) => t.has_mutable(),
-            Some(Comp::View(..)) => true,
+            Some(Comp::View(..) | Comp::Union(_)) => true,
             _ => false,
         }
     }
@@ -216,6 +249,7 @@ impl Ty {
                 Some(Comp::Tuple(ts)) => ts.iter().all(|t| t.is_hashable()),
                 Some(Comp::TupleVar(t) | Comp::Opt(t)) => t.is_hashable(),
                 Some(Comp::Never) => true,
+                Some(Comp::Class(..) | Comp::Union(_)) => true, // identity (or __hash__)
                 _ => false,
             },
             _ => false,
@@ -317,7 +351,7 @@ impl Ty {
 
     /// Mutable, identity-carrying values (Python aliasing must be preserved).
     pub fn is_mutable(self) -> bool {
-        matches!(self.as_comp(), Some(Comp::List(_) | Comp::Dict(..) | Comp::Set(_) | Comp::Class(..)))
+        matches!(self.as_comp(), Some(Comp::List(_) | Comp::Dict(..) | Comp::Set(_) | Comp::Class(..) | Comp::Union(_)))
     }
 
     fn entry<R>(self, f: impl FnOnce(&Entry) -> R) -> R {
