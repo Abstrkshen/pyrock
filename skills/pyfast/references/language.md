@@ -20,7 +20,8 @@
   `return`, augmented assignment, chained assignment (`a = b = 0`).
 * Builtins: `print(*args)`, `abs`, `int`, `float`, `str`, `bool`, `len(str)`, and
   `min`/`max` with 2+ arguments of compatible types.
-* f-strings: `{expr}` is native. Format specs (`{x:.3f}`, `{x!r}`) use CPython's `format`.
+* f-strings with format specs, `%` formatting and `str.format` are native.
+* `*args` / `**kwargs` parameters; `f(*xs, **kw)` for Python callables and `print(*xs)`.
 * `if __name__ == "__main__":` works, and `__file__`.
 * `try`/`except`/`else`/`finally`, `except (A, B) as e`, bare `except:` and `raise`,
   `raise E(msg)`, `assert`. `except` follows CPython's exception hierarchy; exceptions from
@@ -70,7 +71,6 @@ values (mixed types). These keep exact Python semantics, including aliasing.
 | `class` in the entry file | Move it into a separate `.py` module (it falls back to CPython, with P220), or use functions plus separate values |
 | `yield` generators | Build and return a list |
 | `lambda`, nested `def`, closures | A top-level function |
-| `*args`, `**kwargs` parameters | Pass a list or explicit parameters |
 | Non-literal default (`def f(x=[])`) | `def f(x=None): if x is None: x = []` |
 | `nonlocal` | Return the new value (closures are phase 4) |
 | decorators | Call the wrapper explicitly |

@@ -450,7 +450,7 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr), skip_callee: bool) {
             walk_expr(orelse, f, skip_callee);
         }
         ExprKind::Slice { lo, hi, step } => [lo, hi, step].into_iter().flatten().for_each(|a| walk_expr(a, f, skip_callee)),
-        ExprKind::Unpack { value, .. } => walk_expr(value, f, skip_callee),
+        ExprKind::Unpack { value, .. } | ExprKind::Starred(value) => walk_expr(value, f, skip_callee),
         ExprKind::Comp { elt, val, gens, .. } => {
             for g in gens {
                 walk_expr(&g.iter, f, skip_callee);

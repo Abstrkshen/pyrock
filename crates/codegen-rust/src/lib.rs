@@ -985,6 +985,34 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 let (b, bt) = self.expr(orelse);
                 format!("(if {} {{ {} }} else {{ {} }})", truthy(&c, ct), coerce(a, at, t), coerce(b, bt, t))
             }
+            ExprKind::Call { callee: Callee::Builtin(b @ (Builtin::Print | Builtin::PrintKw)), args, .. } if args.iter().any(|a| matches!(a.kind, ExprKind::Starred(_))) => {
+                // print(*items): strings collected at run time.
+                let n_items = if *b == Builtin::PrintKw { args.len() - 3 } else { args.len() };
+                let mut code = String::from("{ let mut __p: Vec<rt::Str> = Vec::new(); ");
+                for a in &args[..n_items] {
+                    match &a.kind {
+                        ExprKind::Starred(inner) => {
+                            let (c, t) = self.expr(inner);
+                            let el = pyfast_infer::native::iter_elem(t).unwrap_or(Ty::Obj);
+                            write!(code, "for __e in {} {{ __p.push({}); }} ", coll::iter_vec(&c, t), to_str("__e", el)).unwrap();
+                        }
+                        _ => {
+                            let (c, t) = self.expr(a);
+                            write!(code, "__p.push({}); ", to_str(&c, t)).unwrap();
+                        }
+                    }
+                }
+                if *b == Builtin::PrintKw {
+                    let n = args.len();
+                    let (s, st) = self.expr(&args[n - 3]);
+                    let (en, et) = self.expr(&args[n - 2]);
+                    let (fl, ft) = self.expr(&args[n - 1]);
+                    write!(code, "rt::io::print_kw(&__p, &{}, &{}, {}) }}", to_str(&s, st), to_str(&en, et), truthy(&fl, ft)).unwrap();
+                } else {
+                    code.push_str("rt::print(&__p) }");
+                }
+                code
+            }
             ExprKind::Call { callee, args, order } => {
                 let vals: Vec<(String, Ty)> = args.iter().map(|a| self.expr(a)).collect();
                 match callee {
@@ -1056,6 +1084,32 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     CallClass::Bridge | CallClass::Pending => unreachable!(),
                 }
             }
+            ExprKind::CallObj { func, args, kwargs } if args.iter().any(|a| matches!(a.kind, ExprKind::Starred(_))) || kwargs.iter().any(|(k, _)| k == "**") => {
+                let f = self.obj(func);
+                let mut code = String::from("{ let mut __a: Vec<rt::py::Obj> = Vec::new(); let mut __k: Vec<(String, rt::py::Obj)> = Vec::new(); ");
+                for a in args {
+                    match &a.kind {
+                        ExprKind::Starred(inner) => {
+                            let o = self.obj(inner);
+                            write!(code, "__a.extend(rt::py::to_vec(&{})?); ", borrow(&o)).unwrap();
+                        }
+                        _ => {
+                            let o = self.obj(a);
+                            write!(code, "__a.push({o}); ").unwrap();
+                        }
+                    }
+                }
+                for (k, v) in kwargs {
+                    let o = self.obj(v);
+                    if k == "**" {
+                        write!(code, "__k.extend(rt::py::kw_items(&{})?); ", borrow(&o)).unwrap();
+                    } else {
+                        write!(code, "__k.push(({k:?}.to_string(), {o})); ").unwrap();
+                    }
+                }
+                write!(code, "rt::py::call_dyn(&{}, __a, __k)? }}", borrow(&f)).unwrap();
+                code
+            }
             ExprKind::CallObj { func, args, kwargs } => {
                 let f = self.obj(func);
                 let a: Vec<String> = args.iter().map(|x| self.obj(x)).collect();
@@ -1064,6 +1118,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             }
             ExprKind::List(_) | ExprKind::Tuple(_) | ExprKind::Dict(_) | ExprKind::Set(_) => self.literal(e, t),
             ExprKind::Unpack { value, n, star } => self.unpack(value, *n, *star, t),
+            ExprKind::Starred(inner) => self.expr(inner).0,
             ExprKind::Comp { kind, elt, val, gens } => self.comp(*kind, elt, val.as_deref(), gens, t),
             ExprKind::Slice { lo, hi, step } => {
                 let part = |me: &mut Self, x: &Option<Box<Expr>>| match x {
@@ -1126,6 +1181,22 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
 
     fn binop(&mut self, op: BinOp, l: &str, lt: Ty, r: &str, rt: Ty, t: Ty) -> String {
         use BinOp::*;
+        if op == Mod && lt == Ty::Str && t == Ty::Str {
+            // printf-style formatting: a tuple supplies the arguments, anything else is one.
+            let args = match rt.tuple_items() {
+                Some(ts) => {
+                    let parts: Vec<String> = ts.iter().enumerate().map(|(i, x)| coll::to_arg(&format!("__a.{i}"), *x)).collect();
+                    return format!("{{ let __a = {r}; rt::fmt::percent(&{}, &[{}])? }}", borrow(l), parts.join(", "));
+                }
+                None => match rt.as_comp() {
+                    Some(Comp::TupleVar(e)) => {
+                        return format!("rt::fmt::percent(&{}, &{}.to_vec().into_iter().map(|__x| {}).collect::<Vec<_>>())?", borrow(l), r, coll::to_arg("__x", e));
+                    }
+                    _ => coll::to_arg(r, rt),
+                },
+            };
+            return format!("rt::fmt::percent(&{}, &[{args}])?", borrow(l));
+        }
         match t {
             Ty::Str => match (lt, rt) {
                 (Ty::Str, Ty::Str) => format!("rt::string::concat(&{}, &{})", borrow(l), borrow(r)),

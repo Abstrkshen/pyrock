@@ -891,6 +891,14 @@ impl Ctx<'_, '_> {
                 if l.is_never() || r.is_never() {
                     return Some(Ty::never());
                 }
+                if *op == BinOp::Mod && ops::base(l) == Ty::Str {
+                    // printf-style formatting; a dict right operand (`%(name)s`) uses CPython.
+                    if r == Ty::Obj || r.dict_kv().is_some() {
+                        self.escape(right);
+                        return Some(Ty::Obj);
+                    }
+                    return Some(Ty::Str);
+                }
                 if l == Ty::Obj || r == Ty::Obj {
                     self.escape(left);
                     self.escape(right);
@@ -1085,6 +1093,14 @@ impl Ctx<'_, '_> {
                     self.expr(p)?;
                 }
                 Some(Ty::Obj)
+            }
+            ExprKind::Starred(inner) => {
+                let t = self.expr(inner)?;
+                if native::iter_elem(t).is_none() && t.dict_kv().is_none() {
+                    self.report(Diagnostic::error("P301", e.span, format!("argument after * must be an iterable, not {t}")).note("CPython would raise TypeError here"));
+                    return None;
+                }
+                Some(t)
             }
             ExprKind::Unpack { value, n, star } => {
                 let vt = self.expr(value)?;

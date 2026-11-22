@@ -13,6 +13,7 @@ pub mod conv;
 pub mod exc;
 pub mod ext;
 pub mod float;
+pub mod fmt;
 pub mod int;
 pub mod io;
 #[cfg(feature = "python")]

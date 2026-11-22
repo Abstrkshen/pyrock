@@ -40,8 +40,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] List / dict / set comprehensions and generator expressions (inlined as loops)
 - [x] Tuple unpacking (`a, b = f()`, `for k, v in d.items()`, starred targets, swaps)
 - [x] Escape rule: a collection that reaches Python is a Python object from creation
-- [ ] `*args` / `**kwargs` parameters
-- [ ] Native f-string format specs and `%` / `str.format` for common cases
+- [x] `*args` / `**kwargs` parameters, star-calls of Python callables and `print(*xs)`
+- [x] Native f-string format specs, `%` formatting and `str.format`
 
 ## Phase 3: Classes
 
@@ -56,6 +56,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [ ] Lambdas, nested functions, captured variables, `nonlocal`
 - [ ] Functions as values (`Fn` type), passing native functions to native functions
 - [ ] Native functions callable from Python (callbacks, decorators such as `@app.get`)
+- [ ] `f(*args, **kwargs)` forwarding into a native function's fixed parameters (wrappers)
 
 ## Phase 5: Rich Rust and C interop
 
@@ -208,3 +209,19 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
   process startup: CPython 160 ms, native 65 ms (2.5x). The sieve half alone is 4.8x; the
   word-count half is 1.1x (dominated by allocating 300k small strings in `split`/`join`,
   which CPython's C string routines are already good at).
+
+### Phase 2.3: formatting and variadic parameters (2026-11-22)
+
+* `crates/runtime/src/fmt.rs`: the format-spec mini-language (`format`), printf-style `%`
+  (`percent`) and `str.format` (`format_method`, including `{0!r}`, keyword fields, nested
+  `{x:{w}}` and CPython's automatic/manual numbering error). Values pass as `rt::fmt::Arg`
+  (`Int`/`Float`/`Bool`/`Str`/`Other`/`Py`); Python objects format through CPython.
+* f-string specs and `!r` were already lowered to `format(...)`/`repr(...)` calls; those
+  builtins are now native, so f-strings no longer cross into CPython.
+* `def f(*args, **kwargs)`: the frontend packs extra positional arguments into
+  `tuple(list)` (→ `tuple[T, ...]`) and extra keywords into `dict(**kw)` (→ `dict[str, V]`)
+  at the call. `f(a, *xs)` can fill `*args`. `ExprKind::Starred` (and a `**` kwarg name)
+  supports `f(*xs, **d)` on Python callables (`rt::py::call_dyn`) and `print(*xs)`.
+* An empty `*args` is `tuple[Never, ...]`; consumers that need a concrete element type
+  (`str.join`, `sum`) get an empty vector of that type (`iter_vec_as`).
+* Tests: `tests/differential/formatting.py`, `tests/differential/varargs.py`.

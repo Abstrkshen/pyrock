@@ -181,7 +181,7 @@ impl Ty {
             Comp::View(ViewKind::Values, _, v) => Some(v),
             Comp::View(ViewKind::Items, k, v) => Some(Ty::tuple(vec![k, v])),
             Comp::Tuple(ts) => {
-                let first = *ts.first()?;
+                let Some(&first) = ts.first() else { return Some(Ty::never()) };
                 ts.iter().all(|t| *t == first).then_some(first)
             }
             _ => None,

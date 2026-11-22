@@ -681,3 +681,40 @@ macro_rules! view_to_py {
 view_to_py!(Keys);
 view_to_py!(Values);
 view_to_py!(Items);
+
+/// `format(obj, spec)` through CPython.
+pub fn format(o: &Obj, spec: &str) -> PyResult<Str> {
+    with(|py| {
+        let r = py.import("builtins")?.getattr("format")?.call1((o.bind(py), spec))?;
+        Ok(Str::from(r.extract::<String>()?))
+    })
+}
+
+/// `f(*args, **kwargs)` with keyword names known only at run time.
+pub fn call_dyn(f: &Obj, args: Vec<Obj>, kwargs: Vec<(String, Obj)>) -> PyResult<Obj> {
+    with(|py| {
+        let args = PyTuple::new(py, args.into_iter().map(|a| a.0))?;
+        let kw = PyDict::new(py);
+        for (k, v) in kwargs {
+            if kw.contains(&k)? {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!("got multiple values for keyword argument '{k}'")));
+            }
+            kw.set_item(k, v.0)?;
+        }
+        f.bind(py).call(args, Some(&kw)).map(own)
+    })
+}
+
+/// The items of a `**mapping` argument.
+pub fn kw_items(o: &Obj) -> PyResult<Vec<(String, Obj)>> {
+    with(|py| {
+        let b = o.bind(py);
+        let mut out = Vec::new();
+        for k in b.call_method0("keys")?.try_iter()? {
+            let k = k?;
+            let v = b.get_item(&k)?;
+            out.push((k.extract::<String>()?, own(v)));
+        }
+        Ok(out)
+    })
+}

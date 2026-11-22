@@ -211,7 +211,7 @@ pub fn method(recv: Ty, name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing
             }
         };
     }
-    if !kwargs.is_empty() && !(matches!(name, "sort" | "split" | "rsplit" | "splitlines" | "get" | "pop" | "replace")) {
+    if !kwargs.is_empty() && !(matches!(name, "sort" | "split" | "rsplit" | "splitlines" | "get" | "pop" | "replace" | "format")) {
         return err(format!("{name}() takes no keyword arguments natively"));
     }
     let elem_join = |e: Ty, t: Ty| ty_join(e, t, boxing).or(boxing.then_some(Ty::Obj));
@@ -287,8 +287,9 @@ pub fn method(recv: Ty, name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing
                 check!(arity(1, 1));
                 m(Ty::tuple(vec![Ty::Str, Ty::Str, Ty::Str]))
             }
-            // str.format and friends keep CPython's implementation.
-            "format" | "format_map" | "encode" | "translate" | "maketrans" => None,
+            "format" => m(Ty::Str),
+            // These keep CPython's implementation.
+            "format_map" | "encode" | "translate" | "maketrans" => None,
             _ => no_attr(),
         };
     }
@@ -480,7 +481,7 @@ pub fn method(recv: Ty, name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing
 /// A CPython builtin called with native arguments. `None`: not native.
 pub fn builtin(name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing: bool) -> Option<Result<Ty, String>> {
     let n = args.len();
-    if args.contains(&Ty::Obj) {
+    if args.contains(&Ty::Obj) && name != "format" {
         return None;
     }
     let only_kw = |allowed: &[&str]| kwargs.iter().all(|(k, _)| allowed.contains(&k.as_str()));
@@ -557,6 +558,12 @@ pub fn builtin(name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing: bool) -
             Some(if args.iter().all(|a| int_like(base(*a))) { Ok(Ty::list(Ty::Int)) } else { Err("'float' object cannot be interpreted as an integer".into()) })
         }
         "repr" | "ascii" if n == 1 && kwargs.is_empty() => Some(Ok(Ty::Str)),
+        "format" if (1..=2).contains(&n) && kwargs.is_empty() => {
+            if n == 2 && base(args[1]) != Ty::Str {
+                return Some(Err(format!("format() argument 2 must be str, not {}", args[1])));
+            }
+            Some(Ok(Ty::Str))
+        }
         "ord" if n == 1 && kwargs.is_empty() => Some(if args[0] == Ty::Str { Ok(Ty::Int) } else { Err(format!("ord() expected string of length 1, but {} found", args[0])) }),
         "chr" if n == 1 && kwargs.is_empty() => Some(if int_like(base(args[0])) { Ok(Ty::Str) } else { Err(format!("'{}' object cannot be interpreted as an integer", args[0])) }),
         "divmod" if n == 2 && kwargs.is_empty() => {

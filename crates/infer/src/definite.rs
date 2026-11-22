@@ -174,7 +174,7 @@ fn expr(e: &Expr, cur: &Set, out: &mut HashSet<String>) {
         }
         ExprKind::NewExc { args, .. } | ExprKind::Set(args) => args.iter().for_each(|a| expr(a, cur, out)),
         ExprKind::Slice { lo, hi, step } => [lo, hi, step].into_iter().flatten().for_each(|a| expr(a, cur, out)),
-        ExprKind::Unpack { value, .. } => expr(value, cur, out),
+        ExprKind::Unpack { value, .. } | ExprKind::Starred(value) => expr(value, cur, out),
         ExprKind::Comp { elt, val, gens, .. } => {
             let mut inner = cur.clone();
             for g in gens {

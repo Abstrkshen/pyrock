@@ -112,6 +112,9 @@ struct Sig {
     n_pos: usize,
     /// Literal default per parameter (as AST JSON).
     defaults: Vec<Option<Value>>,
+    /// `*args` / `**kwargs` parameter names (after `names` in `Function::params`).
+    vararg: Option<String>,
+    kwarg: Option<String>,
 }
 
 /// All parameter nodes of a `def`, in signature order, with the signature.
@@ -133,7 +136,9 @@ fn signature(a: &Value) -> (Vec<&Value>, Sig) {
         }
     }
     let names = params.iter().map(|p| sstr(p, "arg").to_string()).collect();
-    (params, Sig { names, n_posonly: posonly.len(), n_pos, defaults })
+    let vararg = a["vararg"].get("arg").and_then(|v| v.as_str()).map(String::from);
+    let kwarg = a["kwarg"].get("arg").and_then(|v| v.as_str()).map(String::from);
+    (params, Sig { names, n_posonly: posonly.len(), n_pos, defaults, vararg, kwarg })
 }
 
 /// Defaults are evaluated once, at `def` time, in CPython. pyfast inlines
@@ -455,7 +460,8 @@ impl<'l> Lowerer<'l> {
                 }
                 let id = self.ld.alloc_func();
                 let (params, sig) = signature(&st["args"]);
-                let anns = params.iter().map(|p| parse_ann(&p["annotation"])).collect();
+                let mut anns: Vec<Option<Ty>> = params.iter().map(|p| parse_ann(&p["annotation"])).collect();
+                anns.extend(sig.vararg.iter().chain(&sig.kwarg).map(|_| None));
                 self.ld.func_anns.insert(id, (anns, parse_ann(&st["returns"])));
                 self.ld.func_sigs.insert(id, sig);
                 self.func_ids.insert(name.clone(), (id, sp));
@@ -484,7 +490,10 @@ impl<'l> Lowerer<'l> {
         // read `mod.NAME`.
         let mut g: HashSet<String> = HashSet::new();
         for st in body.iter().filter(|st| ty(st) == "FunctionDef") {
-            let mut fl = signature(&st["args"]).1.names;
+            let sig = signature(&st["args"]).1;
+            let mut fl = sig.names;
+            fl.extend(sig.vararg);
+            fl.extend(sig.kwarg);
             collect_bindings(arr(st, "body"), &mut fl, false);
             let mut decl = HashSet::new();
             global_decls(arr(st, "body"), &mut decl);
@@ -753,9 +762,6 @@ impl<'l> Lowerer<'l> {
         if !arr(st, "decorator_list").is_empty() {
             self.err("P101", sp, format!("decorators on `{name}` are not supported yet"));
         }
-        if !a["vararg"].is_null() || !a["kwarg"].is_null() {
-            self.err("P101", sp, format!("`{name}`: `*args` / `**kwargs` parameters are not supported yet"));
-        }
         let (_, sig) = signature(a);
         for (n, d) in sig.names.iter().zip(&sig.defaults) {
             if let Some(d) = d {
@@ -768,7 +774,9 @@ impl<'l> Lowerer<'l> {
                 }
             }
         }
-        let params: Vec<String> = sig.names.clone();
+        let mut params: Vec<String> = sig.names.clone();
+        params.extend(sig.vararg.clone());
+        params.extend(sig.kwarg.clone());
         let mut decl = HashSet::new();
         global_decls(arr(st, "body"), &mut decl);
         let mut locals = params.clone();
@@ -1513,15 +1521,21 @@ impl<'l> Lowerer<'l> {
     fn lower_call(&mut self, e: &Value) -> Option<Expr> {
         let sp = self.span(e);
         let f = &e["func"];
-        if arr(e, "args").iter().any(|a| ty(a) == "Starred") || arr(e, "keywords").iter().any(|k| k["arg"].is_null()) {
-            self.unsupported(sp, "`*args` / `**kwargs` call", "pass arguments explicitly");
-            return None;
+        let mut args = Vec::new();
+        for a in arr(e, "args") {
+            if ty(a) == "Starred" {
+                let asp = self.span(a);
+                args.push(Expr { kind: ExprKind::Starred(Box::new(self.lower_expr(&a["value"])?)), span: asp });
+            } else {
+                args.push(self.lower_expr(a)?);
+            }
         }
-        let args = self.lower_exprs(arr(e, "args"))?;
         let mut kwargs = Vec::new();
         for k in arr(e, "keywords") {
-            kwargs.push((sstr(k, "arg").to_string(), self.lower_expr(&k["value"])?));
+            let name = k["arg"].as_str().unwrap_or("**").to_string();
+            kwargs.push((name, self.lower_expr(&k["value"])?));
         }
+        let starred = args.iter().any(|a| matches!(a.kind, ExprKind::Starred(_))) || kwargs.iter().any(|(k, _)| k == "**");
         let native_only = |me: &mut Self, what: &str| -> Option<()> {
             if !kwargs_is_empty(&kwargs) {
                 me.unsupported(sp, &format!("keyword arguments to {what}"), "natively compiled functions take positional arguments only");
@@ -1549,6 +1563,10 @@ impl<'l> Lowerer<'l> {
                 }
                 Some(Binding::ExternFn(ext, func)) => {
                     native_only(self, &format!("`{id}`"))?;
+                    if starred {
+                        self.unsupported(sp, &format!("`*`/`**` arguments to the Rust/C function `{id}`"), "pass arguments explicitly");
+                        return None;
+                    }
                     return Some(Expr { kind: ExprKind::ExternCall { ext, func, args }, span: sp });
                 }
                 Some(Binding::Unit(_) | Binding::Extern(_)) => {
@@ -1557,11 +1575,11 @@ impl<'l> Lowerer<'l> {
                 }
                 Some(Binding::Slot(_)) | None => {}
             }
-            if self.builtin_exc(id) && kwargs.is_empty() && args.len() <= 1 {
+            if self.builtin_exc(id) && kwargs.is_empty() && args.len() <= 1 && !starred {
                 return Some(Expr { kind: ExprKind::NewExc { kind: id.to_string(), args }, span: sp });
             }
             if !self.bindings.contains_key(id) && !self.module_vars.contains(id) {
-                if let Some(b) = Builtin::from_name(id) {
+                if let Some(b) = Builtin::from_name(id).filter(|b| !starred || *b == Builtin::Print) {
                     if kwargs.is_empty() {
                         return Some(Expr { kind: ExprKind::Call { callee: Callee::Builtin(b), args, order: vec![] }, span: sp });
                     }
@@ -1606,6 +1624,10 @@ impl<'l> Lowerer<'l> {
                             return None;
                         }
                         native_only(self, &format!("`{modname}.{attr}`"))?;
+                        if starred {
+                            self.unsupported(sp, &format!("`*`/`**` arguments to the Rust/C function `{modname}.{attr}`"), "pass arguments explicitly");
+                            return None;
+                        }
                         return match self.ld.externs[ext].funcs.iter().position(|x| x.name == attr) {
                             Some(func) => Some(Expr { kind: ExprKind::ExternCall { ext, func, args }, span: sp }),
                             None => {
@@ -1630,16 +1652,37 @@ impl<'l> Lowerer<'l> {
     fn bind_args(&mut self, fid: FuncId, name: &str, args: Vec<Expr>, kwargs: Vec<(String, Expr)>, sp: Span) -> Option<(Vec<Expr>, Vec<usize>)> {
         let sig = self.ld.func_sigs.get(&fid).cloned().unwrap_or_default();
         let mut slots: Vec<Option<(Expr, usize)>> = vec![None; sig.names.len()];
+        if kwargs.iter().any(|(k, _)| k == "**") {
+            self.unsupported(sp, &format!("`**mapping` in a call of the native function `{name}`"), "pass keyword arguments explicitly");
+            return None;
+        }
+        // A `*iterable` argument can only fill `*args` (its length is not known statically).
+        let first_star = args.iter().position(|a| matches!(a.kind, ExprKind::Starred(_)));
+        if let Some(fs) = first_star {
+            if sig.vararg.is_none() || fs < sig.n_pos {
+                self.unsupported(sp, &format!("`*iterable` argument to `{name}`"), "a native function's fixed parameters need explicit arguments; `*xs` can only fill a `*args` parameter");
+                return None;
+            }
+        }
         let npos = args.len();
-        if npos > sig.n_pos {
+        if npos > sig.n_pos && sig.vararg.is_none() {
             self.err("P303", sp, format!("{name}() takes {} positional argument(s) but {npos} were given", sig.n_pos));
             return None;
         }
+        let mut args = args;
+        let extras: Vec<Expr> = if npos > sig.n_pos { args.split_off(sig.n_pos) } else { vec![] };
         for (i, a) in args.into_iter().enumerate() {
             slots[i] = Some((a, i));
         }
+        let mut kw_extra: Vec<(String, Expr)> = Vec::new();
+        let mut kw_extra_at = None;
         for (k, (kw, v)) in kwargs.into_iter().enumerate() {
             let Some(idx) = sig.names.iter().position(|n| *n == kw).filter(|&i| i >= sig.n_posonly) else {
+                if sig.kwarg.is_some() {
+                    kw_extra_at.get_or_insert(npos + k);
+                    kw_extra.push((kw, v));
+                    continue;
+                }
                 self.err("P303", sp, format!("{name}() got an unexpected keyword argument '{kw}'"));
                 return None;
             };
@@ -1671,6 +1714,45 @@ impl<'l> Lowerer<'l> {
             self.err("P303", sp, format!("{name}() missing {} required argument(s): {}", missing.len(), missing.join(", ")));
             return None;
         }
+        // `*args`: the extra positional arguments as a tuple; `**kwargs`: a dict.
+        if sig.vararg.is_some() {
+            let at = sig.n_pos;
+            let mut list: Option<Expr> = None;
+            let mut plain = Vec::new();
+            let flush = |plain: &mut Vec<Expr>, list: &mut Option<Expr>| {
+                if plain.is_empty() {
+                    return;
+                }
+                let part = Expr { kind: ExprKind::List(std::mem::take(plain)), span: sp };
+                *list = Some(match list.take() {
+                    None => part,
+                    Some(l) => Expr { kind: ExprKind::BinOp { op: BinOp::Add, left: Box::new(l), right: Box::new(part) }, span: sp },
+                });
+            };
+            for x in extras {
+                match x.kind {
+                    ExprKind::Starred(inner) => {
+                        flush(&mut plain, &mut list);
+                        let as_list = Expr { kind: ExprKind::CallObj { func: Box::new(self.py_builtin("list", sp)), args: vec![*inner], kwargs: vec![] }, span: sp };
+                        list = Some(match list.take() {
+                            None => as_list,
+                            Some(l) => Expr { kind: ExprKind::BinOp { op: BinOp::Add, left: Box::new(l), right: Box::new(as_list) }, span: sp },
+                        });
+                    }
+                    _ => plain.push(x),
+                }
+            }
+            flush(&mut plain, &mut list);
+            let list = list.unwrap_or(Expr { kind: ExprKind::List(vec![]), span: sp });
+            let tuple = Expr { kind: ExprKind::CallObj { func: Box::new(self.py_builtin("tuple", sp)), args: vec![list], kwargs: vec![] }, span: sp };
+            src.push((at, out.len()));
+            out.push(tuple);
+        }
+        if sig.kwarg.is_some() {
+            let d = Expr { kind: ExprKind::CallObj { func: Box::new(self.py_builtin("dict", sp)), args: vec![], kwargs: kw_extra }, span: sp };
+            src.push((kw_extra_at.unwrap_or(usize::MAX), out.len()));
+            out.push(d);
+        }
         src.sort();
         let order: Vec<usize> = src.iter().map(|&(_, i)| i).collect();
         let identity = order.windows(2).all(|w| w[0] < w[1]);
@@ -1680,6 +1762,7 @@ impl<'l> Lowerer<'l> {
     /// Arguments to annotated parameters are checked/unboxed at the call.
     fn annotate_args(&self, fid: FuncId, args: Vec<Expr>) -> Vec<Expr> {
         let anns = self.ld.func_anns.get(&fid).map(|a| a.0.clone()).unwrap_or_default();
+        let anns: Vec<Option<Ty>> = anns.into_iter().chain(std::iter::repeat(None)).take(args.len()).collect();
         args.into_iter().enumerate().map(|(i, a)| annotated(anns.get(i).copied().flatten(), a)).collect()
     }
 

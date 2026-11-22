@@ -22,7 +22,14 @@ These constructs become plain Rust with no Python objects involved:
   `pass`, `return`, augmented assignment, and chained assignment (`a = b = 1`).
 * Builtins: `print(*args, sep=, end=, flush=)`, `abs`, `int`, `float`, `str`, `bool`, `len(str)`, and
   `min`/`max` with 2 or more arguments of the same type.
-* f-strings with plain `{expr}` placeholders.
+* f-strings, including format specs (`{x:>10}`, `{x:,.2f}`, `{x:#x}`, `{x:.1%}`, nested
+  `{x:{w}}`) and `!r`/`!s`/`!a`; `format(x, spec)`; printf-style `"%s %5.2f" % (a, b)`;
+  `"{} {name:>8}".format(...)`. The format-spec mini-language is implemented natively
+  (fill/align/sign/`#`/`0`/width/grouping/precision and the `d x X o b c n e E f F g G %` types,
+  correctly rounded). `%` with a dict (`%(name)s`) uses CPython.
+* `*args` and `**kwargs` parameters (a native `tuple[T, ...]` and `dict[str, V]`), and
+  `f(*xs)` / `f(**d)` calls of Python callables, `print(*xs)`, and `f(a, *rest)` into a
+  native function's `*args`.
 * Exceptions: `try`/`except`/`else`/`finally` (including `except (A, B) as e`, bare `except:`
   and bare `raise`), `raise E`, `raise E(msg)`, `raise e`, `assert cond[, msg]`, and builtin
   exception values such as `ValueError("x")`. `except` matches through CPython's builtin
@@ -99,8 +106,7 @@ under `--mode native-only`.
 * Variables or returns with no single native type (P215: boxed)
 * `with` statements (CPython context-manager protocol, P216), and `except` clauses naming a
   Python exception class such as `json.JSONDecodeError` (P216)
-* `print(..., file=)` and f-string format specs (`{x:.3f}`, `{x!r}`) use CPython's
-  `print` and `format`
+* `print(..., file=)` uses CPython's `print`
 
 ## Imports of Rust and C
 
@@ -131,4 +137,5 @@ variadic functions, `static` C functions) are listed in `explain`. Calling one g
 
 Not yet supported in either mode: classes defined in natively compiled files (an imported
 `.py` that defines a class falls back to CPython; a class in the entry file is rejected),
-lambdas, closures, `*args`/`**kwargs` parameters, non-literal defaults.
+lambdas, closures, non-literal defaults, and `f(*xs)` where `xs` fills a native
+function's fixed parameters (phase 4).

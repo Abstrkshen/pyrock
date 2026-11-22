@@ -309,6 +309,9 @@ pub enum ExprKind {
     Slice { lo: Option<Box<Expr>>, hi: Option<Box<Expr>>, step: Option<Box<Expr>> },
     /// `{a, b}`
     Set(Vec<Expr>),
+    /// `*xs` in a call of a Python object or `print`; in a `CallObj`'s
+    /// kwargs, the name `**` marks a `**mapping` argument.
+    Starred(Box<Expr>),
     /// The value of an unpacking assignment (`a, *b, c = value`): a fixed
     /// tuple of `n` items whose `star` item (if any) is a list. Checks the
     /// length like CPython (ValueError).

@@ -12,7 +12,7 @@ pub(crate) fn convert(code: &str, from: Ty, to: Ty) -> String {
         return code.to_string();
     }
     if from.is_never() {
-        return format!("(match {code} {{}})");
+        return format!("{{ let __n: rt::Never = {code}; match __n {{}} }}");
     }
     if to == Ty::Obj {
         return boxed(code, from);
@@ -55,6 +55,25 @@ pub(crate) fn convert(code: &str, from: Ty, to: Ty) -> String {
     }
 }
 
+/// A value as a `rt::fmt::Arg` (for format specs, `%` and `str.format`).
+pub(crate) fn to_arg(code: &str, t: Ty) -> String {
+    match t {
+        Ty::Int => format!("rt::fmt::Arg::Int({code})"),
+        Ty::Float => format!("rt::fmt::Arg::Float({code})"),
+        Ty::Bool => format!("rt::fmt::Arg::Bool({code})"),
+        Ty::Str => format!("rt::fmt::Arg::Str({code})"),
+        Ty::Obj => format!("rt::fmt::Arg::Py({code})"),
+        Ty::None => format!("{{ {code}; rt::fmt::other(&(), \"NoneType\") }}"),
+        t => match t.as_opt() {
+            Some(inner) => format!("match {code} {{ Some(__x) => {}, None => rt::fmt::other(&(), \"NoneType\") }}", to_arg("__x", inner)),
+            None => {
+                let name = t.py_name().split('[').next().unwrap_or("object");
+                format!("rt::fmt::other(&{}, {name:?})", borrow(code))
+            }
+        },
+    }
+}
+
 /// `Vec<E>` of the elements of an iterable value of type `t`.
 pub(crate) fn iter_vec(code: &str, t: Ty) -> String {
     match t {
@@ -72,6 +91,18 @@ pub(crate) fn iter_vec(code: &str, t: Ty) -> String {
             _ => format!("{}.to_vec()", code),
         },
     }
+}
+
+/// `Vec<want>` of the elements of an iterable (converting each element).
+pub(crate) fn iter_vec_as(code: &str, t: Ty, want: Ty) -> String {
+    let el = native::iter_elem(t).unwrap_or(want);
+    if el == want {
+        return iter_vec(code, t);
+    }
+    if el.is_never() {
+        return format!("{{ let _ = {code}; Vec::<{}>::new() }}", want.rust());
+    }
+    format!("{}.into_iter().map(|__e| {}).collect::<Vec<_>>()", iter_vec(code, t), convert("__e", el, want))
 }
 
 fn opt_i64(code: Option<String>) -> String {
@@ -359,7 +390,7 @@ impl FnEmitter<'_, '_> {
                     let keep = vals.first().cloned().or_else(|| kw("keepends").map(|i| kwv[i].clone()));
                     format!("rt::string::splitlines(&{s}, {})", keep.map(|v| crate::truthy(&v.0, v.1)).unwrap_or_else(|| "false".into()))
                 }
-                "join" => format!("rt::string::join(&{s}, &{})", iter_vec(&vals[0].0, vals[0].1)),
+                "join" => format!("rt::string::join(&{s}, &{})", iter_vec_as(&vals[0].0, vals[0].1, Ty::Str)),
                 "replace" => {
                     let count = vals.get(2).cloned().or_else(|| kw("count").map(|i| kwv[i].clone()));
                     format!("rt::string::replace(&{s}, {}, {}, {})", arg_str(&vals[0]), arg_str(&vals[1]), count.map(|v| int(&v)).unwrap_or_else(|| "-1".into()))
@@ -382,6 +413,11 @@ impl FnEmitter<'_, '_> {
                 "zfill" => format!("rt::string::zfill(&{s}, {})", int(&vals[0])),
                 "expandtabs" => format!("rt::string::expandtabs(&{s}, {})", vals.first().map(int).unwrap_or_else(|| "8".into())),
                 "partition" => format!("rt::string::partition(&{s}, {}, false)?", arg_str(&vals[0])),
+                "format" => {
+                    let a: Vec<String> = vals.iter().map(|(c, t)| to_arg(c, *t)).collect();
+                    let k: Vec<String> = kwargs.iter().zip(&kwv).map(|((n, _), (c, t))| format!("({n:?}, {})", to_arg(c, *t))).collect();
+                    format!("rt::fmt::format_method(&{s}, &[{}], &[{}])?", a.join(", "), k.join(", "))
+                }
                 "rpartition" => format!("rt::string::partition(&{s}, {}, true)?", arg_str(&vals[0])),
                 _ => unreachable!("str.{name}"),
             };
@@ -483,6 +519,8 @@ impl FnEmitter<'_, '_> {
             }
             "sum" => {
                 let e = native::iter_elem(vals[0].1).unwrap_or(Ty::Int);
+                let e = if e.is_never() { Ty::Int } else { e };
+                let elems = |v: &(String, Ty)| iter_vec_as(&v.0, v.1, e);
                 if t == Ty::Int {
                     let start = vals.get(1).map(|v| crate::as_int(&v.0, v.1)).unwrap_or_else(|| "0".into());
                     let items = if e == Ty::Bool { format!("{}.into_iter().map(|b| b as i64).collect()", elems(&vals[0])) } else { elems(&vals[0]) };
@@ -548,6 +586,13 @@ impl FnEmitter<'_, '_> {
                 format!("rt::List::from_vec(rt::coll::range_vec({a}, {b}, {c})?)")
             }
             "repr" => format!("rt::conv::repr_of(&{})", borrow(&vals[0].0)),
+            "format" => {
+                let arg = to_arg(&vals[0].0, vals[0].1);
+                match vals.get(1) {
+                    Some((sp, _)) => format!("rt::fmt::format(&{arg}, &{})?", borrow(sp)),
+                    None => format!("rt::fmt::format(&{arg}, \"\")?"),
+                }
+            }
             "ascii" => format!("rt::conv::ascii_of(&{})", borrow(&vals[0].0)),
             "ord" => format!("rt::string::ord(&{})?", borrow(&vals[0].0)),
             "chr" => format!("rt::string::chr({})?", crate::as_int(&vals[0].0, vals[0].1)),

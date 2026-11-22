@@ -417,7 +417,7 @@ impl State<'_> {
                 }
                 self.fresh()
             }
-            ExprKind::Unpack { value, .. } => {
+            ExprKind::Unpack { value, .. } | ExprKind::Starred(value) => {
                 self.expr(value, cx);
                 self.fresh()
             }
