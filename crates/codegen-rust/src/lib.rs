@@ -1280,7 +1280,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 Ty::Str => format!("rt::string::len(&{})", borrow(&vals[0].0)),
                 lt => match lt.tuple_items() {
                     Some(ts) => format!("{{ let _ = {}; {}_i64 }}", vals[0].0, ts.len()),
-                    None => format!("{}.len()", vals[0].0),
+                    None => format!("{}.len()", borrow(&vals[0].0)),
                 },
             },
             Builtin::Min | Builtin::Max if vals.len() == 1 && t != Ty::Obj => {

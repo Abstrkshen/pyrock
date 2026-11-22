@@ -637,14 +637,66 @@ tuple_impls!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H, 8 I, 9 J, 10 K, 11 L);
 // ---------------------------------------------------------------------------
 // Ordered table shared by Dict and Set
 
+/// FxHash (rustc's hasher): much faster than SipHash for the short keys
+/// programs use. Not DoS-resistant, like CPython's int hashing.
+#[derive(Default, Clone, Copy)]
+pub struct FxHasher(u64);
+
+const FX_K: u64 = 0x517c_c1b7_2722_0a95;
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes(c.try_into().unwrap()));
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut buf = [0u8; 8];
+            buf[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(buf));
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+    #[inline]
+    fn write_i64(&mut self, i: i64) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, w: u64) {
+        self.0 = (self.0.rotate_left(5) ^ w).wrapping_mul(FX_K);
+    }
+}
+
+type FxBuild = std::hash::BuildHasherDefault<FxHasher>;
+
 struct Table<K, V> {
     entries: Vec<Option<(K, V)>>,
-    index: HashMap<K, usize>,
+    index: HashMap<K, usize, FxBuild>,
 }
 
 impl<K: Clone + Eq + Hash, V> Table<K, V> {
     fn new() -> Self {
-        Table { entries: Vec::new(), index: HashMap::new() }
+        Table { entries: Vec::new(), index: HashMap::default() }
     }
 
     fn len(&self) -> usize {

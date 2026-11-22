@@ -198,3 +198,13 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 * Tests: `tests/differential/containers.py`, `tests/differential/escape.py`. Golden change:
   `total(xs)` in `annotations.py` is now native `total(list[int])`; diagnostics change: a
   list passed only to `json.dumps` stays native in native-only mode.
+
+### Phase 2.2: collection performance (2026-11-22)
+
+* Dict/set tables use an FxHash-style hasher (`rt::coll::FxHasher`) instead of SipHash.
+* Method receivers, subscripts and dict keys are borrowed instead of cloned (no `Rc`
+  increment/decrement per operation); comprehensions over `range(...)` iterate lazily.
+* `benchmarks/collections_bench.py` (word counting + sieve), release build, wall clock with
+  process startup: CPython 160 ms, native 65 ms (2.5x). The sieve half alone is 4.8x; the
+  word-count half is 1.1x (dominated by allocating 300k small strings in `split`/`join`,
+  which CPython's C string routines are already good at).

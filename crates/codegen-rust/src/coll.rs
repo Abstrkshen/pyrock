@@ -183,6 +183,8 @@ impl FnEmitter<'_, '_> {
         let ot = ot.as_opt().map(|_| ot).unwrap_or(ot);
         let o = if ot.as_opt().is_some() { format!("rt::unopt({o}, \"'NoneType' object is not subscriptable\")?") } else { o };
         let ot = ot.as_opt().unwrap_or(ot);
+        // Tuples are read by value (fields move out); other receivers are borrowed.
+        let o = if ot.tuple_items().is_some() { o } else { borrow(&o).to_string() };
         if let ExprKind::Slice { lo, hi, step } = &index.kind {
             let args = self.slice_args(lo, hi, step);
             return match ot.as_comp() {
@@ -225,7 +227,7 @@ impl FnEmitter<'_, '_> {
                 ExprKind::Int(v) => {
                     let n = ts.len() as i64;
                     let j = if v < 0 { v + n } else { v };
-                    format!("({o}).{j}")
+                    format!("({o}).{j}.clone()")
                 }
                 _ => {
                     let idx = crate::as_int(&i, it);
@@ -237,7 +239,7 @@ impl FnEmitter<'_, '_> {
                     )
                 }
             },
-            Some(Comp::Dict(k, _)) => format!("{}.get(&{})?", o, convert(&i, it, k)),
+            Some(Comp::Dict(k, _)) => format!("{}.get(&{})?", o, borrow(&convert(&i, it, k))),
             _ => unreachable!("subscript of {ot}"),
         }
     }
@@ -252,19 +254,19 @@ impl FnEmitter<'_, '_> {
                     let items = iter_vec(&v, vt);
                     let ve = native::iter_elem(vt).unwrap_or(e);
                     let items = if ve == e { items } else { format!("{items}.into_iter().map(|__e| {}).collect()", convert("__e", ve, e)) };
-                    let o = self.expr(obj).0;
+                    let o = borrow(&self.expr(obj).0).to_string();
                     let args = self.slice_args(lo, hi, step);
                     return format!("{ind}{{\n{ind}    let __v = {items};\n{ind}    {o}.set_slice({args}, __v)?;\n{ind}}}");
                 }
                 // Python evaluates the value first, then the target.
                 let v = self.expr_as(value, e);
-                let o = self.expr(obj).0;
+                let o = borrow(&self.expr(obj).0).to_string();
                 let (i, it) = self.expr(index);
                 format!("{ind}{{\n{ind}    let __v = {v};\n{ind}    {o}.set({}, __v)?;\n{ind}}}", crate::as_int(&i, it))
             }
             Some(Comp::Dict(k, vty)) => {
                 let v = self.expr_as(value, vty);
-                let o = self.expr(obj).0;
+                let o = borrow(&self.expr(obj).0).to_string();
                 let kc = self.expr_as(index, k);
                 format!("{ind}{{\n{ind}    let __v = {v};\n{ind}    {o}.set({kc}, __v);\n{ind}}}")
             }
@@ -275,6 +277,7 @@ impl FnEmitter<'_, '_> {
     /// `del obj[index]`
     pub(crate) fn del_item(&mut self, obj: &Expr, index: &Expr) -> String {
         let (o, ot) = self.expr(obj);
+        let o = if ot == Ty::Obj { o } else { borrow(&o).to_string() };
         if ot == Ty::Obj {
             if let ExprKind::Slice { .. } = index.kind {
                 let i = self.obj(index);
@@ -328,6 +331,7 @@ impl FnEmitter<'_, '_> {
     pub(crate) fn method(&mut self, obj: &Expr, recv: Ty, name: &str, args: &[Expr], kwargs: &[(String, Expr)], t: Ty) -> String {
         let (o, ot) = self.expr(obj);
         let o = if ot.as_opt().is_some() { format!("rt::unopt({o}, \"'NoneType' object has no attribute '{name}'\")?") } else { o };
+        let o = borrow(&o).to_string();
         let vals: Vec<(String, Ty)> = args.iter().map(|a| self.expr(a)).collect();
         let kw = |k: &str| kwargs.iter().position(|(n, _)| n == k);
         let kwv: Vec<(String, Ty)> = kwargs.iter().map(|(_, v)| self.expr(v)).collect();
@@ -412,6 +416,7 @@ impl FnEmitter<'_, '_> {
             Comp::Dict(k, v) => match name {
                 "get" => {
                     let key = convert(&vals[0].0, vals[0].1, k);
+                    let key = borrow(&key).to_string();
                     if vals.len() == 1 {
                         convert(&format!("{o}.get_opt(&{key})"), Ty::opt(v), t)
                     } else {
@@ -421,6 +426,7 @@ impl FnEmitter<'_, '_> {
                 }
                 "pop" => {
                     let key = convert(&vals[0].0, vals[0].1, k);
+                    let key = borrow(&key).to_string();
                     if vals.len() == 1 {
                         format!("{o}.pop(&{key})?")
                     } else {
@@ -429,9 +435,9 @@ impl FnEmitter<'_, '_> {
                     }
                 }
                 "setdefault" => format!("{o}.setdefault({}, {})", self.expr_as(&args[0], k), self.expr_as(&args[1], v)),
-                "keys" => format!("rt::coll::Keys({o})"),
-                "values" => format!("rt::coll::Values({o})"),
-                "items" => format!("rt::coll::Items({o})"),
+                "keys" => format!("rt::coll::Keys({o}.clone())"),
+                "values" => format!("rt::coll::Values({o}.clone())"),
+                "items" => format!("rt::coll::Items({o}.clone())"),
                 "popitem" => format!("{o}.popitem()?"),
                 "update" => format!("{o}.update(&{})", convert(&vals[0].0, vals[0].1, recv)),
                 "clear" => format!("{o}.clear()"),
@@ -644,10 +650,28 @@ impl FnEmitter<'_, '_> {
         write!(code, "{{ let {r} = {empty}; ").unwrap();
         let mut closers = String::new();
         for g in gens {
-            let (src, it) = self.expr(&g.iter);
+            let it = self.ty(&g.iter);
             let el = native::iter_elem(it).unwrap();
             let n = self.fresh();
-            write!(code, "for __v{n} in {} {{ ", iter_vec(&src, it)).unwrap();
+            let source = match &g.iter.kind {
+                // `range(...)` is iterated lazily, without building a list.
+                ExprKind::CallObj { func, args, kwargs } if matches!(&func.kind, ExprKind::PyBuiltin(r) if r == "range") && kwargs.is_empty() && it != Ty::Obj => {
+                    let ints: Vec<String> = args.iter().map(|a| {
+                        let (c, t) = self.expr(a);
+                        crate::as_int(&c, t)
+                    }).collect();
+                    match ints.len() {
+                        1 => format!("0..{}", ints[0]),
+                        2 => format!("{{ let __a = {}; let __b = {}; __a..__b }}", ints[0], ints[1]),
+                        _ => format!("rt::int::range({}, {}, {})?", ints[0], ints[1], ints[2]),
+                    }
+                }
+                _ => {
+                    let (src, _) = self.expr(&g.iter);
+                    iter_vec(&src, it)
+                }
+            };
+            write!(code, "for __v{n} in {source} {{ ").unwrap();
             let mut buf = String::new();
             self.assign(&g.var, format!("__v{n}"), el, 0, &mut buf);
             for st in &g.unpack {
@@ -694,9 +718,10 @@ impl FnEmitter<'_, '_> {
             return format!("{{ let _ = ({x}, {c}); false }}");
         }
         let probe = convert(x, xt, e);
+        let probe = borrow(&probe).to_string();
         match ct.as_comp() {
             Some(Comp::Tuple(_)) => format!("{{ let __x = {probe}; {}.iter().any(|__e| rt::coll::eq(__e, &__x)) }}", iter_vec(c, ct)),
-            _ => format!("{c}.contains(&{probe})"),
+            _ => format!("{}.contains(&{probe})", borrow(c)),
         }
     }
 }
