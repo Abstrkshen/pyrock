@@ -6,6 +6,9 @@
   (`def f(x, n=None, *, sep=",")`) and keyword arguments at the call are native.
 * Module-level variables in functions (`RATE * x`), `global count`, `config.DEBUG`,
   `from config import LIMIT`: typed global cells, `NameError` if read before assignment.
+* Classes: methods, inferred instance attributes, class attributes, `@property`,
+  `@staticmethod`/`@classmethod`, dunders, `@dataclass`, single inheritance with `super()`,
+  user exception classes, and polymorphism over several classes (a generated enum).
 * Native `list`/`dict`/`set`/`tuple` (element types inferred from use, aliasing preserved),
   slicing, comprehensions, unpacking (`a, *b = xs`, `for k, v in d.items()`), string methods,
   and builtins such as `sorted`, `sum`, `enumerate`, `zip`, `min`/`max`, `any`/`all`.
@@ -68,7 +71,8 @@ values (mixed types). These keep exact Python semantics, including aliasing.
 
 | Construct | Rewrite |
 |---|---|
-| `class` in the entry file | Move it into a separate `.py` module (it falls back to CPython, with P220), or use functions plus separate values |
+| Class with a CPython base class or a metaclass | Keep it in an imported `.py` (the module falls back to CPython, P220) |
+| Native instance passed to a CPython function (P230) | Pass plain values (`obj.x`, a dict) |
 | `yield` generators | Build and return a list |
 | `lambda`, nested `def`, closures | A top-level function |
 | Non-literal default (`def f(x=[])`) | `def f(x=None): if x is None: x = []` |

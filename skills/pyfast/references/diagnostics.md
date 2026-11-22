@@ -38,6 +38,8 @@ In hybrid mode these aren't printed by `check`. They're listed under "CPython bo
 | P215 | Value boxed (no single native type) | Make the variable or return single-typed |
 | P216 | `with` statement, or `except` naming a Python exception class | Native exception classes; manage the resource explicitly |
 | P220 | Warning: local `.py` imported through CPython because it can't be compiled. The note shows the first blocker | Fix that blocker in the module |
+| P230 | A native class instance passed to CPython code (an error in both modes until native objects are exposed to Python) | Pass plain values instead |
+| P308 | Warning: an attribute that is never assigned anywhere is read (raises AttributeError at runtime) | Fix the attribute name |
 
 ## Types (P3xx)
 

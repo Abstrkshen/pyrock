@@ -62,6 +62,17 @@ These constructs become plain Rust with no Python objects involved:
   a CPython call, stored into a Python object) is a Python object from creation, so Python
   can keep or mutate it with the aliasing CPython has. A short list of read-only consumers
   (`json.dumps`, `statistics.*`, ...) receives a copy instead.
+* Classes: `__init__`, methods, instance attributes (types inferred program-wide), class
+  attributes, `@property` (+ setter), `@staticmethod`, `@classmethod` (`cls(...)`), dunders
+  (`__repr__`, `__str__`, `__eq__`/`__ne__`, `__lt__`/`__le__`/`__gt__`/`__ge__`, `__len__`,
+  `__bool__`, `__hash__`, `__contains__`, `__getitem__`/`__setitem__`, `__iter__` returning a
+  native iterable, `__add__`/`__radd__` and the other arithmetic dunders, `__neg__`, ...),
+  `@dataclass` (fields, literal defaults, `field(default_factory=list|dict|set)`,
+  `__post_init__`), single inheritance with `super()`, `isinstance` with classes, and user
+  exception classes (`class NotFound(KeyError)`, `except NotFound as e: e.key`).
+  Instances are `Rc<RefCell<..>>` newtypes, so identity and shared mutation match Python.
+  Values of different classes in one place (a list of shapes) form a closed union (a Rust
+  enum) with per-variant method dispatch.
 * Module-level variables read inside functions, `global x` in functions, `mod.NAME` /
   `mod.NAME = v` on a natively compiled module, and `from mod import NAME` (copied at import,
   as CPython does). Such variables live in typed global cells; reading one before its
@@ -135,7 +146,8 @@ variadic functions, `static` C functions) are listed in `explain`. Calling one g
 | P307 | Warning: a native value contradicts an annotation (it keeps its runtime type, like CPython) |
 | P310/P311 | Specialization limit (16 per function) or inference did not converge |
 
-Not yet supported in either mode: classes defined in natively compiled files (an imported
-`.py` that defines a class falls back to CPython; a class in the entry file is rejected),
-lambdas, closures, non-literal defaults, and `f(*xs)` where `xs` fills a native
+Not yet supported in either mode: classes with a CPython base class, metaclasses or
+class decorators other than `@dataclass` (in an imported `.py` the whole module falls back
+to CPython; in the entry file they are rejected), passing a native instance to CPython code
+(P230), lambdas, closures, non-literal defaults, and `f(*xs)` where `xs` fills a native
 function's fixed parameters (phase 4).
