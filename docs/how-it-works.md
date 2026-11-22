@@ -158,9 +158,11 @@ Details that matter:
 * **Maybe-unbound locals.** A definite-assignment pass ([definite.rs](../crates/infer/src/definite.rs))
   finds variables that might be read before assignment. These are stored as `Option<T>`, and
   reading `None` raises `UnboundLocalError` exactly where CPython would.
-* **Limits.** A function can have at most 16 specializations. Further calls with new types
-  share one all-`object` specialization in hybrid mode (bridged), and are an error (P310)
-  in native-only mode. Unreachable functions are never compiled.
+* **Limits.** A function can have at most 16 live specializations. Further calls with new
+  types share one all-`object` specialization in hybrid mode (bridged), and are an error
+  (P310) in native-only mode. Only specializations still reachable from the entry module
+  count: when a parameter type widens over several rounds (a dict gaining keys), each round
+  leaves a stale specialization behind, and those don't use up the limit. Unreachable functions are never compiled.
 * **Program-wide facts** are joined inside the same fixed point: the type of each class
   field (every `self.x = ...` in the program), each module global, each record key, and
   what a generator receives through `send`.

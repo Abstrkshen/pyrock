@@ -131,9 +131,9 @@ Known bugs:
 
 - [x] `globals()` panicked at runtime; `eval`, `exec` and `locals()` raised
       `SystemError: frame does not exist` (compiled code has no Python frame)
-- [ ] `.ignore/samples/raylib-breakout`: the camera offset reaches `draw_sky` as `object`
-      although every call site passes a native number, so part of the per-frame drawing is
-      bridged. Not reproduced in a smaller program yet
+- [x] `.ignore/samples/raylib-breakout`: the camera offset reached `draw_sky` as `object`
+      although every call site passes a native number, so part of the per-frame drawing was
+      bridged (stale specializations counted towards the limit)
 
 ## Log
 
@@ -744,3 +744,22 @@ Each bridged operation cost ~400 ns.
 * Tests: `tests/diagnostics/frame_builtins.py`, `tests/differential/eval_namespaces.py`
   (with `_eval_helper.py`, which uses `globals()` and bare `eval` and is imported through
   CPython).
+
+### Phase 8: stale specializations and the limit (2026-11-23)
+
+* `raylib-breakout`: `draw_sky(st, bank, cam)` was specialized with `cam: object`, although
+  every call passes an `int`, `float` or `int | float`. Cause: the game state is a record
+  dict that gains keys over many inference rounds; every round requested a specialization
+  of each `st`-taking function for the new record type, and the old ones stayed in the list.
+  After 16, the limit sent calls to the shared all-`object` specialization (immutable
+  arguments such as `cam` become `object`). One such round also joined `object` into the
+  `sparks` record's fields for good.
+* Now each specialization records the calls of its latest analysis; at the start of each
+  round, specializations not reachable from the entry module are marked dead, and the
+  limit counts only live specializations that existed when the round started.
+* Effect on `raylib-breakout`: 55 → 63 native specializations, 241 → 223 boundaries; the
+  sky, platform, actor and hero drawing do their arithmetic natively, and sparks are native
+  records again.
+* Test: `tests/golden/stale_specs.py` (a dict gaining a key in each of 20 functions; the
+  old compiler bridged `show(st, x: object)`). `cargo test --workspace`, samples 21/21,
+  demos 3/3.

@@ -88,6 +88,8 @@ pub struct Spec {
     pub gen_ret: Slot,
     /// Generators: whether the body can fall off its end.
     pub gen_falls: bool,
+    /// The specializations its latest analysis calls (resolved keys).
+    pub calls: Vec<SpecKey>,
 }
 
 /// A module-level variable kept in a global cell: (unit, name).
@@ -114,6 +116,17 @@ pub struct Program<'m> {
     /// (`analysis::plan`): early rounds can create specializations for types
     /// that later widen.
     pub spec_diagnostics: Vec<(usize, Diagnostic)>,
+    /// Specializations no longer reachable from the entry module under the
+    /// current types (recomputed every round). They don't count towards the
+    /// per-function limit: as a parameter type widens (a record gaining keys),
+    /// each round leaves a stale specialization behind.
+    pub dead: HashSet<usize>,
+    /// Number of specializations when the current round started. The limit
+    /// counts only those (and only live ones): a specialization created
+    /// during a round may be stale by the next one, and falling back to the
+    /// shared object-typed specialization too early widens field and record
+    /// types for good (joins never narrow).
+    pub round_start: usize,
 }
 
 impl<'m> Program<'m> {
@@ -165,11 +178,38 @@ impl<'m> Program<'m> {
     /// The specialization a direct call with argument types `key` uses: its
     /// own, or (hybrid mode, once the function has reached the limit) the
     /// shared one with object-typed immutable arguments.
+    /// Specializations of `func` that are reachable (or not analysed yet).
+    pub fn live_count(&self, func: FuncId) -> usize {
+        self.specs[..self.round_start].iter().filter(|s| s.key.func == func && !self.dead.contains(&s.id)).count()
+    }
+
+    /// Recompute `dead`: analysed specializations not reachable from the
+    /// entry module through the calls of the latest analyses.
+    fn compute_dead(&mut self) {
+        let mut seen = vec![false; self.specs.len()];
+        let mut stack = vec![0usize];
+        // Specializations not analysed yet have no calls recorded: keep them
+        // and what they may reach alive by treating them as roots.
+        stack.extend(self.specs.iter().filter(|s| !s.analyzed).map(|s| s.id));
+        while let Some(i) = stack.pop() {
+            if seen[i] {
+                continue;
+            }
+            seen[i] = true;
+            for k in &self.specs[i].calls {
+                if let Some(&j) = self.index.get(k) {
+                    stack.push(j);
+                }
+            }
+        }
+        self.dead = (0..self.specs.len()).filter(|&i| !seen[i]).collect();
+    }
+
     pub fn resolve_key(&self, key: SpecKey) -> SpecKey {
         if self.index.contains_key(&key) || !self.boxing() {
             return key;
         }
-        if self.specs.iter().filter(|s| s.key.func == key.func).count() < MAX_SPECS_PER_FUNCTION {
+        if self.live_count(key.func) < MAX_SPECS_PER_FUNCTION {
             return key;
         }
         generic_key(&self.module.funcs[key.func], &key)
@@ -294,6 +334,8 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
         index: HashMap::new(),
         diagnostics: vec![],
         spec_diagnostics: vec![],
+        dead: HashSet::new(),
+        round_start: 0,
     };
     let main_key = SpecKey { func: module.main, args: vec![] };
     add_spec(&mut prog, main_key);
@@ -302,11 +344,18 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
     loop {
         rounds += 1;
         let mut changed = false;
+        prog.compute_dead();
+        prog.round_start = prog.specs.len();
         let mut i = 0;
         while i < prog.specs.len() {
             let mut requests = Vec::new();
             let (locals, ret, falls, gassigns, ret_widen, Extra { fassigns, news, gen_ret, send_widen, gen_falls }) = analyze(&prog, i, &mut requests, None);
             prog.specs[i].gen_falls = gen_falls;
+            let calls: Vec<SpecKey> = requests.iter().map(|(k, _)| prog.resolve_key(k.clone())).collect();
+            if prog.specs[i].calls != calls {
+                prog.specs[i].calls = calls;
+                changed = true;
+            }
             for (key, t) in send_widen {
                 if let Some(&j) = prog.index.get(&key) {
                     let floor = prog.specs[j].gen_send.join(t, prog.boxing());
@@ -379,7 +428,7 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
             }
             for (key, span) in requests {
                 if !prog.index.contains_key(&key) {
-                    let count = prog.specs.iter().filter(|s| s.key.func == key.func).count();
+                    let count = prog.live_count(key.func);
                     // Hybrid mode: past the limit, calls share one object-typed
                     // specialization (`Program::resolve_key`), which is always allowed.
                     let g = generic_key(&module.funcs[key.func], &key);
@@ -547,7 +596,7 @@ fn add_spec(prog: &mut Program, key: SpecKey) {
     let maybe_unbound = definite::maybe_unbound(f);
     let id = prog.specs.len();
     prog.index.insert(key.clone(), id);
-    prog.specs.push(Spec { id, key, mangled, ret: Slot::Unknown, falls_through: true, analyzed: false, locals, maybe_unbound, ret_floor: Slot::Unknown, gen_send: Slot::Unknown, gen_ret: Slot::Unknown, gen_falls: true });
+    prog.specs.push(Spec { id, key, mangled, ret: Slot::Unknown, falls_through: true, analyzed: false, locals, maybe_unbound, ret_floor: Slot::Unknown, gen_send: Slot::Unknown, gen_ret: Slot::Unknown, gen_falls: true, calls: vec![] });
 }
 
 type Requests = Vec<(SpecKey, Span)>;
