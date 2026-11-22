@@ -4,7 +4,7 @@
 //! they cannot disagree about what runs natively. `None` from a lookup
 //! means "not native": the operation goes through CPython (hybrid mode).
 
-use pyfast_ir::{Comp, Ty};
+use pyfast_ir::{Comp, Field, Ty};
 
 /// Join two types for one storage location. Mutable containers join their
 /// element types (`list[int] ⊔ list[str] = list[object]` when boxing), so a
@@ -78,6 +78,30 @@ pub fn ty_join(a: Ty, b: Ty, boxing: bool) -> Option<Ty> {
         }
         (Comp::TupleVar(x), Comp::TupleVar(y)) => Some(Ty::tuple_var(elem(x, y)?)),
         (Comp::Gen(x), Comp::Gen(y)) => Some(Ty::gen(elem(x, y)?)),
+        // Records with the same literal keys join key by key (keys added
+        // later on either side are optional); otherwise a record is a
+        // `dict[str, V]`.
+        (Comp::Record(fa), Comp::Record(fb)) if fa.iter().filter(|f| !f.optional).map(|f| f.key).eq(fb.iter().filter(|f| !f.optional).map(|f| f.key)) => {
+            let mut fs: Vec<Field> = Vec::new();
+            for f in fa.iter().chain(&fb) {
+                match fs.iter_mut().find(|g| g.key == f.key) {
+                    Some(g) => {
+                        g.ty = elem(g.ty, f.ty)?;
+                        g.optional |= f.optional;
+                    }
+                    None => fs.push(*f),
+                }
+            }
+            Some(Ty::record(fs))
+        }
+        (Comp::Record(_), _) | (_, Comp::Record(_)) => {
+            let da = record_dict(a, boxing).unwrap_or(a);
+            let db = record_dict(b, boxing).unwrap_or(b);
+            if da == a && db == b {
+                return None;
+            }
+            ty_join(da, db, boxing)
+        }
         (Comp::Coro(x), Comp::Coro(y)) => Some(Ty::coro(elem(x, y)?)),
         _ => None,
     }
@@ -99,6 +123,29 @@ pub fn iter_elem(t: Ty) -> Option<Ty> {
         Ty::Obj => Some(Ty::Obj),
         // A mixed-type tuple iterates as the join of its items (`*args`).
         t => t.iter_elem().or_else(|| t.tuple_items().and_then(|ts| join_all(ts, true))),
+    }
+}
+
+/// The `dict[str, V]` a record dict becomes when used like a dict.
+pub fn record_dict(t: Ty, boxing: bool) -> Option<Ty> {
+    let fs = t.as_record()?;
+    let v = join_all(fs.iter().map(|f| f.ty), boxing)?;
+    Some(Ty::dict(Ty::Str, v))
+}
+
+/// Whether a value of this type can be a record field (the generated struct
+/// needs printing, equality and conversion to Python for it).
+pub fn record_field_ok(t: Ty) -> bool {
+    match t {
+        Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::None | Ty::Obj => true,
+        Ty::C(_) => match t.as_comp() {
+            Some(Comp::List(e) | Comp::Set(e) | Comp::TupleVar(e) | Comp::Opt(e)) => e.is_never() || record_field_ok(e),
+            Some(Comp::Dict(k, v)) => (k.is_never() || record_field_ok(k)) && (v.is_never() || record_field_ok(v)),
+            Some(Comp::Tuple(ts)) => ts.iter().all(|x| record_field_ok(*x)),
+            Some(Comp::Record(fs)) => fs.iter().all(|f| record_field_ok(f.ty)),
+            Some(Comp::Class(..)) => true,
+            _ => false,
+        },
     }
 }
 
@@ -398,6 +445,7 @@ pub fn method(recv: Ty, name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing
                     } else {
                         match ty_join(v, args[1], boxing) {
                             Some(j) => m(j),
+                            None if boxing => m(Ty::Obj),
                             None => err(format!("dict.get default of type {} for values of type {v}", args[1])),
                         }
                     }
@@ -697,9 +745,14 @@ pub fn coll_binop(op: pyfast_ir::BinOp, l: Ty, r: Ty, boxing: bool) -> Option<Ty
 
 /// `item in container` for native types.
 pub fn contains_ok(item: Ty, container: Ty) -> bool {
+    if container.as_record().is_some() {
+        return true; // `k in record`: compared with the fixed keys
+    }
     match container {
         Ty::Str => base(item) == Ty::Str,
         c => match c.as_comp() {
+            // Any hashable probe: a key of another type is simply not found.
+            Some(Comp::Dict(..) | Comp::Set(_)) if base(item).is_hashable() => true,
             Some(Comp::Dict(k, _)) => ty_join(k, item, false).is_some(),
             Some(Comp::List(e) | Comp::Set(e) | Comp::TupleVar(e)) => e.is_never() || ty_join(e, item, false).is_some() || e == Ty::Obj,
             Some(Comp::Tuple(_)) => iter_elem(c).is_some_and(|e| ty_join(e, item, false).is_some()),

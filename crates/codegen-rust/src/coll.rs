@@ -43,6 +43,32 @@ pub(crate) fn convert(code: &str, from: Ty, to: Ty) -> String {
         }
     }
     match (from.as_comp(), to.as_comp()) {
+        // A record used as a plain dict: a copy.
+        (Some(Comp::Record(_)), Some(Comp::Dict(..))) => {
+            let own = native::record_dict(from, true).unwrap_or(to);
+            convert(&format!("{code}.to_dict()?"), own, to)
+        }
+        // Same literal keys (the join rule): copy key by key; added keys keep
+        // their insertion order.
+        (Some(Comp::Record(fa)), Some(Comp::Record(fb))) => {
+            let src = |k: &str| fa.iter().position(|f| f.key == k).unwrap();
+            let req: Vec<String> = fb.iter().filter(|f| !f.optional).map(|f| convert(&format!("__r.f{}.clone()", src(f.key)), fa[src(f.key)].ty, f.ty)).collect();
+            let mut code_out = format!("{{ let __s = {code}; let __r = __s.0.borrow(); let __n = {}::new({}); ", to.rust(), req.join(", "));
+            let arms: Vec<String> = fa
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| f.optional)
+                .map(|(i, f)| {
+                    let j = fb.iter().position(|g| g.key == f.key).unwrap();
+                    format!("{i} => __n.set_f{j}({}),", convert(&format!("__r.f{i}.clone().unwrap()"), f.ty, fb[j].ty))
+                })
+                .collect();
+            if !arms.is_empty() {
+                write!(code_out, "for &__i in &__r.order {{ match __i {{ {} _ => unreachable!() }} }} ", arms.join(" ")).unwrap();
+            }
+            code_out.push_str("__n }");
+            code_out
+        }
         // Generators and coroutines convert lazily (a wrapper converting each value).
         (Some(Comp::Gen(a)), Some(Comp::Gen(b))) => format!("{code}.map(|__e| -> PyResult<{}> {{ Ok({}) }})", b.rust(), convert("__e", a, b)),
         (Some(Comp::Coro(a)), Some(Comp::Coro(b))) => format!("{code}.map(|__e| -> PyResult<{}> {{ Ok({}) }})", b.rust(), convert("__e", a, b)),
@@ -141,6 +167,10 @@ impl FnEmitter<'_, '_> {
         }
         let literal = match (&e.kind, to.as_comp()) {
             (ExprKind::List(_), Some(Comp::List(_))) | (ExprKind::Set(_), Some(Comp::Set(_))) | (ExprKind::Dict(_), Some(Comp::Dict(..))) => true,
+            (ExprKind::Dict(pairs), Some(Comp::Record(fs))) => {
+                let req: Vec<&Field> = fs.iter().filter(|f| !f.optional).collect();
+                pairs.len() == req.len() && pairs.iter().zip(&req).all(|((k, _), f)| matches!(&k.kind, ExprKind::Str(s) if s.as_str() == f.key))
+            }
             (ExprKind::Tuple(items), Some(Comp::Tuple(ts))) => items.len() == ts.len(),
             (ExprKind::Tuple(_), Some(Comp::TupleVar(_))) => true,
             _ => false,
@@ -182,6 +212,11 @@ impl FnEmitter<'_, '_> {
     /// literal's own type, e.g. `[1, 2]` stored into a `list[object]`).
     fn build(&mut self, e: &Expr, to: Ty) -> String {
         match (&e.kind, to.as_comp()) {
+            (ExprKind::Dict(pairs), Some(Comp::Record(fs))) => {
+                let req: Vec<Field> = fs.iter().filter(|f| !f.optional).copied().collect();
+                let parts: Vec<String> = pairs.iter().zip(&req).map(|((_, v), f)| self.expr_as(v, f.ty)).collect();
+                format!("{}::new({})", to.rust(), parts.join(", "))
+            }
             (ExprKind::List(items), Some(Comp::List(b))) => {
                 let parts: Vec<String> = items.iter().map(|x| self.expr_as(x, b)).collect();
                 format!("rt::List::<{}>::from_vec(vec![{}])", b.rust(), parts.join(", "))
@@ -235,6 +270,20 @@ impl FnEmitter<'_, '_> {
         let ot = ot.as_opt().unwrap_or(ot);
         // Tuples are read by value (fields move out); other receivers are borrowed.
         let o = if ot.tuple_items().is_some() { o } else { borrow(&o).to_string() };
+        if let Some(fs) = ot.as_record() {
+            if let ExprKind::Str(k) = &index.kind {
+                return match fs.iter().position(|f| f.key == k.as_str()) {
+                    Some(i) if fs[i].optional => format!("{o}.get_f{i}()?"),
+                    Some(i) => format!("{o}.0.borrow().f{i}.clone()"),
+                    None => format!("{{ let _ = {o}; rt::coll::missing_key({:?})? }}", crate::record::py_str_repr(k)),
+                };
+            }
+            // A computed key on a record that is not a place: a copy as a dict.
+            let d = native::record_dict(ot, true).unwrap_or(ot);
+            let (i, it) = self.expr(index);
+            let (k, _) = d.dict_kv().unwrap();
+            return format!("{}.get(&{})?", convert(&o, ot, d), borrow(&convert(&i, it, k)));
+        }
         if let ExprKind::Slice { lo, hi, step } = &index.kind {
             let args = self.slice_args(lo, hi, step);
             return match ot.as_comp() {
@@ -320,6 +369,17 @@ impl FnEmitter<'_, '_> {
                 let kc = self.expr_as(index, k);
                 format!("{ind}{{\n{ind}    let __v = {v};\n{ind}    {o}.set({kc}, __v);\n{ind}}}")
             }
+            Some(Comp::Record(fs)) => {
+                let ExprKind::Str(k) = &index.kind else { unreachable!("computed key on a record place") };
+                let i = fs.iter().position(|f| f.key == k.as_str()).expect("record key");
+                let v = self.expr_as(value, fs[i].ty);
+                let o = borrow(&self.expr(obj).0).to_string();
+                if fs[i].optional {
+                    format!("{ind}{{\n{ind}    let __v = {v};\n{ind}    {o}.set_f{i}(__v);\n{ind}}}")
+                } else {
+                    format!("{ind}{{\n{ind}    let __v = {v};\n{ind}    {o}.0.borrow_mut().f{i} = __v;\n{ind}}}")
+                }
+            }
             _ => unreachable!("set_item on {ot}"),
         }
     }
@@ -335,6 +395,10 @@ impl FnEmitter<'_, '_> {
             }
             let i = self.obj(index);
             return format!("rt::py::delitem(&{}, {i})?;", borrow(&o));
+        }
+        if let (Some(fs), ExprKind::Str(k)) = (ot.as_record(), &index.kind) {
+            let i = fs.iter().position(|f| f.key == k.as_str()).expect("optional record key");
+            return format!("{o}.del_f{i}()?;");
         }
         match ot.as_comp() {
             Some(Comp::List(_)) => {
@@ -385,6 +449,8 @@ impl FnEmitter<'_, '_> {
     /// A native method call.
     pub(crate) fn method(&mut self, obj: &Expr, recv: Ty, name: &str, args: &[Expr], kwargs: &[(String, Expr)], t: Ty) -> String {
         let (o, ot) = self.expr(obj);
+        // A record that is not a place, used like a dict: a copy.
+        let (o, ot) = if ot.as_record().is_some() { (convert(&o, ot, recv), recv) } else { (o, ot) };
         let o = if ot.as_opt().is_some() { format!("rt::unopt({o}, \"'NoneType' object has no attribute '{name}'\")?") } else { o };
         let o = borrow(&o).to_string();
         let vals: Vec<(String, Ty)> = args.iter().map(|a| self.expr(a)).collect();
@@ -481,7 +547,8 @@ impl FnEmitter<'_, '_> {
                     let key = convert(&vals[0].0, vals[0].1, k);
                     let key = borrow(&key).to_string();
                     if vals.len() == 1 {
-                        convert(&format!("{o}.get_opt(&{key})"), Ty::opt(v), t)
+                        // (also for `object` values, where a missing key is Python's None)
+                        format!("match {o}.get_opt(&{key}) {{ Some(__x) => {}, None => {} }}", convert("__x", v, t), convert("()", Ty::None, t))
                     } else {
                         let d = convert(&vals[1].0, vals[1].1, t);
                         format!("{{ let __d = {d}; match {o}.get_opt(&{key}) {{ Some(__x) => {}, None => __d }} }}", convert("__x", v, t))
@@ -536,6 +603,14 @@ impl FnEmitter<'_, '_> {
     /// A CPython builtin with a native implementation.
     pub(crate) fn native_builtin(&mut self, name: &str, args: &[Expr], kwargs: &[(String, Expr)], t: Ty) -> String {
         let vals: Vec<(String, Ty)> = args.iter().map(|a| self.expr(a)).collect();
+        // Records (not places) passed to builtins that need a dict: a copy.
+        let vals: Vec<(String, Ty)> = vals
+            .into_iter()
+            .map(|(c, vt)| match native::record_dict(vt, true) {
+                Some(d) if !pyfast_infer::spec::RECORD_BUILTINS.contains(&name) => (convert(&c, vt, d), d),
+                _ => (c, vt),
+            })
+            .collect();
         let kw = |k: &str| kwargs.iter().position(|(n, _)| n == k);
         let kwv: Vec<(String, Ty)> = kwargs.iter().map(|(_, v)| self.expr(v)).collect();
         let elems = |v: &(String, Ty)| iter_vec(&v.0, v.1);
@@ -808,6 +883,14 @@ impl FnEmitter<'_, '_> {
 
     /// `x in container` for a native container.
     pub(crate) fn contains(&mut self, x: &str, xt: Ty, c: &str, ct: Ty) -> String {
+        if ct.as_record().is_some() {
+            return match ops_base(xt) {
+                Ty::Str if xt == Ty::Str => format!("{{ let __k = {x}; {}.has_key(&__k) }}", borrow(c)),
+                Ty::Str => format!("{{ let __c = {c}; match {x} {{ Some(__k) => __c.has_key(&__k), None => false }} }}"),
+                Ty::Obj => format!("rt::py::contains({}, rt::py::to_py(&{c})?)?", crate::boxed(x, xt)),
+                _ => format!("{{ let _ = ({x}, {c}); false }}"),
+            };
+        }
         if ct == Ty::Str {
             let (x, _) = crate::unopt(x.to_string(), xt, "'in <string>' requires string as left operand, not NoneType");
             return format!("rt::string::contains(&{}, &{})", borrow(&x), borrow(c));
@@ -825,6 +908,10 @@ impl FnEmitter<'_, '_> {
                 let found = self.contains("__p", inner, "__c", ct);
                 return format!("{{ let __c = {c}; match {x} {{ Some(__p) => {found}, None => false }} }}");
             }
+        }
+        // A dict key / set element of another type is never found.
+        if matches!(ct.as_comp(), Some(Comp::Dict(..) | Comp::Set(_))) && e != Ty::Obj && xt != Ty::Obj && native::ty_join(e, ops_base(xt), false).is_none() {
+            return format!("{{ let _ = ({x}, {c}); false }}");
         }
         let probe = convert(x, xt, e);
         let probe = borrow(&probe).to_string();
@@ -857,3 +944,27 @@ fn tuple_slice_positions(lo: &Option<Box<Expr>>, hi: &Option<Box<Expr>>, step: &
 }
 
 use std::fmt::Write;
+
+fn ops_base(t: Ty) -> Ty {
+    t.as_opt().unwrap_or(t)
+}
+
+impl FnEmitter<'_, '_> {
+    /// `record["key"]` / `record.get("key")`: the field (a copy as a dict
+    /// lookup if the record type lacks the key, which raises KeyError).
+    /// `record.get("key"[, default])` (the default is evaluated in any case).
+    pub(crate) fn record_get(&mut self, obj: &Expr, key: &str, default: Option<&Expr>, t: Ty) -> String {
+        let (o, ot) = self.expr(obj);
+        let o = borrow(&o).to_string();
+        let fs = ot.as_opt().unwrap_or(ot).as_record().expect("record receiver");
+        let (d, dt) = match default {
+            Some(e) => self.expr(e),
+            None => ("()".to_string(), Ty::None),
+        };
+        match fs.iter().position(|f| f.key == key) {
+            Some(i) if !fs[i].optional => format!("{{ let _ = {d}; {} }}", convert(&format!("{o}.0.borrow().f{i}.clone()"), fs[i].ty, t)),
+            Some(i) => format!("{{ let __d = {d}; match {o}.opt_f{i}() {{ Some(__x) => {}, None => {} }} }}", convert("__x", fs[i].ty, t), convert("__d", dt, t)),
+            None => format!("{{ let _ = &{o}; {} }}", convert(&d, dt, t)),
+        }
+    }
+}

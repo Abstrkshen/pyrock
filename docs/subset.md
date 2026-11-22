@@ -96,6 +96,10 @@ These constructs become plain Rust with no Python objects involved:
   and gets the same Python object back each time (identity). Fields that hold mutable
   containers become Python objects so both sides see the same list.
 * `from mod import Class` and `mod.Class(...)` for classes of natively compiled modules.
+* Dicts with literal string keys (`{"x": 1.0, "name": "a"}`) are compiled as structs with
+  one type per key (keys added later are optional fields). Reads, writes, `get`, `in`,
+  `len`, `del` of added keys, printing, `==` and iterating keys are native; other dict uses
+  turn that dict into a plain `dict[str, V]`.
 * Module-level variables read inside functions, `global x` in functions, `mod.NAME` /
   `mod.NAME = v` on a natively compiled module, and `from mod import NAME` (copied at import,
   as CPython does). Such variables live in typed global cells; reading one before its

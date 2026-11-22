@@ -164,7 +164,7 @@ pub fn builtin(b: Builtin, args: &[Ty], boxing: bool) -> Result<Ty, String> {
         }
         Builtin::Len => {
             arity(1)?;
-            let sized = args[0].as_comp().is_some_and(|c| matches!(c, pyfast_ir::Comp::List(_) | pyfast_ir::Comp::Dict(..) | pyfast_ir::Comp::Set(_) | pyfast_ir::Comp::Tuple(_) | pyfast_ir::Comp::TupleVar(_) | pyfast_ir::Comp::View(..)));
+            let sized = args[0].as_comp().is_some_and(|c| matches!(c, pyfast_ir::Comp::List(_) | pyfast_ir::Comp::Dict(..) | pyfast_ir::Comp::Set(_) | pyfast_ir::Comp::Tuple(_) | pyfast_ir::Comp::TupleVar(_) | pyfast_ir::Comp::View(..) | pyfast_ir::Comp::Record(_)));
             if args[0] == Ty::Str || args[0] == Ty::Obj || sized {
                 Ok(Ty::Int)
             } else {

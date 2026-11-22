@@ -1402,3 +1402,8 @@ impl<T: Clone> List<T> {
         Ok(())
     }
 }
+
+/// `d["k"]` for a key a record dict never has: always `KeyError` (typed `Never`).
+pub fn missing_key(repr: &str) -> crate::exc::PyResult<Never> {
+    Err(crate::exc::Exc::new("KeyError", repr))
+}

@@ -11,7 +11,7 @@ pub mod types;
 
 pub use diag::{Diagnostic, Severity};
 pub use hir::*;
-pub use types::{ClassId, Comp, Ty, TyId, ViewKind};
+pub use types::{ClassId, Comp, Field, Ty, TyId, ViewKind};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
 pub struct Span {

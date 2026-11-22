@@ -13,6 +13,7 @@ mod class;
 mod closure;
 mod coll;
 mod ext;
+mod record;
 
 pub(crate) use closure::literal_obj as closure_literal_obj;
 
@@ -84,6 +85,7 @@ pub fn emit(prog: &Program, plan: &Plan, file_name: &str, py_paths: &[String]) -
     for it in items {
         writeln!(out, "\n{it}").unwrap();
     }
+    record::emit_records(prog, plan.uses_python, &mut out);
 
     writeln!(out, "\nfn main() {{").unwrap();
     if plan.uses_python {
@@ -1353,6 +1355,10 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                         self.method(obj, recv, &name, args, kwargs, t)
                     }
                     CallClass::Builtin(name) => self.native_builtin(&name, args, kwargs, t),
+                    CallClass::RecordGet(key) => {
+                        let ExprKind::GetAttr { obj, .. } = &func.kind else { unreachable!() };
+                        self.record_get(obj, key, args.get(1), t)
+                    }
                     CallClass::Bridge | CallClass::Pending => unreachable!(),
                 }
             }

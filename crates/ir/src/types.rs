@@ -73,6 +73,20 @@ pub enum Comp {
     Coro(Ty),
     /// A generator yielding `T` (`rt::gen::Gen<T>`).
     Gen(Ty),
+    /// A dict used like a struct: string keys, each with its own value type.
+    /// The literal's keys come first (always present, in order); keys
+    /// assigned later are optional (present or not, in per-instance insertion
+    /// order). A generated `Rec_*` struct.
+    Record(Vec<Field>),
+}
+
+/// A key of a record dict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Field {
+    pub key: &'static str,
+    pub ty: Ty,
+    /// Added after creation: may be absent.
+    pub optional: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -98,6 +112,18 @@ struct Interner {
 fn interner() -> &'static Mutex<Interner> {
     static I: OnceLock<Mutex<Interner>> = OnceLock::new();
     I.get_or_init(|| Mutex::new(Interner::default()))
+}
+
+/// A `'static` copy of `s`, shared by every caller (record keys).
+pub fn intern_str(s: &str) -> &'static str {
+    static STRS: OnceLock<Mutex<std::collections::HashSet<&'static str>>> = OnceLock::new();
+    let mut set = STRS.get_or_init(|| Mutex::new(std::collections::HashSet::new())).lock().unwrap();
+    if let Some(k) = set.get(s) {
+        return k;
+    }
+    let k: &'static str = Box::leak(s.to_string().into_boxed_str());
+    set.insert(k);
+    k
 }
 
 fn leak(s: String) -> &'static str {
@@ -140,6 +166,21 @@ impl Ty {
             Comp::ExtStruct(_, _, name) => (name.to_string(), name.to_string(), name.to_string()),
             Comp::Coro(t) => (format!("Coroutine[{}]", t.py_name()), format!("rt::aio::Coro<{}>", t.rust()), format!("coro_{}", t.mangle())),
             Comp::Gen(t) => (format!("Generator[{}]", t.py_name()), format!("rt::gen::Gen<{}>", t.rust()), format!("gen_{}", t.mangle())),
+            Comp::Record(fs) => {
+                let mangle = format!("rec_{}", fs.iter().map(|f| format!("{}{}_{}", f.key.len(), if f.optional { "o" } else { "" }, f.ty.mangle())).collect::<Vec<_>>().join("_"));
+                // Keys can be any text: the Rust name is a hash of keys and types.
+                let mut h: u64 = 0xcbf29ce484222325;
+                for f in fs {
+                    for b in f.key.bytes().chain([0u8, f.optional as u8]).chain(f.ty.mangle().bytes()).chain([1u8]) {
+                        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+                    }
+                }
+                (
+                    format!("{{{}}}", fs.iter().map(|f| format!("{:?}{}: {}", f.key, if f.optional { "?" } else { "" }, f.ty.py_name())).collect::<Vec<_>>().join(", ")),
+                    format!("Rec_{:012x}", h & 0xffff_ffff_ffff),
+                    format!("{mangle}_{:06x}", h & 0xff_ffff),
+                )
+            }
             Comp::Closure(f, caps, name) => (
                 format!("function {name}"),
                 if caps.is_empty() { "rt::Env<()>".to_string() } else { format!("rt::Env<({},)>", caps.iter().map(|c| format!("rt::Cell<{}>", c.rust())).collect::<Vec<_>>().join(", ")) },
@@ -204,6 +245,24 @@ impl Ty {
             return all[0];
         }
         Ty::comp(Comp::Union(all))
+    }
+
+    pub fn record(fields: Vec<Field>) -> Ty {
+        Ty::comp(Comp::Record(fields))
+    }
+
+    /// The fields of a record dict.
+    pub fn as_record(self) -> Option<Vec<Field>> {
+        match self.as_comp() {
+            Some(Comp::Record(fs)) => Some(fs),
+            _ => None,
+        }
+    }
+
+    /// Every record type created so far (codegen emits a struct for each).
+    pub fn all_records() -> Vec<Ty> {
+        let i = interner().lock().unwrap();
+        i.entries.iter().enumerate().filter(|(_, e)| matches!(e.comp, Comp::Record(_))).map(|(k, _)| Ty::C(TyId(k as u32))).collect()
     }
 
     pub fn gen(t: Ty) -> Ty {
@@ -277,6 +336,7 @@ impl Ty {
             Comp::List(e) | Comp::Set(e) | Comp::TupleVar(e) => Some(e),
             Comp::Dict(k, _) | Comp::View(ViewKind::Keys, k, _) => Some(k),
             Comp::Gen(e) => Some(e),
+            Comp::Record(_) => Some(Ty::Str),
             Comp::View(ViewKind::Values, _, v) => Some(v),
             Comp::View(ViewKind::Items, k, v) => Some(Ty::tuple(vec![k, v])),
             Comp::Tuple(ts) => {
@@ -299,7 +359,7 @@ impl Ty {
             Some(Comp::List(_) | Comp::Dict(..) | Comp::Set(_) | Comp::Class(..)) => true,
             Some(Comp::Tuple(ts)) => ts.iter().any(|t| t.has_mutable()),
             Some(Comp::TupleVar(t) | Comp::Opt(t)) => t.has_mutable(),
-            Some(Comp::View(..) | Comp::Union(_) | Comp::ExtStruct(..) | Comp::Coro(_) | Comp::Gen(_)) => true,
+            Some(Comp::View(..) | Comp::Union(_) | Comp::ExtStruct(..) | Comp::Coro(_) | Comp::Gen(_) | Comp::Record(_)) => true,
             _ => false,
         }
     }
@@ -414,7 +474,7 @@ impl Ty {
 
     /// Mutable, identity-carrying values (Python aliasing must be preserved).
     pub fn is_mutable(self) -> bool {
-        matches!(self.as_comp(), Some(Comp::List(_) | Comp::Dict(..) | Comp::Set(_) | Comp::Class(..) | Comp::Union(_)))
+        matches!(self.as_comp(), Some(Comp::List(_) | Comp::Dict(..) | Comp::Set(_) | Comp::Class(..) | Comp::Union(_) | Comp::Record(_)))
     }
 
     fn entry<R>(self, f: impl FnOnce(&Entry) -> R) -> R {

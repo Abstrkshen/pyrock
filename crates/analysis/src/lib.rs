@@ -77,7 +77,7 @@ fn spec_calls(prog: &Program, s: &Spec) -> BTreeSet<usize> {
         if let ExprKind::Call { callee: Callee::Func(fid), args, .. } = &e.kind {
             let tys: Option<Vec<Ty>> = args.iter().map(|a| prog.type_of(s, a)).collect();
             if let Some(args) = tys {
-                if let Some(c) = prog.spec(&pyfast_infer::SpecKey { func: *fid, args }) {
+                if let Some(c) = prog.spec(&prog.resolve_key(pyfast_infer::SpecKey { func: *fid, args })) {
                     out.insert(c.id);
                 }
             }

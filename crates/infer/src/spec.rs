@@ -333,7 +333,17 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
                     let count = prog.specs.iter().filter(|s| s.key.func == key.func).count();
                     // Hybrid mode: past the limit, calls share one object-typed
                     // specialization (`Program::resolve_key`), which is always allowed.
-                    let generic = prog.boxing() && generic_key(&module.funcs[key.func], &key) == key;
+                    let g = generic_key(&module.funcs[key.func], &key);
+                    let generic = prog.boxing() && g == key;
+                    // Requested in the same round as others that reached the limit:
+                    // the caller resolves to the shared specialization next round.
+                    if count >= MAX_SPECS_PER_FUNCTION && !generic && prog.boxing() {
+                        if !prog.index.contains_key(&g) {
+                            add_spec(&mut prog, g);
+                        }
+                        changed = true;
+                        continue;
+                    }
                     if count >= MAX_SPECS_PER_FUNCTION && !generic {
                         let name = &module.funcs[key.func].name;
                         prog.diagnostics.push(Diagnostic::error(
@@ -603,6 +613,8 @@ pub enum CallClass {
     ClosureCall,
     /// A method of a Rust/C struct handle (`counter.incr(2)`).
     ExtMethod { ext: usize, func: usize },
+    /// `record.get("key"[, default])` with a key of the record (always present).
+    RecordGet(&'static str),
 }
 
 /// A native instance or a union of them.
@@ -770,6 +782,24 @@ impl Ctx<'_, '_> {
                 match ot.as_comp() {
                     Some(Comp::List(e)) if e != t => self.widen(obj, Ty::list(t)),
                     Some(Comp::Dict(k, v)) if v != t => self.widen(obj, Ty::dict(k, t)),
+                    Some(Comp::Record(fs)) => match &index.kind {
+                        ExprKind::Str(k) => match record_with(&fs, k, t) {
+                            Some(r) if r != ot => self.widen(obj, r),
+                            Some(_) => {}
+                            None => {
+                                let d = self.degrade(obj, ot);
+                                if let Some((k, _)) = d.dict_kv() {
+                                    self.widen(obj, Ty::dict(k, t));
+                                }
+                            }
+                        },
+                        _ => {
+                            let d = self.degrade(obj, ot);
+                            if let Some((k, _)) = d.dict_kv() {
+                                self.widen(obj, Ty::dict(k, t));
+                            }
+                        }
+                    },
                     _ => {}
                 }
             }
@@ -823,6 +853,29 @@ impl Ctx<'_, '_> {
         if vt != dest && vt.has_mutable() && is_place(value) {
             self.widen(value, dest);
         }
+    }
+
+    /// A record dict used like a dict (other methods, computed keys,
+    /// iteration): its place becomes a plain `dict[str, V]`; returns that type.
+    fn degrade(&mut self, obj: &Expr, t: Ty) -> Ty {
+        match native::record_dict(t, self.boxing()) {
+            Some(d) => {
+                if is_place(obj) {
+                    self.widen(obj, d);
+                }
+                d
+            }
+            None => t,
+        }
+    }
+
+    /// The type a builtin sees for an argument: records are dicts, except to
+    /// the builtins implemented on records directly.
+    fn record_arg(&mut self, builtin: &str, arg: &Expr, t: Ty) -> Ty {
+        if t.as_record().is_none() || RECORD_BUILTINS.contains(&builtin) || builtin == "isinstance" {
+            return native::record_dict(t, self.boxing()).filter(|_| builtin == "isinstance").unwrap_or(t);
+        }
+        self.degrade(arg, t)
     }
 
     /// A value reaches arbitrary Python code: a mutable native container
@@ -976,7 +1029,10 @@ impl Ctx<'_, '_> {
                 self.block(body, assigns, ret);
             }
             StmtKind::ForIter { var, iter, body, .. } => {
-                let it = match self.expr(iter) {
+                if let Some(t) = self.expr(iter).filter(|t| t.as_record().is_some()) {
+                    self.degrade(iter, t);
+                }
+                let it = match self.expr(iter).map(|t| native::record_dict(t, self.boxing()).unwrap_or(t)) {
                     Some(t) if class_like(t) => match self.dunder(iter, t, "__iter__", &[]) {
                         Some(r) => r,
                         None => {
@@ -1060,7 +1116,12 @@ impl Ctx<'_, '_> {
             }
             StmtKind::Del(target) => match &target.kind {
                 ExprKind::Subscript { obj, index } => {
-                    let ot = self.expr(obj);
+                    // Deleting an added (optional) key keeps the record.
+                    let optional_key = |t: Ty| matches!(&index.kind, ExprKind::Str(k) if t.as_record().is_some_and(|fs| fs.iter().any(|f| f.key == k.as_str() && f.optional)));
+                    let ot = self.expr(obj).map(|t| if t.as_record().is_some() && !optional_key(t) { self.degrade(obj, t) } else { t });
+                    if ot.is_some_and(|t| t.as_record().is_some()) {
+                        return true;
+                    }
                     self.index_types(index);
                     match ot.and_then(|t| t.as_comp()) {
                         Some(Comp::List(_) | Comp::Dict(..)) | None => {}
@@ -1163,6 +1224,36 @@ impl Ctx<'_, '_> {
         let Some(vt) = self.expr(value) else { return };
         let boxing = self.boxing();
         let elem_join = |e: Ty, t: Ty| native::ty_join(e, t, boxing).or(boxing.then_some(Ty::Obj));
+        if let Some(fs) = ot.as_record() {
+            // A literal key: the field's type joins the value's (a new key is
+            // an optional field).
+            if let ExprKind::Str(k) = &index.kind {
+                let cur = fs.iter().find(|f| f.key == k.as_str()).map(|f| f.ty);
+                let joined = cur.map(|c| elem_join(c, vt)).unwrap_or(Some(vt));
+                if let Some((j, r)) = joined.and_then(|j| record_with(&fs, k, j).map(|r| (j, r))) {
+                    if r != ot {
+                        self.widen(obj, r);
+                    }
+                    self.flow(value, vt, j);
+                    return;
+                }
+                if !boxing && joined.is_none() {
+                    self.report(Diagnostic::error("P304", value.span, format!("storing {vt} into key {k:?} of {ot} natively")));
+                    return;
+                }
+            }
+            // A computed key: the record is a plain dict.
+            let it = self.expr(index);
+            let d = self.degrade(obj, ot);
+            if let (Some((k, v)), Some(it)) = (d.dict_kv(), it) {
+                if let (Some(kk), Some(vv)) = (native::ty_join(k, it, boxing).filter(|t| t.is_hashable()), elem_join(v, vt)) {
+                    self.widen(obj, Ty::dict(kk, vv));
+                } else if boxing {
+                    self.widen(obj, Ty::Obj);
+                }
+            }
+            return;
+        }
         match ot.as_comp() {
             Some(Comp::List(e)) => {
                 if let ExprKind::Slice { .. } = index.kind {
@@ -1303,6 +1394,24 @@ impl Ctx<'_, '_> {
         }
         match &func.kind {
             ExprKind::GetAttr { obj, name } => match self.expr(obj) {
+                Some(t) if ops::base(t).as_record().is_some() => {
+                    let fs = ops::base(t).as_record().unwrap();
+                    let _ = &fs;
+                    if name == "get" && (1..=2).contains(&args.len()) && kwargs.is_empty() {
+                        if let ExprKind::Str(k) = &args[0].kind {
+                            return CallClass::RecordGet(pyfast_ir::types::intern_str(k));
+                        }
+                    }
+                    // Any other method: the record is a plain dict here.
+                    let d = self.degrade(obj, ops::base(t));
+                    let argtys: Option<Vec<Ty>> = args.iter().map(|a| self.expr(a)).collect();
+                    let kwtys: Option<Vec<(String, Ty)>> = kwargs.iter().map(|(k, v)| self.expr(v).map(|t| (k.clone(), t))).collect();
+                    match (argtys, kwtys) {
+                        (Some(a), Some(k)) if native::method(d, name, &a, &k, self.boxing()).is_some() => CallClass::Method { recv: d, name: name.clone() },
+                        (Some(_), Some(_)) => CallClass::Bridge,
+                        _ => CallClass::Pending,
+                    }
+                }
                 Some(t) if t != Ty::Obj => {
                     let argtys: Option<Vec<Ty>> = args.iter().map(|a| self.expr(a)).collect();
                     let kwtys: Option<Vec<(String, Ty)>> = kwargs.iter().map(|(k, v)| self.expr(v).map(|t| (k.clone(), t))).collect();
@@ -1321,6 +1430,7 @@ impl Ctx<'_, '_> {
                 let argtys: Option<Vec<Ty>> = args.iter().map(|a| self.expr(a)).collect();
                 let kwtys: Option<Vec<(String, Ty)>> = kwargs.iter().map(|(k, v)| self.expr(v).map(|t| (k.clone(), t))).collect();
                 let (Some(a), Some(k)) = (argtys, kwtys) else { return CallClass::Pending };
+                let a: Vec<Ty> = a.iter().zip(args).map(|(t, x)| self.record_arg(name, x, *t)).collect();
                 if name == "isinstance" && a.len() == 2 {
                     // Native classes: decided by the class hierarchy.
                     let natives: Option<Vec<ClassId>> = match &args[1].kind {
@@ -2056,6 +2166,14 @@ impl Ctx<'_, '_> {
                 }
             }
             ExprKind::Dict(pairs) => {
+                // Distinct literal string keys: a record (one type per key).
+                let skeys: Option<Vec<&str>> = pairs.iter().map(|(k, _)| if let ExprKind::Str(s) = &k.kind { Some(s.as_str()) } else { None }).collect();
+                if let Some(ks) = skeys.filter(|ks| !ks.is_empty() && ks.iter().collect::<HashSet<_>>().len() == ks.len()) {
+                    let vts: Vec<Ty> = pairs.iter().map(|(_, v)| self.expr(v)).collect::<Option<_>>()?;
+                    if vts.iter().all(|t| native::record_field_ok(*t)) {
+                        return Some(Ty::record(ks.iter().zip(vts).map(|(k, t)| Field { key: pyfast_ir::types::intern_str(k), ty: t, optional: false }).collect()));
+                    }
+                }
                 let keys: Vec<Expr> = pairs.iter().map(|(k, _)| k.clone()).collect();
                 let vals: Vec<Expr> = pairs.iter().map(|(_, v)| v.clone()).collect();
                 let k = self.elements(&keys, e, "dict literal keys")?;
@@ -2183,6 +2301,13 @@ impl Ctx<'_, '_> {
                     self.escape(index);
                     return Some(Ty::Obj);
                 }
+                // `record["key"]`: the field's type (a missing key raises KeyError).
+                if let Some(fs) = ops::base(ot).as_record() {
+                    if let ExprKind::Str(k) = &index.kind {
+                        return Some(fs.iter().find(|f| f.key == k.as_str()).map(|f| f.ty).unwrap_or(Ty::never()));
+                    }
+                }
+                let ot = if ops::base(ot).as_record().is_some() { self.degrade(obj, ops::base(ot)) } else { ot };
                 let lit = |x: &Option<Box<Expr>>| -> Option<Option<i64>> {
                     match x.as_deref().map(|e| &e.kind) {
                         None => Some(None),
@@ -2334,6 +2459,20 @@ impl Ctx<'_, '_> {
                 None
             }
             CallClass::StaticBool(_) => Some(Ty::Bool),
+            CallClass::RecordGet(key) => {
+                let ExprKind::GetAttr { obj, .. } = &func.kind else { unreachable!() };
+                let fs = ops::base(self.expr(obj)?).as_record()?;
+                let dflt = match args.get(1) {
+                    Some(a) => self.expr(a)?,
+                    None => Ty::None,
+                };
+                match fs.iter().find(|f| f.key == key) {
+                    // Always present: the default is unused (still evaluated).
+                    Some(f) if !f.optional => Some(f.ty),
+                    Some(f) => native::ty_join(f.ty, dflt, self.boxing()).or(self.boxing().then_some(Ty::Obj)),
+                    None => Some(dflt),
+                }
+            }
             CallClass::Method { recv, name } => {
                 let ExprKind::GetAttr { obj, .. } = &func.kind else { unreachable!() };
                 let a: Vec<Ty> = args.iter().map(|x| self.expr(x)).collect::<Option<_>>()?;
@@ -2368,7 +2507,7 @@ impl Ctx<'_, '_> {
             }
             CallClass::Builtin(name) if self.uses_fn_value(&name, args, kwargs) => self.higher_order(e, &name, args, kwargs),
             CallClass::Builtin(name) => {
-                let a: Vec<Ty> = args.iter().map(|x| self.expr(x)).collect::<Option<_>>()?;
+                let a: Vec<Ty> = args.iter().map(|x| self.expr(x).map(|t| self.record_arg(&name, x, t))).collect::<Option<_>>()?;
                 let k: Vec<(String, Ty)> = kwargs.iter().map(|(n, v)| self.expr(v).map(|t| (n.clone(), t))).collect::<Option<_>>()?;
                 match native::builtin(&name, &a, &k, self.boxing())? {
                     Ok(t) => Some(t),
@@ -2549,4 +2688,21 @@ fn contains_break(stmts: &[Stmt]) -> bool {
         StmtKind::With { body, .. } => contains_break(body),
         _ => false, // breaks inside nested loops belong to those loops
     })
+}
+
+/// Builtins that take a record as it is (iterating it yields its keys).
+pub const RECORD_BUILTINS: &[&str] = &["len", "str", "repr", "bool", "sorted", "list", "tuple", "set", "min", "max", "any", "all", "enumerate", "zip", "reversed"];
+
+/// The record `fs` with key `k` of type `t` (a new key becomes an optional
+/// field). `None` when the value cannot be a record field.
+fn record_with(fs: &[Field], k: &str, t: Ty) -> Option<Ty> {
+    if !native::record_field_ok(t) {
+        return None;
+    }
+    let mut out = fs.to_vec();
+    match out.iter_mut().find(|f| f.key == k) {
+        Some(f) => f.ty = t,
+        None => out.push(Field { key: pyfast_ir::types::intern_str(k), ty: t, optional: true }),
+    }
+    Some(Ty::record(out))
 }

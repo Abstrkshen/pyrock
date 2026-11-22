@@ -1145,8 +1145,29 @@ impl<'l> Lowerer<'l> {
                             _ => false,
                         };
                         if !ok {
-                            self.unsupported(sp, "augmented assignment to this target", "use a temporary variable");
-                            return None;
+                            // `a[f()][k] += v`: evaluate the receiver (and index) once,
+                            // into temporaries, as CPython does.
+                            if !matches!(ty(t), "Subscript" | "Attribute") {
+                                self.unsupported(sp, "augmented assignment to this target", "use a temporary variable");
+                                return None;
+                            }
+                            let loc = &t["_loc"];
+                            let mut stmts = Vec::new();
+                            let mut t2 = t.clone();
+                            let obj_tmp = self.fresh_local();
+                            let obj = self.lower_expr(&t["value"])?;
+                            stmts.push(Stmt { kind: StmtKind::Assign { target: obj_tmp.clone(), value: obj }, span: sp });
+                            t2["value"] = serde_json::json!({"_t": "Name", "id": obj_tmp, "ctx": {"_t": "Load"}, "_loc": loc});
+                            if ty(t) == "Subscript" && !simple(&t["slice"]) && ty(&t["slice"]) != "Slice" {
+                                let idx_tmp = self.fresh_local();
+                                let idx = self.lower_expr(&t["slice"])?;
+                                stmts.push(Stmt { kind: StmtKind::Assign { target: idx_tmp.clone(), value: idx }, span: sp });
+                                t2["slice"] = serde_json::json!({"_t": "Name", "id": idx_tmp, "ctx": {"_t": "Load"}, "_loc": loc});
+                            }
+                            let cur = self.lower_expr(&t2)?;
+                            let v = Expr { kind: ExprKind::BinOp { op, left: Box::new(cur), right: Box::new(value) }, span: sp };
+                            stmts.push(self.lower_store(&t2, v, sp)?);
+                            return Some(self.block_stmt(stmts, sp));
                         }
                         let cur = self.lower_expr(t)?;
                         let v = Expr { kind: ExprKind::BinOp { op, left: Box::new(cur), right: Box::new(value) }, span: sp };

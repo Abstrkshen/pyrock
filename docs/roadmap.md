@@ -81,7 +81,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 
 - [x] Cheaper CPython bridge (attached for the whole run, interned constants, no per-call flush)
 - [x] Native functions and objects callable from CPython threads
-- [ ] Per-key types for dicts with fixed string keys (record dicts → structs)
+- [x] Per-key types for dicts with fixed string keys (record dicts → structs)
+- [ ] Native `math` module
 
 ## Throughout
 
@@ -515,3 +516,31 @@ Each bridged operation cost ~400 ns.
   under the GIL; per-thread execution state (recursion depth, coroutine stacks) stays
   thread-local. Generators and coroutine steps stay bound to their thread.
 * Test: `tests/differential/threads.py`.
+
+### Phase 7.2: record dicts (2026-11-22)
+
+* A dict literal with distinct literal string keys whose values are simple types is a
+  *record* (`Comp::Record`, a list of `Field { key, ty, optional }`): a generated struct
+  `Rec_<hash>(Rc<RefCell<..>>)` with one typed field per key, shared like a dict. Keys
+  assigned after creation are optional fields (`Option<T>` plus a per-instance insertion
+  order), so `hero["prev_bottom"] = ...` keeps the record.
+* Native on records: `d["k"]` reads (KeyError when absent) and writes (the field's type
+  widens per key), `d.get("k"[, default])`, `"k" in d`, `len`, `del d["added"]`, printing
+  and `repr` (insertion order, Python quoting), `==` (order-insensitive), truthiness,
+  iterating keys (`for`, `sorted`, `list`, `min`, ...), and conversion to a Python dict when
+  it reaches CPython (`json.dumps`, library calls).
+* Anything else (a computed key, other methods, `.items()`, `dict(d)`) *degrades* the
+  record: its place becomes a plain `dict[str, V]` through the usual widening, and a record
+  that is not in a place is copied. Records with the same literal keys join key by key;
+  different shapes join as dicts.
+* Fixes found on the way: augmented assignment to any subscript/attribute target
+  (`st["hero"]["lives"] -= 1`, receiver evaluated once); `dict.get(k)` on
+  `dict[str, object]` (missing key is `None`) and `get` defaults that need boxing;
+  `x in d` / `x in s` with a key of another type is `False` (was a compile error); the
+  call graph uses the shared specialization past the limit, as codegen does; a request
+  past the limit within one round falls back to the shared specialization.
+* Measured: the breakout-style update loop (200k frames) runs in 31 ms against CPython's
+  580 ms (18.8x); before this phase pyfast took 1.9 s. `raylib-breakout` goes from 3 to 43
+  native functions; CPython subscripts in it drop from 280 to 19, operators from 296 to
+  131 (most of the rest come from `math.sin` results, which are Python floats).
+* Tests: `tests/differential/record_dicts.py`, `tests/differential/record_state_loop.py`.
