@@ -424,6 +424,9 @@ pub enum ExprKind {
     /// parameter or return). A Python object is unboxed to `ty` with a
     /// checked conversion; a native value keeps its own (runtime) type.
     Annotated { ty: Ty, value: Box<Expr> },
+    /// `(target := value)`: assigns the local (or, with `global`, the global
+    /// cell of that unit) and evaluates to the value.
+    Walrus { target: String, global: Option<usize>, value: Box<Expr> },
     /// Call into a linked Rust or C module.
     ExternCall { ext: usize, func: usize, args: Vec<Expr> },
     /// --- CPython bridge (all produce `object`) ---

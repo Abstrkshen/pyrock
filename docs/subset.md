@@ -213,8 +213,8 @@ whole module through CPython instead, P220):
   attributes after the class statement;
 * `f(*xs)` where `xs` is a list (not a tuple of known length) filling fixed parameters, and
   `*`/`**` arguments to Rust/C functions;
-* `for ... else` / `while ... else`, `match`, `del` of a plain name, `except*`, `**` inside a
-  dict literal, complex numbers;
+* `match`, `type X = ...`, `except*`, `...` as a value, complex numbers, `del` of a
+  function or import name, `:=` inside generator expressions and lambdas;
 * relative imports, `from x import *`, a natively compiled module (`.py`/`.rs`/`.c` next to
   the file) imported inside a function or block (CPython imports there are fine);
 * `globals()`, `locals()`, `vars()`/`dir()` without arguments, `eval`/`exec` without an

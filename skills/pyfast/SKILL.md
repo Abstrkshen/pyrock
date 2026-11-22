@@ -82,10 +82,9 @@ Not supported in either mode: classes with a CPython base class or a metaclass (
 an imported `.py`, which falls back to CPython),
 relative imports, `import *`.
 
-Not supported either: `match`, `:=`, `for`/`while ... else`, `del name`, a native module
-imported inside a function, `Enum`/`NamedTuple` subclasses,
+Not supported either: `match`, a native module imported inside a function, `Enum`/`NamedTuple` subclasses,
 multiple inheritance, method decorators other than `@property`/`@staticmethod`/`@classmethod`.
-On the standard library as it is, 60% of functions are accepted (`docs/coverage.md` in the repo).
+On the standard library as it is, 61% of functions are accepted (`docs/coverage.md` in the repo).
 
 See [references/language.md](references/language.md) for the precise subset, semantics and
 the rewrites that make code compile.

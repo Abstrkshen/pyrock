@@ -7,19 +7,19 @@ covered.
 
 ## In short
 
-* **Language constructs:** 51 of the 55 statement and expression nodes in Python 3.12's
-  `ast` module compile natively (table below). The 4 missing are `match`, the walrus
-  operator `:=`, `type X = ...` and `except*`. Some forms of supported nodes are missing too:
-  the `...` literal, complex numbers, and `*`/`**` unpacking inside list/dict literals. Several supported nodes have unsupported forms: `for ... else`,
-  `del name`, `class` inside a function or `if`, relative imports, and classes with a CPython base class (`Enum`, `NamedTuple`; `Exception` subclasses are
-  fine), multiple bases or a metaclass.
+* **Language constructs:** 52 of the 55 statement and expression nodes in Python 3.12's
+  `ast` module compile natively (table below). The 3 missing are `match`, `type X = ...`
+  and `except*`. Some forms of supported nodes are missing too: `class` inside a function
+  or `if`, relative imports, complex numbers, `...` as a value, and classes with a CPython
+  base class (`Enum`, `NamedTuple`; `Exception` subclasses are fine), multiple bases or a
+  metaclass.
 * **Values:** everything a program builds itself (numbers, strings, lists, dicts, sets,
   tuples, classes, closures, generators, coroutines) is native. Values from CPython imports
   (numpy arrays, sockets, `re` matches, ...) stay Python objects; in hybrid mode they work
   through CPython at reported boundaries, and native-only mode rejects them.
-* **Real code, as it is:** 60% of the functions and methods in the standard library pass
-  (59% of their lines). Third-party packages pass at 32–40%. Whole modules pass much less
-  often (31 of 167 stdlib modules), because one blocker in a module stops that whole module.
+* **Real code, as it is:** 61% of the functions and methods in the standard library pass
+  (62% of their lines). Third-party packages pass at 33–43%. Whole modules pass much less
+  often (40 of 167 stdlib modules), because one blocker in a module stops that whole module.
 * **Code written for pyfast:** the 21 samples, 3 demos and 14 user samples all compile; the
   fully native ones need no CPython at all.
 
@@ -40,9 +40,9 @@ All statement and expression nodes of Python 3.12's `ast` module.
 | `ClassDef` | native, at module level | single inheritance; `@dataclass`; not inside a function or `if`, not with a CPython base class, several bases, `metaclass=` or other class decorators |
 | `Return`, `Pass`, `Break`, `Continue`, `Expr` | native | |
 | `Assign`, `AugAssign`, `AnnAssign` | native | including unpacking targets, attributes and subscripts |
-| `Delete` | native for `del x[i]`, `del d[k]`, `del obj.attr` | `del name` is P100 |
-| `For`, `AsyncFor` | native | `for ... else` is P100 |
-| `While` | native | `while ... else` is P100 |
+| `Delete` | native | `del x[i]`, `del d[k]`, `del obj.attr`, `del name` (unbound afterwards) |
+| `For`, `AsyncFor` | native | including `for ... else` |
+| `While` | native | including `while ... else` |
 | `If` | native | |
 | `With`, `AsyncWith` | native for native classes, bridged for Python objects | |
 | `Raise` | native | including `raise X from Y` |
@@ -54,14 +54,14 @@ All statement and expression nodes of Python 3.12's `ast` module.
 | `Match` | not supported | |
 | `TypeAlias` (`type X = ...`) | not supported | |
 | `BoolOp`, `BinOp`, `UnaryOp`, `Compare`, `IfExp` | native | `@` is bridged (numpy) |
-| `NamedExpr` (`:=`) | not supported | |
+| `NamedExpr` (`:=`) | native | in conditions, loops and list/set/dict comprehensions (binds the enclosing scope); not in generator expressions or lambdas |
 | `Lambda` | native | |
-| `Dict`, `Set`, `List`, `Tuple` | native | `{**d}` and `[*a, *b]` in literals are P100 |
+| `Dict`, `Set`, `List`, `Tuple` | native | including `[*a, *b]`, `(*a, x)`, `{*a}`, `{**d, "k": v}` |
 | `ListComp`, `SetComp`, `DictComp`, `GeneratorExp` | native | generator expressions are lazy; async comprehensions too |
 | `Await`, `Yield`, `YieldFrom` | native | |
 | `Call` | native | keyword arguments, `f(*t)` with a tuple, `f(**d)` into Python callables |
 | `JoinedStr`, `FormattedValue` | native | full format-spec mini-language |
-| `Constant` | native for int (64-bit), float, str, bool, None | `bytes` are CPython objects; `...` and complex are P100; ints beyond 64 bits are P110 |
+| `Constant` | native for int (64-bit), float, str, bool, None | `bytes` are CPython objects; `...` as a statement (a placeholder body) is `pass`, as a value it is P100; complex is P100; ints beyond 64 bits are P110 |
 | `Attribute`, `Subscript`, `Slice`, `Starred`, `Name` | native | |
 
 ## Measured on real code
@@ -75,14 +75,15 @@ Results (pyfast 0.1.0, CPython 3.12.3, 2026-11-23):
 
 | Corpus | Modules with no error | Functions + methods accepted |
 |---|---|---|
-| CPython standard library (top-level modules) | 31 / 167 (19%) | 4071 / 6823 (59.7%; 58.9% of lines) |
-| `requests` | 3 / 19 | 107 / 267 (40.1%) |
-| `huggingface_hub` | 0 / 35 | 352 / 877 (40.1%) |
-| `langchain_core` | 5 / 18 | 35 / 108 (32.4%) |
+| CPython standard library (top-level modules) | 40 / 167 (24%) | 4140 / 6823 (60.7%; 61.5% of lines) |
+| `requests` | 3 / 19 | 114 / 267 (42.7%) |
+| `huggingface_hub` | 0 / 35 | 367 / 877 (41.8%) |
+| `langchain_core` | 5 / 18 | 36 / 108 (33.3%) |
 
 Before phase 8 started (same day): stdlib 14 modules and 54.3% of functions; `requests`
-38.2%, `huggingface_hub` 37.5%. Imports inside functions and blocks, non-literal defaults
-and functions defined in module-level blocks account for the difference.
+38.2%, `huggingface_hub` 37.5%, `langchain_core` 32.4%. Imports inside functions and
+blocks, non-literal defaults, functions defined in module-level blocks, `for`/`while ...
+else`, `:=`, `del name` and `*`/`**` in literals account for the difference.
 
 What the measurement means:
 
@@ -104,17 +105,16 @@ left out because most of them follow from another blocker):
 | 152 | Method decorator other than `@property`/`@staticmethod`/`@classmethod` | `@abstractmethod` (107), `@functools.cached_property`, `@lru_cache`, `@contextmanager` |
 | 110 | Computed class-body assignment | `__add__, __radd__ = _operator_fallbacks(...)`, dispatch tables |
 | 101 | Base class that isn't a native class | `Enum`, `NamedTuple`, `dict`, `threading.Thread`, ABCs |
-| 54 | `del name` | cleaning up module namespaces |
-| 42 / 4 | `for ... else` / `while ... else` | |
 | 41 | Class keywords | `metaclass=ABCMeta` |
 | 40 | `class` inside a function or block | |
 | 39 | Multiple inheritance | mixins |
-| 35 | Walrus `:=` | |
 | 33 | `eval`/`exec`/`globals()`/`locals()` without a namespace | |
+| 27 | Other statements in a class body | `if` / `for` in a class body |
 | 25 | A module-level name bound both by `def`/`import` and by assignment | `try: from _c import f` / `except: f = None` |
+| 24 | A method or class attribute used as a value | `Class.method` passed around |
 | 22 | Class decorators | `@functools.total_ordering`, `@dataclass(frozen=True)` options |
-| 20 | `[*a, *b]` / `{*a}` | |
-| 11 | `from x import *` | |
+| 22 | Adding class attributes after the class statement | `Cls.x = ...` at module level |
+| 20 | `del` of a function or import name | module cleanup: `del _f`, `del re` |
 
 In third-party packages, relative imports (`from . import utils`) lead, followed by method
 decorators.

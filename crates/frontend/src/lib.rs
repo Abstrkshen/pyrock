@@ -12,6 +12,7 @@
 
 pub mod externs;
 
+mod desugar;
 use pyfast_ir::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -258,6 +259,8 @@ impl Loader {
         }
         self.loading.insert(canon.clone());
         let dir = canon.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let mut json = json;
+        desugar::rewrite(&mut json["module"]);
         let mut lw = Lowerer::new(self, uid, dir);
         lw.lower_unit(&json["module"]);
         let diags = std::mem::take(&mut lw.diags);
@@ -535,6 +538,45 @@ fn collect_bindings(body: &[Value], out: &mut Vec<String>, top: bool) {
     collect_bindings_in(body, out, top, false)
 }
 
+/// Names bound by `:=` in a statement's own expressions (not in nested
+/// functions, classes, lambdas or comprehensions, which have their own
+/// scope; nested statements are visited by the caller).
+fn walrus_targets(v: &Value, out: &mut Vec<String>) {
+    fn go(v: &Value, out: &mut Vec<String>, top: bool) {
+        match v {
+            Value::Array(a) => a.iter().for_each(|x| go(x, out, false)),
+            Value::Object(m) => {
+                let t = m.get("_t").and_then(|t| t.as_str()).unwrap_or("");
+                if !top
+                    && matches!(
+                        t,
+                        // List/set/dict comprehensions are lowered inline, and
+                        // `:=` in them binds this scope, as in CPython.
+                        "FunctionDef" | "AsyncFunctionDef" | "ClassDef" | "Lambda" | "GeneratorExp"
+                    )
+                {
+                    return;
+                }
+                if t == "NamedExpr" {
+                    let n = sstr(&v["target"], "id");
+                    if !out.iter().any(|x| x == n) {
+                        out.push(n.to_string());
+                    }
+                }
+                for (k, x) in m {
+                    // Statement lists are handled by the caller.
+                    if matches!(k.as_str(), "body" | "orelse" | "finalbody" | "handlers") && x.is_array() {
+                        continue;
+                    }
+                    go(x, out, false);
+                }
+            }
+            _ => {}
+        }
+    }
+    go(v, out, true)
+}
+
 /// The names an `import` statement binds (`import a.b` binds `a`).
 fn import_names(st: &Value) -> Vec<String> {
     arr(st, "names")
@@ -566,6 +608,7 @@ fn collect_bindings_in(body: &[Value], out: &mut Vec<String>, top: bool, nested:
         }
     }
     for st in body {
+        walrus_targets(st, out);
         match ty(st) {
             "Assign" => {
                 for t in arr(st, "targets") {
@@ -1519,8 +1562,20 @@ impl<'l> Lowerer<'l> {
                             let name = sstr(t, "attr").to_string();
                             stmts.push(Stmt { kind: StmtKind::Del(Expr { kind: ExprKind::GetAttr { obj: Box::new(obj), name }, span: tsp }), span: tsp });
                         }
+                        // `del x`: the variable is unbound again (a later read
+                        // raises UnboundLocalError / NameError, as in CPython).
+                        "Name" => {
+                            let target = self.lower_name(sstr(t, "id"), tsp)?;
+                            match target.kind {
+                                ExprKind::Local(_) | ExprKind::Global { .. } => stmts.push(Stmt { kind: StmtKind::Del(target), span: tsp }),
+                                _ => {
+                                    self.unsupported(tsp, "`del` of this name", "rebind it instead (e.g. to None)");
+                                    return None;
+                                }
+                            }
+                        }
                         _ => {
-                            self.unsupported(tsp, "`del` of a name", "rebind it instead (e.g. to None)");
+                            self.unsupported(tsp, "`del` of this target", "delete names, items or attributes");
                             return None;
                         }
                     }
@@ -1798,6 +1853,23 @@ impl<'l> Lowerer<'l> {
             "BoolOp" => {
                 let op = if ty(&e["op"]) == "And" { BoolOpKind::And } else { BoolOpKind::Or };
                 ExprKind::BoolOp { op, values: self.lower_exprs(arr(e, "values"))? }
+            }
+            "NamedExpr" => {
+                let name = sstr(&e["target"], "id").to_string();
+                let value = self.lower_expr(&e["value"])?;
+                if !self.locals.contains(&name) && !self.fn_globals.contains(&name) && !self.globals.contains(&name) && !self.fn_nonlocals.contains(&name) {
+                    // Inside a comprehension, `:=` binds the enclosing scope.
+                    self.unsupported(sp, "`:=` inside a comprehension or lambda", "assign the value in a statement before it");
+                    return None;
+                }
+                match self.bind_target(name, value) {
+                    StmtKind::Assign { target, value } => ExprKind::Walrus { target, global: None, value: Box::new(value) },
+                    StmtKind::AssignGlobal { unit, name, value } => ExprKind::Walrus { target: name, global: Some(unit), value: Box::new(value) },
+                    _ => {
+                        self.unsupported(sp, "`:=` on this variable", "assign it in a statement");
+                        return None;
+                    }
+                }
             }
             "IfExp" => ExprKind::IfExp {
                 test: Box::new(self.lower_expr(&e["test"])?),

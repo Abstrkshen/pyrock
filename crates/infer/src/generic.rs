@@ -399,6 +399,13 @@ impl State<'_> {
                 }
                 Sym::Con(self.m.externs[*ext].funcs[*func].ret.ty())
             }
+            ExprKind::Walrus { target, global, value } => {
+                let v = self.expr(value, cx);
+                if global.is_none() {
+                    self.assign(target, v, cx);
+                }
+                v
+            }
             ExprKind::Annotated { ty, value } => {
                 self.expr(value, cx);
                 Sym::Con(*ty)

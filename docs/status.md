@@ -17,9 +17,9 @@ exception line.
 
 ## How much of Python
 
-51 of the 55 statement and expression kinds of Python 3.12 compile natively. The missing
-ones are `match`, `:=`, `type X = ...` and `except*`. Measured on code as it is, 60% of the
-standard library's functions and methods are accepted, and 32–40% of those in `requests`,
+52 of the 55 statement and expression kinds of Python 3.12 compile natively. The missing
+ones are `match`, `type X = ...` and `except*`. Measured on code as it is, 61% of the
+standard library's functions and methods are accepted, and 33–43% of those in `requests`,
 `huggingface_hub` and `langchain_core`. Library code leans on `abc`/`functools` decorators,
 `Enum`/`NamedTuple` classes, mixins and relative imports, which are the main gaps.
 Details and the ranked blockers: [coverage.md](coverage.md).
@@ -116,8 +116,7 @@ next to the program; compiled dependencies are cached in `~/.cache/pyfast/target
   metaclasses, class decorators other than `@dataclass`, method decorators other than
   `@property`/`@staticmethod`/`@classmethod` (a module using them is imported through
   CPython instead, warning P220).
-* `match`, `:=`, `for`/`while ... else`, `del name`, `except*`, `[*a, *b]`, `{**d}`, `...`,
-  complex numbers.
+* `match`, `type X = ...`, `except*`, complex numbers.
 * `f(*xs)` where `xs` is a list filling fixed parameters.
 * Relative imports, `import *`, a native module (`.py`/`.rs`/`.c`) imported inside a function.
 * Arbitrary-precision integers.

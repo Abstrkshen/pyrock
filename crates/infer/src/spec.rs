@@ -1523,6 +1523,12 @@ impl Ctx<'_, '_> {
                 ExprKind::GetAttr { obj, .. } => {
                     self.expr(obj);
                 }
+                ExprKind::Local(n) => {
+                    self.expr(target);
+                    if let Some(set) = &mut self.nn {
+                        set.remove(n);
+                    }
+                }
                 _ => {}
             },
             StmtKind::Import(ImportAction::Unit(fid)) => {
@@ -2549,6 +2555,25 @@ impl Ctx<'_, '_> {
                 self.merge(&[a?, b?], e, "conditional expression")
             }
             ExprKind::ExternCall { ext, func, args } => self.extern_args(e, *ext, *func, args),
+            ExprKind::Walrus { target, global, value } => {
+                let t = self.expr(value);
+                match global {
+                    Some(u) => {
+                        if let Some(t) = t {
+                            self.gassigns.push(((*u, target.clone()), t));
+                        }
+                    }
+                    None => {
+                        if let Some(t) = t {
+                            if self.local_ty(target) != Some(t) {
+                                self.widens.push((target.clone(), t));
+                            }
+                        }
+                        self.nn_assign(target, t);
+                    }
+                }
+                t
+            }
             ExprKind::Annotated { ty, value } if ty.as_comp().is_some() => {
                 // A container annotation on a native value: its element types
                 // join the annotation's (`parts: list[str] = []`).
@@ -2838,6 +2863,8 @@ impl Ctx<'_, '_> {
                     Callee::Builtin(b @ (Builtin::Str | Builtin::Bool | Builtin::Print | Builtin::PrintKw)) if tys.iter().any(|t| class_like(*t)) => {
                         Some(if matches!(b, Builtin::Str) { Ty::Str } else if matches!(b, Builtin::Bool) { Ty::Bool } else { Ty::None })
                     }
+                    // An argument that cannot exist: the call is never reached.
+                    Callee::Builtin(b) if !matches!(b, Builtin::Print | Builtin::PrintKw) && tys.iter().any(|t| t.is_never()) => Some(Ty::never()),
                     Callee::Builtin(b) => match ops::builtin(*b, &tys, self.boxing()) {
                         Ok(t) => Some(t),
                         Err(msg) => {
@@ -3005,6 +3032,9 @@ impl Ctx<'_, '_> {
             CallClass::Builtin(name) => {
                 let a: Vec<Ty> = args.iter().map(|x| self.expr(x).map(|t| self.record_arg(&name, x, t))).collect::<Option<_>>()?;
                 let k: Vec<(String, Ty)> = kwargs.iter().map(|(n, v)| self.expr(v).map(|t| (n.clone(), t))).collect::<Option<_>>()?;
+                if a.iter().any(|t| t.is_never()) {
+                    return Some(Ty::never());
+                }
                 match native::builtin(&name, &a, &k, self.boxing())? {
                     Ok(t) => Some(t),
                     Err(msg) => {

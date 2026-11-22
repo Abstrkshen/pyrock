@@ -879,6 +879,22 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     let o = self.obj(obj);
                     writeln!(out, "{ind}rt::py::delattr(&{}, {name:?})?;", borrow(&o)).unwrap();
                 }
+                // `del x`: unbound from here (deleting an unbound one is the
+                // same UnboundLocalError / NameError as reading it).
+                ExprKind::Local(n) => {
+                    let (check, _) = self.expr(target);
+                    writeln!(out, "{ind}let _ = {check};").unwrap();
+                    if self.is_cell(n) {
+                        writeln!(out, "{ind}*{}.borrow_mut() = None;", rid(n)).unwrap();
+                    } else if self.spec.maybe_unbound.contains(n) {
+                        writeln!(out, "{ind}{} = None;", rid(n)).unwrap();
+                    }
+                }
+                ExprKind::Global { unit, name } => {
+                    let (check, _) = self.expr(target);
+                    writeln!(out, "{ind}let _ = {check};").unwrap();
+                    writeln!(out, "{ind}rt::gclear(&{});", gname(*unit, name)).unwrap();
+                }
                 _ => unreachable!(),
             },
             StmtKind::Break => writeln!(out, "{ind}{}", self.jump("break", "Break")).unwrap(),
@@ -1048,11 +1064,18 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
     fn expr(&mut self, e: &Expr) -> (String, Ty) {
         let t = self.ty(e);
         // A value of type Never cannot exist: evaluate operands, then diverge.
-        if t.is_never() && matches!(e.kind, ExprKind::BinOp { .. } | ExprKind::Unary { .. }) {
+        let never_call_args = |e: &Expr| -> Option<Vec<Expr>> {
+            match &e.kind {
+                ExprKind::Call { callee: Callee::Builtin(_), args, .. } => Some(args.clone()),
+                ExprKind::CallObj { func, args, .. } if matches!(func.kind, ExprKind::PyBuiltin(_)) => Some(args.clone()),
+                _ => None,
+            }
+        };
+        if t.is_never() && (matches!(e.kind, ExprKind::BinOp { .. } | ExprKind::Unary { .. }) || never_call_args(e).is_some()) {
             let parts: Vec<String> = match &e.kind {
                 ExprKind::BinOp { left, right, .. } => vec![self.expr(left).0, self.expr(right).0],
                 ExprKind::Unary { operand, .. } => vec![self.expr(operand).0],
-                _ => vec![],
+                _ => never_call_args(e).unwrap_or_default().iter().map(|a| self.expr(a).0).collect(),
             };
             let lets: String = parts.iter().map(|p| format!("let _ = {p}; ")).collect();
             return (format!("{{ {lets}unreachable!() }}"), t);
@@ -1372,6 +1395,18 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     }
                     Callee::Builtin(b) => self.builtin(*b, vals, t),
                 }
+            }
+            ExprKind::Walrus { target, global, value } => {
+                let (vc, vt) = self.expr(value);
+                let mut set = String::new();
+                match global {
+                    Some(u) => {
+                        let gt = self.prog.globals.get(&(*u, target.clone())).and_then(|s| s.known()).unwrap_or(vt);
+                        set = format!("rt::gset(&{}, {}); ", gname(*u, target), coerce("__w.clone()".into(), vt, gt));
+                    }
+                    None => self.assign(target, "__w.clone()".into(), vt, 0, &mut set),
+                }
+                format!("{{ let __w: {} = {vc}; {} __w }}", vt.rust(), set.trim_end())
             }
             ExprKind::Annotated { ty, value } => {
                 let (c, vt) = self.expr(value);

@@ -85,7 +85,13 @@ fn stmt(s: &Stmt, mut cur: Set, out: &mut HashSet<String>) -> Option<Set> {
             return None;
         }
         StmtKind::AssignGlobal { value, .. } => expr(value, &cur, out),
-        StmtKind::Del(t) => expr(t, &cur, out),
+        StmtKind::Del(t) => {
+            expr(t, &cur, out);
+            // `del x` unbinds it: later reads may see it unbound.
+            if let ExprKind::Local(n) = &t.kind {
+                cur.remove(n);
+            }
+        }
         StmtKind::With { ctx, var, body, .. } => {
             expr(ctx, &cur, out);
             let mut inner = cur.clone();
@@ -161,7 +167,7 @@ fn expr(e: &Expr, cur: &Set, out: &mut HashSet<String>) {
         ExprKind::Call { args, .. } | ExprKind::ExternCall { args, .. } | ExprKind::List(args) | ExprKind::Tuple(args) => {
             args.iter().for_each(|a| expr(a, cur, out))
         }
-        ExprKind::GetAttr { obj, .. } | ExprKind::Annotated { value: obj, .. } => expr(obj, cur, out),
+        ExprKind::GetAttr { obj, .. } | ExprKind::Annotated { value: obj, .. } | ExprKind::Walrus { value: obj, .. } => expr(obj, cur, out),
         ExprKind::CallObj { func, args, kwargs } => {
             expr(func, cur, out);
             args.iter().for_each(|a| expr(a, cur, out));

@@ -569,7 +569,7 @@ fn children(e: &Expr, skip_callee: bool) -> Vec<&Expr> {
         ExprKind::BoolOp { values, .. } => values.iter().collect(),
         ExprKind::IfExp { test, body, orelse } => vec![test, body, orelse],
         ExprKind::Call { args, .. } | ExprKind::ExternCall { args, .. } | ExprKind::List(args) | ExprKind::Tuple(args) | ExprKind::NewExc { args, .. } | ExprKind::Set(args) => args.iter().collect(),
-        ExprKind::GetAttr { obj, .. } | ExprKind::Annotated { value: obj, .. } | ExprKind::Unpack { value: obj, .. } | ExprKind::Starred(obj) => vec![obj],
+        ExprKind::GetAttr { obj, .. } | ExprKind::Annotated { value: obj, .. } | ExprKind::Walrus { value: obj, .. } | ExprKind::Unpack { value: obj, .. } | ExprKind::Starred(obj) => vec![obj],
         ExprKind::CallObj { func, args, kwargs } => {
             let mut v: Vec<&Expr> = Vec::new();
             if skip_callee {
@@ -668,7 +668,7 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr), skip_callee: bool) {
         ExprKind::Call { args, .. } | ExprKind::ExternCall { args, .. } | ExprKind::List(args) | ExprKind::Tuple(args) | ExprKind::NewExc { args, .. } | ExprKind::Set(args) => {
             args.iter().for_each(|a| walk_expr(a, f, skip_callee))
         }
-        ExprKind::GetAttr { obj, .. } | ExprKind::Annotated { value: obj, .. } => walk_expr(obj, f, skip_callee),
+        ExprKind::GetAttr { obj, .. } | ExprKind::Annotated { value: obj, .. } | ExprKind::Walrus { value: obj, .. } => walk_expr(obj, f, skip_callee),
         ExprKind::CallObj { func, args, kwargs } => {
             if skip_callee {
                 // Visit the receiver of `recv.method(...)` but not the lookup itself.

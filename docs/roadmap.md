@@ -119,7 +119,8 @@ Language coverage (ordered by how much code each one blocks in the standard libr
 - [x] Non-literal default values of top-level functions, evaluated once at definition (233)
 - [x] Functions defined inside module-level `if`/`try` blocks
 - [ ] `@abstractmethod`, `@functools.cached_property`, `@lru_cache` on methods, `@contextmanager` (152)
-- [ ] Computed class-body assignments, `del name`, `for`/`while ... else`, `:=`, `[*a, *b]`, `{**d}`, `...`
+- [x] `del name`, `for`/`while ... else`, `:=`, `[*a, *b]`, `{**d}`, `...` placeholders
+- [ ] Computed class-body assignments, `del` of a function or import name, `class` inside a function or block
 - [ ] `Enum`, `NamedTuple` and `TypedDict` classes; multiple inheritance (mixins)
 - [ ] Relative imports (the main blocker in packages), `match`
 - [ ] Arbitrary-precision integers (`Project.md` §6 and M4; today results beyond i64 raise `OverflowError`)
@@ -835,3 +836,25 @@ runnable ones print the same as CPython.
 * Tests: `tests/differential/late_element_types.py`, `none_narrowing.py`,
   `local_annotations.py` (all also pass native-only). `cargo test --workspace`, samples
   21/21, demos 3/3.
+
+### Phase 8: loop `else`, `:=`, `del name`, unpacking in literals (2026-11-23)
+
+* New `crates/frontend/src/desugar.rs`, run on the AST before lowering:
+  `for`/`while ... else` become a flag set before each `break` of that loop (not of nested
+  loops; a nested loop's `else` does belong to it) and an `if not flag:` after the loop;
+  `...` as a statement becomes `pass`; `[*a, b]`, `(*a, b)`, `{*a, b}` and
+  `{**d, "k": v}` become `list(a) + [b]`, `tuple(...)`, `set(a) | {b}` and
+  `dict(d) | dict({"k": v})`, evaluated left to right.
+* `:=`: a new `ExprKind::Walrus` (assigns the local or global cell, evaluates to the value).
+  Its targets are bindings of the enclosing scope, also from list/set/dict comprehensions
+  (lowered inline), as in CPython; inside generator expressions and lambdas it is P100.
+* `del name` unbinds a local or a module variable: later reads may see it unbound (the
+  definite-assignment pass treats `del` as an unbinding), raising `UnboundLocalError` /
+  `NameError` as CPython does; a global cell is cleared.
+* A builtin applied to a value that cannot exist (`len(w)` for `w` from an empty list) is
+  unreachable (`Never`) rather than a type error.
+* Coverage: stdlib 59.7% → 60.7% of functions, 31 → 40 modules; `requests` 42.7%,
+  `huggingface_hub` 41.8%, `langchain_core` 33.3%.
+* Tests: `tests/differential/loop_else_unpacking.py`, `walrus.py`, `del_names.py` (all
+  native-only where they don't use CPython). `cargo test --workspace`, samples 21/21,
+  demos 3/3.
