@@ -129,7 +129,7 @@ Language coverage (ordered by how much code each one blocks in the standard libr
 
 Known bugs:
 
-- [ ] `globals()` panics at runtime; `eval`, `exec` and `locals()` raise
+- [x] `globals()` panicked at runtime; `eval`, `exec` and `locals()` raised
       `SystemError: frame does not exist` (compiled code has no Python frame)
 - [ ] `.ignore/samples/raylib-breakout`: the camera offset reaches `draw_sky` as `object`
       although every call site passes a native number, so part of the per-frame drawing is
@@ -730,3 +730,17 @@ Each bridged operation cost ~400 ns.
   longer emitted); added P002, P303, P308; listed every unsupported construct.
 * Phase 8 above lists what `Project.md` asks for that isn't built, plus two known bugs found
   during the review.
+
+### Phase 8: frame-reading builtins (2026-11-23)
+
+* `globals()` called from compiled code made CPython return NULL without setting an
+  exception, and PyO3 panicked; `eval`/`exec` without a namespace and `locals()` raised
+  `SystemError: frame does not exist`. Compiled code has no Python frame for them.
+* Now `globals()`, `locals()`, `vars()`/`dir()` without arguments and `eval`/`exec`
+  without an explicit `globals` are rejected at compile time (P100, with a note on what to
+  do). An imported `.py` that uses them is therefore imported through CPython as a whole
+  (P220) and behaves exactly as in CPython. `eval(src, ns)` / `exec(src, ns)` with a
+  namespace dict still run in CPython.
+* Tests: `tests/diagnostics/frame_builtins.py`, `tests/differential/eval_namespaces.py`
+  (with `_eval_helper.py`, which uses `globals()` and bare `eval` and is imported through
+  CPython).

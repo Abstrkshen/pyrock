@@ -2543,6 +2543,30 @@ impl<'l> Lowerer<'l> {
     fn lower_call(&mut self, e: &Value) -> Option<Expr> {
         let sp = self.span(e);
         let f = &e["func"];
+        // Builtins that read the caller's Python frame: compiled code has none,
+        // so CPython would fail (`globals()` even returns NULL without an
+        // exception). Reject them; an imported module using them is then
+        // imported through CPython as a whole (P220), with exact semantics.
+        if ty(f) == "Name" && !self.locals.contains(sstr(f, "id")) && !self.bindings.contains_key(sstr(f, "id")) {
+            let id = sstr(f, "id");
+            let n_args = arr(e, "args").len();
+            let has_ns_kw = arr(e, "keywords").iter().any(|k| matches!(k["arg"].as_str(), Some("globals") | None));
+            let frame_reader = match id {
+                "globals" | "locals" => true,
+                "vars" | "dir" => n_args == 0,
+                "eval" | "exec" => n_args < 2 && !has_ns_kw,
+                _ => false,
+            };
+            if frame_reader && self.ld.builtins.contains(id) {
+                let note = if matches!(id, "eval" | "exec") {
+                    "compiled code has no Python namespace for it to use; pass one explicitly, e.g. `eval(src, {})` or `exec(src, ns)`"
+                } else {
+                    "compiled code has no Python frame or namespace to read; keep this code in a module imported through CPython"
+                };
+                self.unsupported(sp, &format!("`{id}()` without an explicit namespace"), note);
+                return None;
+            }
+        }
         let mut args = Vec::new();
         for a in arr(e, "args") {
             if ty(a) == "Starred" {

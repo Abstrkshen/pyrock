@@ -1,0 +1,12 @@
+tests/diagnostics/frame_builtins.py:2:7  P100  error: `eval()` without an explicit namespace is not supported yet
+    compiled code has no Python namespace for it to use; pass one explicitly, e.g. `eval(src, {})` or `exec(src, ns)`
+tests/diagnostics/frame_builtins.py:3:1  P100  error: `exec()` without an explicit namespace is not supported yet
+    compiled code has no Python namespace for it to use; pass one explicitly, e.g. `eval(src, {})` or `exec(src, ns)`
+tests/diagnostics/frame_builtins.py:4:11  P100  error: `globals()` without an explicit namespace is not supported yet
+    compiled code has no Python frame or namespace to read; keep this code in a module imported through CPython
+tests/diagnostics/frame_builtins.py:5:7  P100  error: `locals()` without an explicit namespace is not supported yet
+    compiled code has no Python frame or namespace to read; keep this code in a module imported through CPython
+tests/diagnostics/frame_builtins.py:6:7  P100  error: `vars()` without an explicit namespace is not supported yet
+    compiled code has no Python frame or namespace to read; keep this code in a module imported through CPython
+tests/diagnostics/frame_builtins.py:7:7  P100  error: `dir()` without an explicit namespace is not supported yet
+    compiled code has no Python frame or namespace to read; keep this code in a module imported through CPython

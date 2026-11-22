@@ -211,4 +211,6 @@ whole module through CPython instead, P220):
 * `for ... else` / `while ... else`, `match`, `del` of a plain name, `except*`, `**` inside a
   dict literal, complex numbers;
 * relative imports, `from x import *`, imports inside functions;
+* `globals()`, `locals()`, `vars()`/`dir()` without arguments, `eval`/`exec` without an
+  explicit namespace (compiled code has no Python frame for them; `eval(src, ns)` works);
 * arbitrary-precision integers (results beyond i64 raise `OverflowError`).

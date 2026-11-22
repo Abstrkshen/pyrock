@@ -126,8 +126,8 @@ items in [roadmap.md](roadmap.md) phase 8.
   integer), tracebacks show only the last line, and the other differences are listed in
   [subset.md](subset.md#known-divergences-documented-tested-where-possible).
 * **The dynamic features** are never assumed natively. `getattr`/`setattr` with computed
-  names work on Python objects through CPython. `eval`, `exec`, `globals()` and `locals()`
-  compile as CPython calls but fail at runtime, because compiled code has no Python frame
-  for them to run in: `eval`/`exec`/`locals()` raise `SystemError: frame does not exist`,
-  and `globals()` currently aborts with a Rust panic (a bug, tracked in
-  [roadmap.md](roadmap.md) phase 8). Native-only mode rejects all four (P210). Rebinding module-level functions is rejected (P141).
+  names work on Python objects through CPython. `eval` and `exec` with an explicit
+  namespace (`eval(src, {"x": 1})`) run in CPython. Without one, and `globals()`,
+  `locals()`, `vars()` and `dir()` without arguments, are rejected (P100): compiled code
+  has no Python frame for them to read. A module that uses them is imported through
+  CPython as a whole in hybrid mode (P220), so it behaves exactly as in CPython. Rebinding module-level functions is rejected (P141).

@@ -122,7 +122,9 @@ next to the program; compiled dependencies are cached in `~/.cache/pyfast/target
   fixed parameters.
 * Relative imports, `import *`, imports inside functions or blocks.
 * Arbitrary-precision integers.
-* `eval`, `exec`, `globals()`, `locals()` (they fail at runtime; see the roadmap's known bugs).
+* `globals()`, `locals()`, `vars()`/`dir()` without arguments, and `eval`/`exec` without an
+  explicit namespace dict (compiled code has no Python frame; a module using them is imported
+  through CPython).
 
 ## Compared with Project.md
 
