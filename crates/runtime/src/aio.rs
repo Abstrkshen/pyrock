@@ -33,6 +33,15 @@ impl<T> Coro<T> {
         Coro { name, body: Rc::new(RefCell::new(Some(Box::new(f)))) }
     }
 
+    /// A coroutine producing `f(v)` from this one's result (a type conversion).
+    pub fn map<U>(self, f: impl FnOnce(T) -> PyResult<U> + 'static) -> Coro<U>
+    where
+        T: 'static,
+    {
+        let name = self.name;
+        Coro::new(name, move || f(self.run()?))
+    }
+
     /// `await coro`: run the body to completion (it may suspend inside, at
     /// awaits of Python objects).
     pub fn run(&self) -> PyResult<T> {

@@ -77,6 +77,8 @@ pub fn ty_join(a: Ty, b: Ty, boxing: bool) -> Option<Ty> {
             Some(Ty::tuple_var(join_all(xs.iter().copied().chain([y]), boxing)?))
         }
         (Comp::TupleVar(x), Comp::TupleVar(y)) => Some(Ty::tuple_var(elem(x, y)?)),
+        (Comp::Gen(x), Comp::Gen(y)) => Some(Ty::gen(elem(x, y)?)),
+        (Comp::Coro(x), Comp::Coro(y)) => Some(Ty::coro(elem(x, y)?)),
         _ => None,
     }
 }
@@ -98,6 +100,10 @@ pub fn iter_elem(t: Ty) -> Option<Ty> {
         // A mixed-type tuple iterates as the join of its items (`*args`).
         t => t.iter_elem().or_else(|| t.tuple_items().and_then(|ts| join_all(ts, true))),
     }
+}
+
+pub fn is_gen(t: Ty) -> bool {
+    matches!(t.as_comp(), Some(Comp::Gen(_)))
 }
 
 fn int_like(t: Ty) -> bool {
@@ -580,10 +586,20 @@ pub fn builtin(name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing: bool) -
             }
             elem(args[0]).map(|e| Ok(Ty::list(e)))
         }
-        "enumerate" if (1..=2).contains(&n) && only_kw(&["start"]) => elem(args[0]).map(|e| Ok(Ty::list(Ty::tuple(vec![Ty::Int, e])))),
+        // `next(gen[, default])` on a native generator.
+        "next" if (1..=2).contains(&n) && kwargs.is_empty() && is_gen(args[0]) => {
+            let e = elem(args[0])?;
+            Some(Ok(if n == 2 { ty_join(e, args[1], true).unwrap_or(Ty::Obj) } else { e }))
+        }
+        // Over a generator (possibly infinite) the result is lazy: a generator.
+        "enumerate" if (1..=2).contains(&n) && only_kw(&["start"]) => {
+            let lazy = is_gen(args[0]);
+            elem(args[0]).map(|e| Ok(Ty::tuple(vec![Ty::Int, e]))).map(|r| r.map(|t| if lazy { Ty::gen(t) } else { Ty::list(t) }))
+        }
         "zip" if n >= 1 && kwargs.is_empty() => {
+            let lazy = (2..=3).contains(&n) && args.iter().any(|a| is_gen(*a));
             let es: Option<Vec<Ty>> = args.iter().map(|a| elem(*a)).collect();
-            es.map(|es| Ok(Ty::list(Ty::tuple(es))))
+            es.map(|es| Ok(if lazy { Ty::gen(Ty::tuple(es)) } else { Ty::list(Ty::tuple(es)) }))
         }
         "range" if (1..=3).contains(&n) && kwargs.is_empty() => {
             Some(if args.iter().all(|a| int_like(base(*a))) { Ok(Ty::list(Ty::Int)) } else { Err("'float' object cannot be interpreted as an integer".into()) })

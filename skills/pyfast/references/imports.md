@@ -33,11 +33,12 @@ print(geometry.circle_area(2.0), area(1.0))
   argument types actually used.
 * The module body runs once, at the first import (`init_<name>` guarded by an `AtomicBool`).
 * Nested imports resolve relative to the importing module's own directory.
-* Only **functions** are accessible: `geometry.CONST` and `from geometry import CONST` are
-  rejected (P100/P140). Expose constants through a function.
+* Functions, classes and module-level variables are accessible: `geometry.circle_area(2.0)`,
+  `geometry.Point(1, 2)`, `geometry.CONST`, `from geometry import CONST` (copied at import,
+  as CPython does), `geometry.CONST = 3` (a typed global cell).
 * Circular native imports: P145.
-* **Fallback:** if the module has any compile error in hybrid mode (e.g. it defines a
-  `class` or uses `try`), it's imported through CPython instead, with warning
+* **Fallback:** if the module has any compile error in hybrid mode (e.g. a class with a
+  metaclass or a CPython base class), it's imported through CPython instead, with warning
   `P220 ... cannot be compiled natively; importing it through CPython`. The note shows the
   first blocker. Calls into it are then CPython boundaries. In native-only mode the errors are
   reported instead.

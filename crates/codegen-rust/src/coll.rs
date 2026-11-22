@@ -43,6 +43,9 @@ pub(crate) fn convert(code: &str, from: Ty, to: Ty) -> String {
         }
     }
     match (from.as_comp(), to.as_comp()) {
+        // Generators and coroutines convert lazily (a wrapper converting each value).
+        (Some(Comp::Gen(a)), Some(Comp::Gen(b))) => format!("{code}.map(|__e| -> PyResult<{}> {{ Ok({}) }})", b.rust(), convert("__e", a, b)),
+        (Some(Comp::Coro(a)), Some(Comp::Coro(b))) => format!("{code}.map(|__e| -> PyResult<{}> {{ Ok({}) }})", b.rust(), convert("__e", a, b)),
         (Some(Comp::List(a)), Some(Comp::List(b))) => {
             format!("rt::List::from_vec({code}.to_vec().into_iter().map(|__e| {}).collect())", convert("__e", a, b))
         }
@@ -95,6 +98,7 @@ pub(crate) fn iter_vec(code: &str, t: Ty) -> String {
         Ty::Obj => format!("rt::py::to_vec(&{})?", borrow(code)),
         _ => match t.as_comp() {
             Some(Comp::Dict(..)) => format!("{}.keys_vec()", code),
+            Some(Comp::Gen(_)) => format!("{}.to_vec()?", code),
             Some(Comp::Tuple(ts)) => {
                 if ts.is_empty() {
                     return "Vec::<rt::Never>::new()".into();
@@ -366,6 +370,11 @@ impl FnEmitter<'_, '_> {
                 writeln!(out, "{ind}let mut __c{n} = {src}.cursor();").unwrap();
                 (format!("while let Some(__v) = __c{n}.next()?"), "__v".into())
             }
+            // Lazily: a generator may be infinite.
+            Some(Comp::Gen(_)) => {
+                writeln!(out, "{ind}let __c{n} = {src};").unwrap();
+                (format!("while let Some(__v) = __c{n}.next()?"), "__v".into())
+            }
             _ => {
                 writeln!(out, "{ind}let __c{n} = {};", iter_vec(&src, it)).unwrap();
                 (format!("for __v in __c{n}"), "__v".into())
@@ -575,6 +584,21 @@ impl FnEmitter<'_, '_> {
                 format!("rt::Dict::from_pairs({})", elems(&vals[0]))
             }
             "reversed" => format!("{{ let mut __v = {}; __v.reverse(); rt::List::from_vec(__v) }}", elems(&vals[0])),
+            "next" => {
+                let e = native::iter_elem(vals[0].1).unwrap_or(t);
+                match vals.get(1) {
+                    Some(d) => format!("match {}.next()? {{ Some(__v) => {}, None => {} }}", vals[0].0, convert("__v", e, t), convert(&d.0, d.1, t)),
+                    None => format!("match {}.next()? {{ Some(__v) => {}, None => return Err(rt::Exc::new(\"StopIteration\", \"\")) }}", vals[0].0, convert("__v", e, t)),
+                }
+            }
+            "enumerate" if native::is_gen(t) => {
+                let start = vals.get(1).or(kw("start").map(|i| &kwv[i])).map(|v| crate::as_int(&v.0, v.1)).unwrap_or_else(|| "0".into());
+                format!("rt::gen::enumerate({}, {start})", vals[0].0)
+            }
+            "zip" if native::is_gen(t) => {
+                let gens: Vec<String> = vals.iter().map(|v| if native::is_gen(v.1) { v.0.clone() } else { format!("rt::gen::Gen::from_vec({})", elems(v)) }).collect();
+                format!("rt::gen::zip{}({})", gens.len(), gens.join(", "))
+            }
             "enumerate" => {
                 let start = vals.get(1).or(kw("start").map(|i| &kwv[i])).map(|v| crate::as_int(&v.0, v.1)).unwrap_or_else(|| "0".into());
                 format!("{{ let __s: i64 = {start}; rt::List::from_vec({}.into_iter().enumerate().map(|(i, x)| (__s + i as i64, x)).collect()) }}", elems(&vals[0]))

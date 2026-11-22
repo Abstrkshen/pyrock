@@ -177,6 +177,9 @@ fn has_closure_stmt(stmts: &[Stmt]) -> bool {
 /// it for an `async def`.
 pub(crate) fn call_ret(prog: &Program, s: &Spec) -> Ty {
     let r = ret_ty(s);
+    if prog.module.funcs[s.key.func].is_generator {
+        return Ty::gen(r);
+    }
     if prog.module.funcs[s.key.func].is_async {
         Ty::coro(r)
     } else {
@@ -404,7 +407,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
     fn emit(mut self, out: &mut String) -> Vec<String> {
         let s = self.spec;
         let f = self.func;
-        let ret = ret_ty(s);
+        let ret = self.body_ret();
         let file = self.file().rsplit('/').next().unwrap_or("").to_string();
         if f.is_module {
             if f.unit == 0 {
@@ -432,22 +435,24 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     .zip(args)
                     .map(|(p, t)| if widened(p, t) { format!("__arg_{}: {}", rid(p).trim_start_matches("r#"), t.rust()) } else { format!("mut {}: {}", rid(p), t.rust()) }),
             );
-            // `async def`: the body is `<name>__body`; `<name>` makes the coroutine.
-            if f.is_async {
+            // `async def` / generator: the body is `<name>__body`; `<name>`
+            // makes the coroutine / generator object around it.
+            if f.is_async || f.is_generator {
+                let (kind, item) = if f.is_generator { ("rt::gen::Gen", ret_ty(s)) } else { ("rt::aio::Coro", ret) };
                 let names: Vec<String> = params.iter().map(|p| p.trim_start_matches("mut ").split(':').next().unwrap().to_string()).collect();
                 let wparams: Vec<String> = params.iter().map(|p| p.trim_start_matches("mut ").to_string()).collect();
                 writeln!(
                     out,
-                    "fn {m}({}) -> PyResult<rt::aio::Coro<{r}>> {{\n    Ok(rt::aio::Coro::new({:?}, move || {m}__body({})))\n}}\n",
+                    "fn {m}({}) -> PyResult<{kind}<{r}>> {{\n    Ok({kind}::new({:?}, move || {m}__body({})))\n}}\n",
                     wparams.join(", "),
                     f.name.rsplit('.').next().unwrap_or(&f.name),
                     names.join(", "),
                     m = s.mangled,
-                    r = ret.rust()
+                    r = item.rust()
                 )
                 .unwrap();
             }
-            let fname = if f.is_async { format!("{}__body", s.mangled) } else { s.mangled.clone() };
+            let fname = if f.is_async || f.is_generator { format!("{}__body", s.mangled) } else { s.mangled.clone() };
             writeln!(out, "fn {}({}) -> PyResult<{}> {{", fname, params.join(", "), ret.rust()).unwrap();
             for (p, t) in f.params.iter().zip(args) {
                 if widened(p, t) {
@@ -607,7 +612,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 }
             }
             StmtKind::Return(v) => {
-                let ret = ret_ty(self.spec);
+                let ret = self.body_ret();
                 let (code, t) = match v {
                     Some(e) => (self.expr_as(e, ret), ret),
                     None => ("()".into(), Ty::None),
@@ -863,7 +868,17 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
     }
 
     fn flow_ty(&self) -> String {
-        format!("PyResult<rt::Flow<{}>>", ret_ty(self.spec).rust())
+        format!("PyResult<rt::Flow<{}>>", self.body_ret().rust())
+    }
+
+    /// What the emitted body returns: the function's return type, or `()`
+    /// for a generator body (its slot type is what it yields).
+    fn body_ret(&self) -> Ty {
+        if self.func.is_generator {
+            Ty::None
+        } else {
+            ret_ty(self.spec)
+        }
     }
 
     /// `let r = (|| -> PyResult<Flow<R>> { body; Ok(Flow::Normal) })();`
@@ -1051,6 +1066,19 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             ExprKind::Global { unit, name } => format!("rt::gget(&{}, {name:?})?", gname(*unit, name)),
             ExprKind::Bool(b) => b.to_string(),
             ExprKind::NoneLit => "()".into(),
+            ExprKind::Yield(v) => {
+                let item = ret_ty(self.spec);
+                let (c, vt) = match v {
+                    Some(v) => self.expr(v),
+                    None => ("()".into(), Ty::None),
+                };
+                if item.is_never() {
+                    // Never reached (`if False: yield x`): nothing is ever yielded.
+                    format!("{{ let _ = {c}; }}")
+                } else {
+                    format!("rt::gen::yield_::<{}>({})", item.rust(), coerce(c, vt, item))
+                }
+            }
             ExprKind::Await(v) => {
                 let (c, vt) = self.expr(v);
                 if vt.as_coro().is_some() {

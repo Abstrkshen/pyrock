@@ -556,7 +556,7 @@ fn walk_expr_live(prog: &Program, s: &Spec, e: &Expr, f: &mut impl FnMut(&Expr))
 fn children(e: &Expr, skip_callee: bool) -> Vec<&Expr> {
     match &e.kind {
         ExprKind::BinOp { left, right, .. } => vec![left, right],
-        ExprKind::Unary { operand, .. } | ExprKind::Await(operand) => vec![operand],
+        ExprKind::Unary { operand, .. } | ExprKind::Await(operand) | ExprKind::Yield(Some(operand)) => vec![operand],
         ExprKind::Compare { first, rest } => std::iter::once(&**first).chain(rest.iter().map(|r| &r.1)).collect(),
         ExprKind::BoolOp { values, .. } => values.iter().collect(),
         ExprKind::IfExp { test, body, orelse } => vec![test, body, orelse],
@@ -614,7 +614,7 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr), skip_callee: bool) {
             walk_expr(left, f, skip_callee);
             walk_expr(right, f, skip_callee);
         }
-        ExprKind::Unary { operand, .. } | ExprKind::Await(operand) => walk_expr(operand, f, skip_callee),
+        ExprKind::Unary { operand, .. } | ExprKind::Await(operand) | ExprKind::Yield(Some(operand)) => walk_expr(operand, f, skip_callee),
         ExprKind::Compare { first, rest } => {
             walk_expr(first, f, skip_callee);
             for (_, c) in rest {

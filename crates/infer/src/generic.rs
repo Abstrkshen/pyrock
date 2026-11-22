@@ -404,10 +404,11 @@ impl State<'_> {
                 Sym::Con(*ty)
             }
             ExprKind::Slot(_) | ExprKind::PyBuiltin(_) => Sym::Con(Ty::Obj),
-            ExprKind::Await(v) => {
+            ExprKind::Await(v) | ExprKind::Yield(Some(v)) => {
                 self.expr(v, cx);
                 Sym::Con(Ty::Obj)
             }
+            ExprKind::Yield(None) => Sym::Con(Ty::None),
             ExprKind::Global { .. } => self.fresh(),
             ExprKind::Slice { lo, hi, step } => {
                 for p in [lo, hi, step].into_iter().flatten() {

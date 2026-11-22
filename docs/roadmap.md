@@ -72,7 +72,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 ## Phase 6: async
 
 - [x] `async def` / `await` bridged to asyncio (`async with`, `async for`)
-- [ ] Generators (`yield`, `yield from`) on the same stackful coroutines
+- [x] Generators (`yield`, `yield from`) on the same stackful coroutines
 
 ## Throughout
 
@@ -402,3 +402,26 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
   `wait_for` timeout), `tests/differential/async_protocols.py` (async methods, native async
   iterator and context manager classes, `asyncio.Queue`, closures, 2000 tasks, reuse error,
   uncaught exception).
+
+### Phase 6.2: generators (2026-11-22)
+
+* A function whose body contains `yield` (outside nested functions) is a generator: a call
+  returns `rt::gen::Gen<T>` (type `Generator[T]`), and the body runs on its own stackful
+  coroutine (`rt::stackful::Co`), suspending at each `yield` with the value. `T` is the join
+  of the yielded types (`Never` for a generator that never yields); `return` ends the
+  iteration. `yield from it` (as a statement) is `for x in it: yield x`.
+* Iteration is lazy where it matters: `for` loops pull one value at a time (infinite
+  generators and `break` work), as do `enumerate(gen)`, `zip` with a generator (2 or 3
+  arguments) and `next(gen[, default])` (native, `StopIteration` when exhausted).
+  `list`/`sum`/`sorted`/`dict`/comprehensions exhaust it. Generator methods (`def walk(self):
+  yield ...; yield from child.walk()`) work.
+* A generator reaching CPython is a `native_generator` iterator (`itertools.islice(gen(),
+  3)`). Generators of different element types join lazily (`Gen::map`), as do coroutines
+  (`Coro::map`).
+* `corosensei` is now a plain runtime dependency (generators need no CPython).
+* Not supported yet: `send`/`throw`/`close`, `x = yield` values, `return value`
+  (StopIteration.value), async generators (P100).
+* Test: `tests/differential/generators.py` (infinite generators with `break`, `yield from`,
+  recursive tree walk, `enumerate(fib())`, laziness order of prints, `next` with default,
+  `StopIteration`, `itertools.islice` on a native generator); also passes with `--release`
+  (`panic = "abort"`, abandoned generators are reset).

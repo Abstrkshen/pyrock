@@ -71,6 +71,8 @@ pub enum Comp {
     ExtStruct(u32, u32, &'static str),
     /// A coroutine of a compiled `async def` returning `T` (`rt::aio::Coro<T>`).
     Coro(Ty),
+    /// A generator yielding `T` (`rt::gen::Gen<T>`).
+    Gen(Ty),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -137,6 +139,7 @@ impl Ty {
             Comp::Union(ts) => (join(ts, Ty::py_name, " | "), format!("U_{}", join(ts, Ty::mangle, "_")), format!("u_{}", join(ts, Ty::mangle, "_"))),
             Comp::ExtStruct(_, _, name) => (name.to_string(), name.to_string(), name.to_string()),
             Comp::Coro(t) => (format!("Coroutine[{}]", t.py_name()), format!("rt::aio::Coro<{}>", t.rust()), format!("coro_{}", t.mangle())),
+            Comp::Gen(t) => (format!("Generator[{}]", t.py_name()), format!("rt::gen::Gen<{}>", t.rust()), format!("gen_{}", t.mangle())),
             Comp::Closure(f, caps, name) => (
                 format!("function {name}"),
                 if caps.is_empty() { "rt::Env<()>".to_string() } else { format!("rt::Env<({},)>", caps.iter().map(|c| format!("rt::Cell<{}>", c.rust())).collect::<Vec<_>>().join(", ")) },
@@ -201,6 +204,10 @@ impl Ty {
             return all[0];
         }
         Ty::comp(Comp::Union(all))
+    }
+
+    pub fn gen(t: Ty) -> Ty {
+        Ty::comp(Comp::Gen(t))
     }
 
     pub fn coro(t: Ty) -> Ty {
@@ -269,6 +276,7 @@ impl Ty {
         match self.as_comp()? {
             Comp::List(e) | Comp::Set(e) | Comp::TupleVar(e) => Some(e),
             Comp::Dict(k, _) | Comp::View(ViewKind::Keys, k, _) => Some(k),
+            Comp::Gen(e) => Some(e),
             Comp::View(ViewKind::Values, _, v) => Some(v),
             Comp::View(ViewKind::Items, k, v) => Some(Ty::tuple(vec![k, v])),
             Comp::Tuple(ts) => {
@@ -291,7 +299,7 @@ impl Ty {
             Some(Comp::List(_) | Comp::Dict(..) | Comp::Set(_) | Comp::Class(..)) => true,
             Some(Comp::Tuple(ts)) => ts.iter().any(|t| t.has_mutable()),
             Some(Comp::TupleVar(t) | Comp::Opt(t)) => t.has_mutable(),
-            Some(Comp::View(..) | Comp::Union(_) | Comp::ExtStruct(..) | Comp::Coro(_)) => true,
+            Some(Comp::View(..) | Comp::Union(_) | Comp::ExtStruct(..) | Comp::Coro(_) | Comp::Gen(_)) => true,
             _ => false,
         }
     }

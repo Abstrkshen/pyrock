@@ -72,6 +72,17 @@ impl<T: 'static> Gen<T> {
         }
     }
 
+    /// A generator yielding `f(v)` for each `v` of this one (a type conversion).
+    pub fn map<U: 'static>(self, f: impl Fn(T) -> PyResult<U> + 'static) -> Gen<U> {
+        let name = self.name;
+        Gen::new(name, move || {
+            while let Some(v) = self.next()? {
+                yield_(f(v)?);
+            }
+            Ok(())
+        })
+    }
+
     /// Exhaust into a vector (`list(gen)`, `sum(gen)`, ...).
     pub fn to_vec(&self) -> PyResult<Vec<T>> {
         let mut out = Vec::new();
@@ -80,6 +91,53 @@ impl<T: 'static> Gen<T> {
         }
         Ok(out)
     }
+}
+
+impl<T: 'static> Gen<T> {
+    /// A generator over the items of a vector.
+    pub fn from_vec(v: Vec<T>) -> Gen<T> {
+        Gen::new("<iterator>", move || {
+            for x in v {
+                yield_(x);
+            }
+            Ok(())
+        })
+    }
+}
+
+/// `enumerate(gen, start)`, lazily.
+pub fn enumerate<T: 'static>(g: Gen<T>, start: i64) -> Gen<(i64, T)> {
+    Gen::new("enumerate", move || {
+        let mut i = start;
+        while let Some(v) = g.next()? {
+            yield_((i, v));
+            i = i.checked_add(1).ok_or_else(Exc::overflow)?;
+        }
+        Ok(())
+    })
+}
+
+/// `zip(a, b)` with a generator, lazily (stops at the shortest).
+pub fn zip2<A: 'static, B: 'static>(a: Gen<A>, b: Gen<B>) -> Gen<(A, B)> {
+    Gen::new("zip", move || {
+        while let Some(x) = a.next()? {
+            let Some(y) = b.next()? else { break };
+            yield_((x, y));
+        }
+        Ok(())
+    })
+}
+
+/// `zip(a, b, c)` with a generator, lazily.
+pub fn zip3<A: 'static, B: 'static, C: 'static>(a: Gen<A>, b: Gen<B>, c: Gen<C>) -> Gen<(A, B, C)> {
+    Gen::new("zip", move || {
+        while let Some(x) = a.next()? {
+            let Some(y) = b.next()? else { break };
+            let Some(z) = c.next()? else { break };
+            yield_((x, y, z));
+        }
+        Ok(())
+    })
 }
 
 /// `yield v` inside a generator body yielding `T`.

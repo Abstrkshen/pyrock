@@ -282,6 +282,8 @@ pub struct Function {
     pub sig: CallSig,
     /// `async def`: a call makes a coroutine (`Coro<T>`) running the body.
     pub is_async: bool,
+    /// The body contains `yield`: a call makes a generator (`Gen<T>`).
+    pub is_generator: bool,
 }
 
 impl Function {
@@ -409,6 +411,8 @@ pub enum ExprKind {
     Unary { op: UnaryOp, operand: Box<Expr> },
     /// `await e`: runs a native coroutine inline, or suspends on a Python awaitable.
     Await(Box<Expr>),
+    /// `yield [e]` in a generator body (its value is `None`: `send` is not supported).
+    Yield(Option<Box<Expr>>),
     /// Chained comparison `a < b <= c`; each middle operand is evaluated once.
     Compare { first: Box<Expr>, rest: Vec<(CmpOp, Expr)> },
     BoolOp { op: BoolOpKind, values: Vec<Expr> },

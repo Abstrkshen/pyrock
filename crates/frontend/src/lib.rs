@@ -808,6 +808,7 @@ impl<'l> Lowerer<'l> {
             captures: vec![],
             cells: vec![],
             is_async: false,
+            is_generator: false,
         });
         self.ld.units[self.unit].init = init;
     }
@@ -1046,7 +1047,11 @@ impl<'l> Lowerer<'l> {
         let sig = self.ld.func_sigs.get(&id).cloned().unwrap_or_default();
         let class = self.cur_class.as_ref().map(|c| c.0);
         let is_async = st["is_async"].as_bool().unwrap_or(false);
-        Function { id, name: self.qual(&name), params, locals, body, span: sp, is_module: false, unit: self.unit, param_ann, ret_ann, class, sig, parent: None, captures: vec![], cells: vec![], is_async }
+        let is_generator = arr(st, "body").iter().any(contains_yield);
+        if is_async && is_generator {
+            self.unsupported(sp, "async generator", "collect the items in a list, or write a class with `__aiter__`/`__anext__`");
+        }
+        Function { id, name: self.qual(&name), params, locals, body, span: sp, is_module: false, unit: self.unit, param_ann, ret_ann, class, sig, parent: None, captures: vec![], cells: vec![], is_async, is_generator }
     }
 
     fn lower_block(&mut self, body: &[Value]) -> Vec<Stmt> {
@@ -1060,6 +1065,14 @@ impl<'l> Lowerer<'l> {
     fn lower_stmt(&mut self, st: &Value) -> Option<Stmt> {
         let sp = self.span(st);
         let kind = match ty(st) {
+            // `yield from it` (as a statement): `for x in it: yield x`.
+            "Expr" if ty(&st["value"]) == "YieldFrom" => {
+                let iter = self.lower_expr(&st["value"]["value"])?;
+                let var = self.fresh_local();
+                let item = Expr { kind: ExprKind::Local(var.clone()), span: sp };
+                let body = vec![Stmt { kind: StmtKind::Expr(Expr { kind: ExprKind::Yield(Some(Box::new(item))), span: sp }), span: sp }];
+                StmtKind::ForIter { var, iter, body, is_async: false }
+            }
             "Expr" => StmtKind::Expr(self.lower_expr(&st["value"])?),
             "Assign" => {
                 let targets = arr(st, "targets");
@@ -1530,6 +1543,10 @@ impl<'l> Lowerer<'l> {
                 ExprKind::BinOp { op, left: Box::new(left), right: Box::new(right) }
             }
             "Await" => ExprKind::Await(Box::new(self.lower_expr(&e["value"])?)),
+            "Yield" => ExprKind::Yield(match e["value"].is_null() {
+                true => None,
+                false => Some(Box::new(self.lower_expr(&e["value"])?)),
+            }),
             "UnaryOp" => {
                 let op = match ty(&e["op"]) {
                     "USub" => UnaryOp::Neg,
@@ -2041,6 +2058,7 @@ impl<'l> Lowerer<'l> {
             captures: vec![],
             cells: vec![],
             is_async: false,
+            is_generator: false,
         });
         self.ld.classes[cid as usize].methods.push(Method { name: "__init__".into(), func: id, kind: MethodKind::Instance });
         let fields = &mut self.ld.classes[cid as usize].fields;
@@ -2667,4 +2685,18 @@ impl<'l> Lowerer<'l> {
 
 fn kwargs_is_empty(k: &[(String, Expr)]) -> bool {
     k.is_empty()
+}
+
+/// Whether a statement (of a function body) contains `yield` / `yield from`
+/// outside nested functions and classes.
+fn contains_yield(v: &Value) -> bool {
+    match v {
+        Value::Object(m) => match m.get("_t").and_then(|t| t.as_str()) {
+            Some("Yield" | "YieldFrom") => true,
+            Some("FunctionDef" | "ClassDef" | "Lambda") => false,
+            _ => m.iter().any(|(k, x)| k != "_t" && contains_yield(x)),
+        },
+        Value::Array(xs) => xs.iter().any(contains_yield),
+        _ => false,
+    }
 }

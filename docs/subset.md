@@ -78,6 +78,10 @@ These constructs become plain Rust with no Python objects involved:
   inline; awaiting a Python awaitable suspends the coroutine's own stack until the event
   loop has the result (P217 boundary). `async with` and `async for` work on Python objects
   and on native classes defining `__aenter__`/`__aexit__` or `__aiter__`/`__anext__`.
+* Generators: `yield` and `yield from` in functions and methods. A call returns a native
+  generator whose body runs on its own stack; `for` loops, `enumerate`, `zip` and `next`
+  pull values lazily (infinite generators work), other builtins exhaust it. A generator
+  passed to CPython is a Python iterator.
 * Function values: lambdas, nested functions and closures (captured variables are shared
   cells, so late binding and `nonlocal` behave as in CPython; `lambda x, i=i:` defaults are
   evaluated when the function is created), top-level functions used as values, decorators
@@ -174,5 +178,6 @@ in `explain`. Calling one gives P150. A struct handle passed to CPython is P231.
 
 Not yet supported in either mode: classes with a CPython base class, metaclasses or
 class decorators other than `@dataclass` (in an imported `.py` the whole module falls back
-to CPython; in the entry file they are rejected), non-literal defaults of top-level functions, generators (`yield`), and `f(*xs)`
+to CPython; in the entry file they are rejected), non-literal defaults of top-level functions, generator `send`/`throw`/`close` and
+`return value` in a generator, async generators, and `f(*xs)`
 where `xs` is a list (not a tuple of known length) filling fixed parameters.

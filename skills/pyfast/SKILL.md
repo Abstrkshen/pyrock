@@ -65,19 +65,20 @@ inside functions are rejected. Full details and type tables are in [references/i
 
 ## What compiles natively (short version)
 
-Native means plain Rust with no Python objects: top-level functions with positional params,
-recursion, int (i64, overflow raises `OverflowError`), float, str, bool, None, all arithmetic,
-bitwise and comparison operators, `and`/`or`/`not`, ternaries, `if`/`while`/`for i in range(...)`,
-`break`/`continue`, `print`, `abs`/`int`/`float`/`str`/`bool`/`len(str)`/`min`/`max`, f-strings
-and type annotations.
+Native means plain Rust with no Python objects: functions (recursion, defaults, keyword
+args, `*args`/`**kwargs`), int (i64, overflow raises `OverflowError`), float, str, bool, None,
+`T | None`, all operators, lists/dicts/sets/tuples with their methods, comprehensions,
+unpacking, string methods and formatting, most builtins, `try`/`except`/`raise`, classes
+(properties, dataclasses, inheritance, dunders, user exceptions), lambdas, closures,
+decorators, module globals, generators (`yield`), and `async def`/`await` run by asyncio.
 
-Bridged through CPython (hybrid only): lists, dicts, tuples, sets, indexing, slices, methods,
-attribute access, keyword args, iterating anything other than `range`, builtins such as
-`sorted`/`sum`/`round`, and variables or returns with mixed types (boxed).
+Bridged through CPython (hybrid only): anything touching an object from a CPython import
+(stdlib, site-packages), `with` on Python context managers, `await` of Python awaitables,
+and variables or returns with mixed types (boxed).
 
-Not supported in either mode: `class` in the entry file, `try`/`raise`/`with`, comprehensions,
-lambdas, closures/nested functions, default or `*args`/`**kwargs` parameters, tuple unpacking,
-`global`/`nonlocal`, reading module-level variables inside functions, decorators.
+Not supported in either mode: classes with a CPython base class or a metaclass (keep them in
+an imported `.py`, which falls back to CPython), generator `send`/`throw`, async generators,
+relative imports, `import *`.
 
 See [references/language.md](references/language.md) for the precise subset, semantics and
 the rewrites that make code compile.
@@ -88,13 +89,14 @@ the rewrites that make code compile.
   assigned) inside functions; they are typed global cells.
 * Keep each variable to one type. `x = 0` then `x = "a"` boxes it (hybrid) or is P304
   (native-only).
-* Return one type on every path. Returning `None` on one path boxes the result (P305/P215).
+* Return one type on every path. `None` on some paths is a native `T | None`; other mixes
+  box the result (P215).
 * Define a function before the module-level code that calls it (P144).
 * Annotations are optional. `def f(a: int) -> str` is understood, and an `int`/`str`/`bool`
   annotation unboxes a Python object (e.g. `json.loads(...)`) into a native value, with a
   checked `TypeError`.
-* Hot loops should use `range`, ints, floats and strings, and call native or Rust/C functions.
-  Each CPython call in a loop costs a bridge crossing.
+* Hot loops should use native values (ints, floats, strings, native lists/dicts, instances)
+  and call native or Rust/C functions. Each CPython call in a loop costs a bridge crossing.
 
 ## Changing the pyfast compiler itself
 
