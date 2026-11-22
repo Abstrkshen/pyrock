@@ -134,7 +134,7 @@ impl<'m> Program<'m> {
                 Slot::Unknown => Ty::never(),
             };
             if self.module.funcs[s.key.func].is_async {
-                return Some(Ty::agen(y));
+                return Some(Ty::agen2(y, gen_send_ty(s)));
             }
             return Some(Ty::gen3(y, gen_send_ty(s), gen_ret_ty(s)));
         }
@@ -909,8 +909,16 @@ impl Ctx<'_, '_> {
                 // generator): widen what its body returns (yields).
                 let callee = &self.prog.module.funcs[*fid];
                 let t = if callee.is_generator && callee.is_async {
-                    match t.as_agen() {
-                        Some(y) => y,
+                    match t.as_agen2() {
+                        Some((y, s)) => {
+                            // What callers pass to `asend`.
+                            if let Some(args) = tys.clone() {
+                                if s != Ty::None {
+                                    self.send_widen.push((SpecKey { func: *fid, args }, s));
+                                }
+                            }
+                            y
+                        }
                         None => return,
                     }
                 } else if callee.is_generator {

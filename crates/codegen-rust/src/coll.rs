@@ -484,6 +484,9 @@ impl FnEmitter<'_, '_> {
         if let Some(g) = ot.as_gen() {
             return self.gen_method(&o, g, name, &vals);
         }
+        if let Some((_, sent)) = ot.as_agen2() {
+            return self.agen_method(&o, sent, name, &vals);
+        }
         let b = |c: &str| borrow(c).to_string();
         let int = |v: &(String, Ty)| crate::as_int(&v.0, v.1);
         if recv == Ty::Str {

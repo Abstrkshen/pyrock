@@ -83,6 +83,7 @@ pub fn ty_join(a: Ty, b: Ty, boxing: bool) -> Option<Ty> {
         }
         (Comp::TupleVar(x), Comp::TupleVar(y)) => Some(Ty::tuple_var(elem(x, y)?)),
         (Comp::Gen(x, sx, rx), Comp::Gen(y, sy, ry)) => Some(Ty::gen3(elem(x, y)?, elem(sx, sy)?, elem(rx, ry)?)),
+        (Comp::AGen(x, sx), Comp::AGen(y, sy)) => Some(Ty::agen2(elem(x, y)?, elem(sx, sy)?)),
         // Two records join key by key. The keys both literals start with (the
         // common prefix) stay required; every other key is optional, filled
         // in each value's own insertion order, so printing and iteration
@@ -308,6 +309,29 @@ pub fn method(recv: Ty, name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing
         return err(format!("{name}() takes no keyword arguments natively"));
     }
     let elem_join = |e: Ty, t: Ty| ty_join(e, t, boxing).or(boxing.then_some(Ty::Obj));
+    // Async generator methods: awaitables (native coroutines).
+    if let Some((y, sent)) = recv.as_agen2() {
+        return match name {
+            "asend" => {
+                check!(arity(1, 1));
+                let s2 = ty_join(sent, args[0], boxing).or(boxing.then_some(Ty::Obj))?;
+                Some(Ok(Method { ret: Ty::coro(y), widen: (s2 != sent).then(|| Ty::agen2(y, s2)) }))
+            }
+            "athrow" => {
+                check!(arity(1, 1));
+                m(Ty::coro(y))
+            }
+            "__anext__" => {
+                check!(arity(0, 0));
+                m(Ty::coro(y))
+            }
+            "aclose" => {
+                check!(arity(0, 0));
+                m(Ty::coro(Ty::None))
+            }
+            _ => None,
+        };
+    }
     // Generator methods: `send` joins what it passes into the generator's send type.
     if let Some((y, sent, r)) = recv.as_gen() {
         return match name {

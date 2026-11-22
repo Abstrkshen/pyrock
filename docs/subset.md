@@ -80,7 +80,8 @@ These constructs become plain Rust with no Python objects involved:
   and on native classes defining `__aenter__`/`__aexit__` or `__aiter__`/`__anext__`.
 * Generators: `yield` and `yield from` in functions and methods, `send`/`throw`/`close`,
   `return value` (the value of `yield from`), `finally` when a generator is closed or
-  abandoned. Async generators (`async def` with `yield`) with `async for` and `aclose`. A call returns a native
+  abandoned. Async generators (`async def` with `yield`) with `async for`, `asend`, `athrow` and
+  `aclose`. A call returns a native
   generator whose body runs on its own stack; `for` loops, `enumerate`, `zip` and `next`
   pull values lazily (infinite generators work), other builtins exhaust it. A generator
   passed to CPython is a Python iterator.
@@ -188,5 +189,5 @@ in `explain`. Calling one gives P150. A struct handle passed to CPython is P231.
 
 Not yet supported in either mode: classes with a CPython base class, metaclasses or
 class decorators other than `@dataclass` (in an imported `.py` the whole module falls back
-to CPython; in the entry file they are rejected), non-literal defaults of top-level functions, async comprehensions, `asend`/`athrow`, and `f(*xs)`
+to CPython; in the entry file they are rejected), non-literal defaults of top-level functions, async comprehensions, and `f(*xs)`
 where `xs` is a list (not a tuple of known length) filling fixed parameters.

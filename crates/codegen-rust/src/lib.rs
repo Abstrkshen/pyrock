@@ -470,7 +470,9 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     _ => ("rt::aio::Coro", ret),
                 };
                 // A generator's Rust type also names what it receives and returns.
-                let item_ty = if f.is_generator && !f.is_async { format!("{}, {}, {}", item.rust(), pyfast_infer::spec::gen_send_ty(s).rust(), pyfast_infer::spec::gen_ret_ty(s).rust()) } else { item.rust().to_string() };
+                let item_ty = if f.is_generator && f.is_async {
+                    format!("{}, {}", item.rust(), pyfast_infer::spec::gen_send_ty(s).rust())
+                } else if f.is_generator { format!("{}, {}, {}", item.rust(), pyfast_infer::spec::gen_send_ty(s).rust(), pyfast_infer::spec::gen_ret_ty(s).rust()) } else { item.rust().to_string() };
                 let names: Vec<String> = params.iter().map(|p| p.trim_start_matches("mut ").split(':').next().unwrap().to_string()).collect();
                 let wparams: Vec<String> = params.iter().map(|p| p.trim_start_matches("mut ").to_string()).collect();
                 writeln!(
@@ -1128,7 +1130,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 } else {
                     let sent = pyfast_infer::spec::gen_send_ty(self.spec);
                     if self.func.is_async {
-                        format!("rt::agen::yield_::<{}>({})?", item.rust(), coerce(c, vt, item))
+                        format!("rt::agen::yield_::<{}, {}>({})?", item.rust(), sent.rust(), coerce(c, vt, item))
                     } else {
                         format!("rt::gen::yield_::<{}, {}>({})?", item.rust(), sent.rust(), coerce(c, vt, item))
                     }
@@ -1874,6 +1876,28 @@ impl FnEmitter<'_, '_> {
         } else {
             format!("{{ for __x in {} {{ {one} }} }}", coll::iter_vec(&c, vt))
         }
+    }
+
+    /// `agen.asend(v)` / `athrow(e)` / `__anext__()` / `aclose()`: native
+    /// coroutines (awaiting one runs it inline).
+    pub(crate) fn agen_method(&mut self, o: &str, sent: Ty, name: &str, vals: &[(String, Ty)]) -> String {
+        let body = match name {
+            "asend" => format!("let __v = {}; rt::aio::Coro::new(\"asend\", move || __a.asend(__v))", coll::convert(&vals[0].0, vals[0].1, sent)),
+            "athrow" => {
+                let (c, t) = &vals[0];
+                let e = if *t == Ty::Obj {
+                    format!("rt::py::raise(&{})", borrow(c))
+                } else if t.class_id().is_some() {
+                    format!("{c}.into_exc()")
+                } else {
+                    c.clone()
+                };
+                format!("let __e = {e}; rt::aio::Coro::new(\"athrow\", move || __a.athrow(__e))")
+            }
+            "__anext__" => "rt::aio::Coro::new(\"anext\", move || __a.anext()?.ok_or_else(|| rt::Exc::new(\"StopAsyncIteration\", \"\")))".to_string(),
+            _ => "rt::aio::Coro::new(\"aclose\", move || __a.aclose())".to_string(),
+        };
+        format!("{{ let __a = {o}.clone(); {body} }}")
     }
 
     /// `gen.send(v)` / `gen.throw(e)` / `gen.close()` on a native generator.

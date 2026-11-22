@@ -74,8 +74,9 @@ pub enum Comp {
     /// A generator yielding `T`, receiving `S` from `send` (always includes
     /// `None`: `next` sends it) and returning `R` (`rt::gen::Gen<T, S, R>`).
     Gen(Ty, Ty, Ty),
-    /// An async generator yielding `T` (`rt::agen::AGen<T>`).
-    AGen(Ty),
+    /// An async generator yielding `T` and receiving `S` from `asend`
+    /// (`rt::agen::AGen<T, S>`).
+    AGen(Ty, Ty),
     /// `int | float`: a number that is an int on some paths and a float on
     /// others (`rt::Num`).
     Num,
@@ -177,7 +178,11 @@ impl Ty {
                 format!("gen_{}_{}_{}", t.mangle(), s.mangle(), r.mangle()),
             ),
             Comp::Num => ("int | float".to_string(), "rt::Num".to_string(), "num".to_string()),
-            Comp::AGen(t) => (format!("AsyncGenerator[{}]", t.py_name()), format!("rt::agen::AGen<{}>", t.rust()), format!("agen_{}", t.mangle())),
+            Comp::AGen(t, s) => (
+                if *s == Ty::None { format!("AsyncGenerator[{}]", t.py_name()) } else { format!("AsyncGenerator[{}, {}]", t.py_name(), s.py_name()) },
+                format!("rt::agen::AGen<{}, {}>", t.rust(), s.rust()),
+                format!("agen_{}_{}", t.mangle(), s.mangle()),
+            ),
             Comp::Record(fs) => {
                 let mangle = format!("rec_{}", fs.iter().map(|f| format!("{}{}_{}", f.key.len(), if f.optional { "o" } else { "" }, f.ty.mangle())).collect::<Vec<_>>().join("_"));
                 // Keys can be any text: the Rust name is a hash of keys and types.
@@ -278,12 +283,22 @@ impl Ty {
     }
 
     pub fn agen(t: Ty) -> Ty {
-        Ty::comp(Comp::AGen(t))
+        Ty::comp(Comp::AGen(t, Ty::None))
     }
 
+    pub fn agen2(t: Ty, s: Ty) -> Ty {
+        Ty::comp(Comp::AGen(t, s))
+    }
+
+    /// What an async generator yields.
     pub fn as_agen(self) -> Option<Ty> {
+        self.as_agen2().map(|(t, _)| t)
+    }
+
+    /// (yield, send) types of an async generator.
+    pub fn as_agen2(self) -> Option<(Ty, Ty)> {
         match self.as_comp() {
-            Some(Comp::AGen(t)) => Some(t),
+            Some(Comp::AGen(t, s)) => Some((t, s)),
             _ => None,
         }
     }
@@ -408,7 +423,7 @@ impl Ty {
             Some(Comp::List(_) | Comp::Dict(..) | Comp::Set(_) | Comp::Class(..)) => true,
             Some(Comp::Tuple(ts)) => ts.iter().any(|t| t.has_mutable()),
             Some(Comp::TupleVar(t) | Comp::Opt(t)) => t.has_mutable(),
-            Some(Comp::View(..) | Comp::Union(_) | Comp::ExtStruct(..) | Comp::Coro(_) | Comp::Gen(..) | Comp::AGen(_) | Comp::Record(_)) => true,
+            Some(Comp::View(..) | Comp::Union(_) | Comp::ExtStruct(..) | Comp::Coro(_) | Comp::Gen(..) | Comp::AGen(..) | Comp::Record(_)) => true,
             _ => false,
         }
     }

@@ -7,7 +7,7 @@
 //! the body yields a value or returns.
 
 use crate::exc::{Exc, PyResult};
-use crate::gen::{yield_raw, Gen, Resume};
+use crate::gen::{yield_raw, Gen, Resume, SendValue};
 use crate::py::Obj;
 use std::any::Any;
 use std::marker::PhantomData;
@@ -18,25 +18,44 @@ pub enum Event {
     Await(Obj),
 }
 
-/// An async generator yielding `T`.
-pub struct AGen<T: 'static> {
-    g: Gen<Event, Obj, ()>,
-    _t: PhantomData<T>,
+/// What resumes an async generator body: a value for its `yield` (`asend`;
+/// `None` for `__anext__`), or the result of an awaitable it awaited.
+pub enum AIn {
+    Value(Option<Box<dyn Any>>),
+    Awaited(Obj),
 }
 
-impl<T: 'static> Clone for AGen<T> {
+impl Default for AIn {
+    fn default() -> Self {
+        AIn::Value(None)
+    }
+}
+
+impl SendValue for AIn {
+    fn is_none(&self) -> bool {
+        matches!(self, AIn::Value(None))
+    }
+}
+
+/// An async generator yielding `T` and receiving `S` (`asend`).
+pub struct AGen<T: 'static, S: SendValue = ()> {
+    g: Gen<Event, AIn, ()>,
+    _t: PhantomData<(T, S)>,
+}
+
+impl<T: 'static, S: SendValue> Clone for AGen<T, S> {
     fn clone(&self) -> Self {
         AGen { g: self.g.clone(), _t: PhantomData }
     }
 }
 
-impl<T: 'static> Default for AGen<T> {
+impl<T: 'static, S: SendValue> Default for AGen<T, S> {
     fn default() -> Self {
         AGen { g: Gen::default(), _t: PhantomData }
     }
 }
 
-impl<T: 'static> AGen<T> {
+impl<T: 'static, S: SendValue> AGen<T, S> {
     pub fn new(name: &'static str, body: impl FnOnce() -> PyResult<()> + 'static) -> Self {
         AGen {
             g: Gen::new(name, move || {
@@ -52,17 +71,31 @@ impl<T: 'static> AGen<T> {
     /// Run the body until it yields a value (`async for` / `__anext__`),
     /// awaiting what it awaits on the way. `None`: it returned.
     pub fn anext(&self) -> PyResult<Option<T>> {
-        self.drive(Resume::Send(Obj::default()))
+        self.drive(Resume::Send(AIn::Value(None)))
     }
 
-    fn drive(&self, mut input: Resume<Obj>) -> PyResult<Option<T>> {
+    /// `await agen.asend(v)`: `StopAsyncIteration` when the body returns.
+    pub fn asend(&self, v: S) -> PyResult<T> {
+        if !v.is_none() && !self.g.started() {
+            return Err(Exc::new("TypeError", "can't send non-None value to a just-started async generator"));
+        }
+        let input = if v.is_none() { AIn::Value(None) } else { AIn::Value(Some(Box::new(v))) };
+        self.drive(Resume::Send(input))?.ok_or_else(|| Exc::new("StopAsyncIteration", ""))
+    }
+
+    /// `await agen.athrow(e)`: raised at the `yield` the body is suspended at.
+    pub fn athrow(&self, e: Exc) -> PyResult<T> {
+        self.drive(Resume::Throw(e))?.ok_or_else(|| Exc::new("StopAsyncIteration", ""))
+    }
+
+    fn drive(&self, mut input: Resume<AIn>) -> PyResult<Option<T>> {
         loop {
             match self.g.resume(input)? {
                 None => return Ok(None),
                 Some(Event::Value(b)) => return Ok(Some(*b.downcast::<T>().expect("async generator value type"))),
                 Some(Event::Await(o)) => {
                     input = match crate::aio::await_obj(o) {
-                        Ok(v) => Resume::Send(v),
+                        Ok(v) => Resume::Send(AIn::Awaited(v)),
                         Err(e) => Resume::Throw(e),
                     }
                 }
@@ -81,13 +114,15 @@ impl<T: 'static> AGen<T> {
     }
 }
 
-/// `yield v` in an async generator body.
-pub fn yield_<T: 'static>(v: T) -> PyResult<()> {
+/// `yield v` in an async generator body: what `asend` passes (`None` for
+/// `__anext__`).
+pub fn yield_<T: 'static, S: SendValue>(v: T) -> PyResult<S> {
     crate::aio::pop_agen();
-    let r = yield_raw::<Event, Obj>(Event::Value(Box::new(v)));
+    let r = yield_raw::<Event, AIn>(Event::Value(Box::new(v)));
     crate::aio::push_agen();
     match r {
-        Resume::Send(_) => Ok(()),
+        Resume::Send(AIn::Value(Some(b))) => Ok(*b.downcast::<S>().expect("async generator send type")),
+        Resume::Send(_) => Ok(S::default()),
         Resume::Throw(e) => Err(e),
     }
 }
@@ -95,25 +130,26 @@ pub fn yield_<T: 'static>(v: T) -> PyResult<()> {
 /// `await obj` reached inside an async generator body: hand the awaitable to
 /// the consumer, which awaits it and sends back the result.
 pub(crate) fn await_in_body(o: Obj) -> PyResult<Obj> {
-    match yield_raw::<Event, Obj>(Event::Await(o)) {
-        Resume::Send(v) => Ok(v),
+    match yield_raw::<Event, AIn>(Event::Await(o)) {
+        Resume::Send(AIn::Awaited(v)) => Ok(v),
+        Resume::Send(AIn::Value(_)) => Err(Exc::new("RuntimeError", "async generator resumed with a value while awaiting")),
         Resume::Throw(e) => Err(e),
     }
 }
 
-impl<T: 'static> crate::conv::PyFmt for AGen<T> {
+impl<T: 'static, S: SendValue> crate::conv::PyFmt for AGen<T, S> {
     fn py_repr(&self) -> crate::Str {
         crate::Str::from("<async_generator object>")
     }
 }
 
-impl<T: 'static> crate::Truthy for AGen<T> {
+impl<T: 'static, S: SendValue> crate::Truthy for AGen<T, S> {
     fn truthy(&self) -> bool {
         true
     }
 }
 
-impl<T: 'static> crate::coll::PyEq for AGen<T> {
+impl<T: 'static, S: SendValue> crate::coll::PyEq for AGen<T, S> {
     fn py_eq(&self, o: &Self) -> bool {
         self.g.py_eq(&o.g)
     }
@@ -121,6 +157,7 @@ impl<T: 'static> crate::coll::PyEq for AGen<T> {
 
 mod bridge {
     use super::AGen;
+    use crate::gen::SendValue;
     use crate::aio::Coro;
     use crate::exc::{Exc, PyResult};
     use crate::py::{Obj, ToPy};
@@ -148,7 +185,7 @@ mod bridge {
         }
     }
 
-    impl<T: ToPy + 'static> ToPy for AGen<T> {
+    impl<T: ToPy + 'static, S: SendValue> ToPy for AGen<T, S> {
         fn to_py(&self) -> PyResult<Obj> {
             let a = self.clone();
             // Each `__anext__` is a coroutine running the body to its next value.

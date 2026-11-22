@@ -76,6 +76,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] Lazy generator expressions
 - [x] Generator `send`/`throw`/`close`, `return value`, `finally` on abandoned generators
 - [x] Async generators
+- [x] `asend` / `athrow` on async generators
+- [ ] Async comprehensions and async generator expressions
 
 ## Phase 7: speed of mixed code
 
@@ -604,3 +606,15 @@ Each bridged operation cost ~400 ns.
 * Not supported yet: async comprehensions; `asend`/`athrow`.
 * Tests: `tests/differential/generator_protocol.py`, `tests/differential/async_generators.py`
   (both also identical with `--release`).
+
+### Phase 6.5: `asend` / `athrow` (2026-11-22)
+
+* Async generators are `AGen<T, S>`: `x = yield v` evaluates to what `asend` passes (`None`
+  for `__anext__`), with the send type widened by `asend(v)` calls as for generators. The
+  body is resumed with `AIn::Value` (an `asend` value) or `AIn::Awaited` (the result of
+  something it awaited).
+* `agen.asend(v)`, `athrow(e)`, `__anext__()` and `aclose()` are native coroutines, so
+  `await agen.asend(5)` runs inline; `athrow` raises at the `yield` (the body's `except` /
+  `finally` apply); `asend(non-None)` on a just-started generator is a `TypeError` and a
+  finished one raises `StopAsyncIteration`, as in CPython.
+* Test: `tests/differential/async_gen_protocol.py`.

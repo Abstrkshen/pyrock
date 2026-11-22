@@ -115,6 +115,11 @@ impl<T: 'static, S: SendValue, R: 'static> Gen<T, S, R> {
         self.inner.close()
     }
 
+    /// Whether the body has started running.
+    pub fn started(&self) -> bool {
+        !matches!(*self.inner.state.borrow(), State::Fresh(_))
+    }
+
     /// The value of the body's `return` (`yield from` produces it).
     pub fn take_ret(&self) -> Option<R> {
         self.inner.ret.borrow_mut().take()
