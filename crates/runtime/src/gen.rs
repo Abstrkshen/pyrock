@@ -115,6 +115,11 @@ impl<T: 'static, S: SendValue, R: 'static> Gen<T, S, R> {
         self.inner.close()
     }
 
+    /// `a is b`
+    pub fn is(&self, o: &Self) -> bool {
+        Rc::ptr_eq(&self.inner, &o.inner)
+    }
+
     /// Whether the body has started running.
     pub fn started(&self) -> bool {
         !matches!(*self.inner.state.borrow(), State::Fresh(_))

@@ -538,7 +538,7 @@ impl Ty {
 
     /// Mutable, identity-carrying values (Python aliasing must be preserved).
     pub fn is_mutable(self) -> bool {
-        matches!(self.as_comp(), Some(Comp::List(_) | Comp::Dict(..) | Comp::Set(_) | Comp::Class(..) | Comp::Union(_) | Comp::Record(_)))
+        matches!(self.as_comp(), Some(Comp::List(_) | Comp::Dict(..) | Comp::Set(_) | Comp::Class(..) | Comp::Union(_) | Comp::Record(_) | Comp::Gen(..) | Comp::AGen(..) | Comp::Coro(_)))
     }
 
     fn entry<R>(self, f: impl FnOnce(&Entry) -> R) -> R {

@@ -81,7 +81,8 @@ These constructs become plain Rust with no Python objects involved:
 * Generators: `yield` and `yield from` in functions and methods, `send`/`throw`/`close`,
   `return value` (the value of `yield from`), `finally` when a generator is closed or
   abandoned. Async generators (`async def` with `yield`) with `async for`, `asend`, `athrow` and
-  `aclose`. Async comprehensions (`[x async for x in g]`, `[await f(x) for x in xs]`) and
+  `aclose`. Generators still open at exit are finalized as at CPython's shutdown.
+  Async comprehensions (`[x async for x in g]`, `[await f(x) for x in xs]`) and
   async generator expressions. A call returns a native
   generator whose body runs on its own stack; `for` loops, `enumerate`, `zip` and `next`
   pull values lazily (infinite generators work), other builtins exhaust it. A generator

@@ -510,7 +510,10 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 writeln!(out, "    let _frame = rt::enter()?; // recursive: enforce the recursion limit").unwrap();
             }
         }
-        let captured = has_closure_stmt(&f.body);
+        // The main module's variables are released at the end in assignment
+        // order (CPython's shutdown), so its statements run in a closure.
+        let finals = if f.is_module && f.unit == 0 { self.module_finals() } else { Vec::new() };
+        let captured = has_closure_stmt(&f.body) || !finals.is_empty();
         for name in &f.locals {
             if f.params.contains(name) {
                 continue;
@@ -528,7 +531,18 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             }
         }
         let mut body = String::new();
-        self.block(&f.body, 1, &mut body);
+        if finals.is_empty() {
+            self.block(&f.body, 1, &mut body);
+        } else {
+            writeln!(body, "    let __r: PyResult<()> = (|| -> PyResult<()> {{").unwrap();
+            self.block(&f.body, 2, &mut body);
+            writeln!(body, "        Ok(())\n    }})();").unwrap();
+            writeln!(body, "    let __r = rt::io::module_done({file:?}, __r);").unwrap();
+            for fin in &finals {
+                writeln!(body, "    {fin}").unwrap();
+            }
+            writeln!(body, "    return __r;").unwrap();
+        }
         out.push_str(&body);
         // (A generator's own slot says nothing about its body falling through.)
         let falls = if f.is_generator { s.gen_falls } else { s.falls_through };
@@ -1917,5 +1931,117 @@ impl FnEmitter<'_, '_> {
             }
             _ => format!("{o}.close()?"),
         }
+    }
+}
+
+impl FnEmitter<'_, '_> {
+    /// Statements releasing the main module's variables in the order they
+    /// were first assigned (CPython clears `__main__` that way at shutdown),
+    /// for the variables whose release can be observed: generators (their
+    /// `finally` runs), Python objects (their finalizers, e.g. a file is
+    /// flushed), and containers or instances that may hold them.
+    fn module_finals(&self) -> Vec<String> {
+        let f = self.func;
+        let mut order: Vec<(Option<usize>, String)> = Vec::new();
+        fn visit(stmts: &[Stmt], order: &mut Vec<(Option<usize>, String)>) {
+            for s in stmts {
+                let mut add = |k: (Option<usize>, String)| {
+                    if !order.contains(&k) {
+                        order.push(k);
+                    }
+                };
+                match &s.kind {
+                    StmtKind::Assign { target, .. } => add((None, target.clone())),
+                    StmtKind::AugAssign { target, .. } => add((None, target.clone())),
+                    StmtKind::AssignGlobal { unit, name, .. } => add((Some(*unit), name.clone())),
+                    StmtKind::ForRange { var, .. } | StmtKind::ForIter { var, .. } => add((None, var.clone())),
+                    StmtKind::With { var: Some(v), .. } => add((None, v.clone())),
+                    _ => {}
+                }
+                match &s.kind {
+                    StmtKind::If { body, orelse, .. } => {
+                        visit(body, order);
+                        visit(orelse, order);
+                    }
+                    StmtKind::While { body, .. } | StmtKind::ForRange { body, .. } | StmtKind::ForIter { body, .. } | StmtKind::With { body, .. } => visit(body, order),
+                    StmtKind::Try { body, handlers, orelse, finalbody } => {
+                        visit(body, order);
+                        for h in handlers {
+                            visit(&h.body, order);
+                        }
+                        visit(orelse, order);
+                        visit(finalbody, order);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        visit(&f.body, &mut order);
+        // CPython's shutdown collects `__main__` through the garbage
+        // collector: generators bound directly to variables are finalized
+        // first, then those reachable through containers and instances (each
+        // pass in assignment order).
+        let direct = |t: Ty| matches!(t.as_opt().unwrap_or(t).as_comp(), Some(Comp::Gen(..) | Comp::AGen(..)));
+        let (mut first, mut later) = (Vec::new(), Vec::new());
+        for (unit, name) in order {
+            let out = |t: Ty, first: &mut Vec<String>, later: &mut Vec<String>, code: String| {
+                if direct(t) {
+                    first.push(code);
+                } else {
+                    later.push(code);
+                }
+            };
+            match unit {
+                Some(u) => {
+                    let t = self.prog.globals.get(&(u, name.clone())).and_then(|s| s.known()).unwrap_or(Ty::Obj);
+                    if finalizable(self.prog, t, &mut Vec::new()) {
+                        out(t, &mut first, &mut later, format!("rt::gclear(&{});", gname(u, &name)));
+                    }
+                }
+                None => {
+                    if !f.locals.contains(&name) {
+                        continue;
+                    }
+                    let Some(t) = self.local_ty(&name) else { continue };
+                    if !finalizable(self.prog, t, &mut Vec::new()) {
+                        continue;
+                    }
+                    let code = if f.cells.contains(&name) {
+                        // A variable nested functions share: empty the cell.
+                        format!("{{ let __o = {}.borrow_mut().take(); drop(__o); }}", rid(&name))
+                    } else {
+                        format!("drop(std::mem::take(&mut {}));", rid(&name))
+                    };
+                    out(t, &mut first, &mut later, code);
+                }
+            }
+        }
+        first.extend(later);
+        first
+    }
+}
+
+/// Whether releasing a value of type `t` can be observed: it is or may hold
+/// a generator or a Python object.
+fn finalizable(prog: &Program, t: Ty, seen: &mut Vec<ClassId>) -> bool {
+    if t == Ty::Obj {
+        return true;
+    }
+    let Some(c) = t.as_comp() else { return false };
+    match c {
+        Comp::Gen(..) | Comp::AGen(..) => true,
+        Comp::List(e) | Comp::Set(e) | Comp::TupleVar(e) | Comp::Opt(e) => finalizable(prog, e, seen),
+        Comp::Dict(k, v) => finalizable(prog, k, seen) || finalizable(prog, v, seen),
+        Comp::Tuple(ts) | Comp::Union(ts) => ts.iter().any(|x| finalizable(prog, *x, seen)),
+        Comp::Record(fs) => fs.iter().any(|x| finalizable(prog, x.ty, seen)),
+        Comp::Class(id, _) => {
+            if seen.contains(&id) {
+                return false;
+            }
+            seen.push(id);
+            let fields: Vec<Ty> = prog.fields.iter().filter(|((c, _), _)| *c == id).filter_map(|(_, s)| s.known()).collect();
+            fields.into_iter().any(|x| finalizable(prog, x, seen))
+        }
+        _ => false,
     }
 }

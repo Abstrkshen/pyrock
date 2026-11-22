@@ -61,10 +61,31 @@ pub fn run_main(file: &str, body: impl FnOnce() -> PyResult<()>) -> ! {
     match r {
         Ok(()) => std::process::exit(0),
         Err(e) => {
-            eprintln!("Traceback (most recent call last):");
-            eprintln!("  File \"{file}\", in <module>  [native frames elided by pyfast]");
-            eprintln!("{e}");
+            if !REPORTED.load(std::sync::atomic::Ordering::Relaxed) {
+                print_traceback(file, &e);
+            }
             std::process::exit(1);
         }
     }
+}
+
+static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn print_traceback(file: &str, e: &crate::Exc) {
+    eprintln!("Traceback (most recent call last):");
+    eprintln!("  File \"{file}\", in <module>  [native frames elided by pyfast]");
+    eprintln!("{e}");
+}
+
+/// The main module ended (normally or with an uncaught exception, whose
+/// traceback is printed now): its variables are released next, as CPython
+/// does at shutdown, so `finally` blocks of open generators run after the
+/// traceback.
+pub fn module_done(file: &str, r: PyResult<()>) -> PyResult<()> {
+    flush();
+    if let Err(e) = &r {
+        print_traceback(file, e);
+        REPORTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    r
 }

@@ -103,6 +103,11 @@ impl<T: 'static, S: SendValue> AGen<T, S> {
         }
     }
 
+    /// `a is b`
+    pub fn is(&self, o: &Self) -> bool {
+        self.g.is(&o.g)
+    }
+
     /// `await agen.aclose()`
     pub fn aclose(&self) -> PyResult<()> {
         match self.drive(Resume::Throw(Exc::new("GeneratorExit", ""))) {

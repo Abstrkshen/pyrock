@@ -140,6 +140,12 @@ pub fn gget<T: Clone + 'static>(cell: &'static Global<T>, name: &str) -> PyResul
     cell.with(|c| c.clone()).ok_or_else(|| unbound_global(name))
 }
 
+/// Release a global cell's value (module finalization at exit).
+pub fn gclear<T: 'static>(cell: &'static Global<T>) {
+    let old = cell.with(|c| c.take());
+    drop(old);
+}
+
 /// Assign a global cell. The old value is dropped outside the cell (its
 /// destructor may run Python code that reads the global).
 #[inline]

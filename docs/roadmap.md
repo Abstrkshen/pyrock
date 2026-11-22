@@ -78,6 +78,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] Async generators
 - [x] `asend` / `athrow` on async generators
 - [x] Async comprehensions and async generator expressions
+- [x] Finalization of the main module at exit (open generators, Python objects)
 
 ## Phase 7: speed of mixed code
 
@@ -631,3 +632,24 @@ Each bridged operation cost ~400 ns.
 * Generator expressions and all comprehension kinds now share one lowering
   (`lower_hidden_comp`).
 * Test: `tests/differential/async_comprehensions.py` (also identical with `--release`).
+
+### Phase 6.7: finalization at exit (2026-11-22)
+
+* Before, module-level variables were never released at exit: module-body locals were
+  dropped in reverse order (and before the traceback of an uncaught exception), and global
+  cells never. Generators still open at the end did not run their `finally`, and Python
+  objects were not finalized (a file opened at module level and never closed lost its
+  buffered data).
+* Now the main module's statements run in a closure; `rt::io::module_done` prints the
+  traceback of an uncaught exception first, then the module's variables are released as
+  CPython's shutdown does: variables directly holding a generator first, then the others
+  (containers, instances, records, Python objects that may hold one), each pass in
+  first-assignment order (measured against CPython 3.12, whose shutdown collects `__main__`
+  through the garbage collector). Variables shared with nested functions are emptied.
+  Only variables whose release can be observed are released (generators, Python objects,
+  and containers/instances that may hold them); programs with only plain native values are
+  unchanged.
+* Generators, async generators and coroutines now compare by identity (`g is h`).
+* Remaining divergence: module-level variables of *imported* native modules are not
+  finalized at exit.
+* Test: `tests/differential/finalize_at_exit.py` (also identical with `--release`).

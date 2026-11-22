@@ -80,19 +80,25 @@ fn add_partial__int_int(mut a: i64, mut b: i64) -> PyResult<i64> {
 
 /// Module body of annotations.py.
 fn module_body() -> PyResult<()> {
-    let mut count: i64;
-    let mut label: rt::Str;
-    let mut weight: rt::py::Obj;
-    SLOT_1_json.import("json", true)?;
-    count = rt::py::unbox_annotated::<i64>(&rt::py::call(&rt::py::getattr(&SLOT_1_json.get()?, "loads")?, vec![rt::pystr!("41")], vec![])?, "int")?;
-    label = rt::py::unbox_annotated::<rt::Str>(&rt::py::call(&rt::py::getattr(&SLOT_1_json.get()?, "loads")?, vec![rt::pystr!("\"widgets\"")], vec![])?, "str")?;
-    weight = rt::py::call(&rt::py::getattr(&SLOT_1_json.get()?, "loads")?, vec![rt::pystr!("2")], vec![])?;
-    rt::print(&[rt::conv::str_int(add__int_int(1_i64, 2_i64)?), rt::conv::str_float(add_partial__float_int(1.5_f64, 2_i64)?), rt::conv::str_int(add_partial__int_int(count, 1_i64)?)]);
-    rt::print(&[rt::conv::str_int(rt::int::add(parse_int__str(rt::lit!("12"))?, 1_i64)?), rt::conv::str_int(scale__int_int(2_i64, 3_i64)?), rt::conv::str_float(scale__float_float(1.5_f64, 2.0_f64)?), rt::conv::str_float(ratio__int_int(1_i64, 4_i64)?)]);
-    rt::print(&[rt::string::concat(&label, &rt::lit!("!")), rt::py::str_of(&weight)?, rt::py::str_of(&rt::py::binop("truediv", weight.clone(), rt::py::int(4_i64))?)?, rt::conv::str_int(rt::int::mul(count, 2_i64)?)]);
-    rt::print(&[rt::conv::str_of(&maybe__bool(true)?), rt::conv::str_of(&maybe__bool(false)?), rt::conv::str_int(total__list_int(rt::List::<i64>::from_vec(vec![1_i64, 2_i64, 3_i64]))?)]);
-    log__str(rt::lit!("done"))?;
-    rt::print(&[add__str_str(rt::lit!("not"), rt::lit!("checked"))?]);
+    let mut count: i64 = 0;
+    let mut label: rt::Str = rt::Str::from("");
+    let mut weight: rt::py::Obj = rt::py::none();
+    let __r: PyResult<()> = (|| -> PyResult<()> {
+        SLOT_1_json.import("json", true)?;
+        count = rt::py::unbox_annotated::<i64>(&rt::py::call(&rt::py::getattr(&SLOT_1_json.get()?, "loads")?, vec![rt::pystr!("41")], vec![])?, "int")?;
+        label = rt::py::unbox_annotated::<rt::Str>(&rt::py::call(&rt::py::getattr(&SLOT_1_json.get()?, "loads")?, vec![rt::pystr!("\"widgets\"")], vec![])?, "str")?;
+        weight = rt::py::call(&rt::py::getattr(&SLOT_1_json.get()?, "loads")?, vec![rt::pystr!("2")], vec![])?;
+        rt::print(&[rt::conv::str_int(add__int_int(1_i64, 2_i64)?), rt::conv::str_float(add_partial__float_int(1.5_f64, 2_i64)?), rt::conv::str_int(add_partial__int_int(count, 1_i64)?)]);
+        rt::print(&[rt::conv::str_int(rt::int::add(parse_int__str(rt::lit!("12"))?, 1_i64)?), rt::conv::str_int(scale__int_int(2_i64, 3_i64)?), rt::conv::str_float(scale__float_float(1.5_f64, 2.0_f64)?), rt::conv::str_float(ratio__int_int(1_i64, 4_i64)?)]);
+        rt::print(&[rt::string::concat(&label, &rt::lit!("!")), rt::py::str_of(&weight)?, rt::py::str_of(&rt::py::binop("truediv", weight.clone(), rt::py::int(4_i64))?)?, rt::conv::str_int(rt::int::mul(count, 2_i64)?)]);
+        rt::print(&[rt::conv::str_of(&maybe__bool(true)?), rt::conv::str_of(&maybe__bool(false)?), rt::conv::str_int(total__list_int(rt::List::<i64>::from_vec(vec![1_i64, 2_i64, 3_i64]))?)]);
+        log__str(rt::lit!("done"))?;
+        rt::print(&[add__str_str(rt::lit!("not"), rt::lit!("checked"))?]);
+        Ok(())
+    })();
+    let __r = rt::io::module_done("annotations.py", __r);
+    drop(std::mem::take(&mut weight));
+    return __r;
     Ok(())
 }
 

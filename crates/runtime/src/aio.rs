@@ -42,6 +42,11 @@ impl<T> Coro<T> {
         Coro::new(name, move || f(self.run()?))
     }
 
+    /// `a is b`
+    pub fn is(&self, o: &Self) -> bool {
+        Rc::ptr_eq(&self.body, &o.body)
+    }
+
     /// `await coro`: run the body to completion (it may suspend inside, at
     /// awaits of Python objects).
     pub fn run(&self) -> PyResult<T> {
