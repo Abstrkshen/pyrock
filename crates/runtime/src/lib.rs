@@ -131,3 +131,10 @@ impl Truthy for Exc {
 pub fn truthy<T: Truthy + ?Sized>(v: &T) -> bool {
     v.truthy()
 }
+
+/// A `T | None` value used where a `T` is required: CPython raises
+/// TypeError (the message is the one CPython gives at that site).
+#[inline]
+pub fn unopt<T>(v: Option<T>, msg: &str) -> PyResult<T> {
+    v.ok_or_else(|| Exc::new("TypeError", msg.to_string()))
+}

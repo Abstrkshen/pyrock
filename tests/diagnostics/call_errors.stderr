@@ -1,0 +1,6 @@
+tests/diagnostics/call_errors.py:5:13  P101  error: default value of `items` in `g` must be a literal
+    CPython evaluates defaults once, at `def` time; pyfast inlines them at each call. Use `None` and assign in the body
+tests/diagnostics/call_errors.py:9:7  P303  error: f() got an unexpected keyword argument 'd'
+tests/diagnostics/call_errors.py:10:7  P303  error: f() missing 1 required argument(s): 'a'
+tests/diagnostics/call_errors.py:11:7  P303  error: f() takes 2 positional argument(s) but 3 were given
+tests/diagnostics/call_errors.py:12:7  P303  error: f() got multiple values for argument 'a'

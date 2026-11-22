@@ -51,6 +51,7 @@ pub fn parse_file(path: &str, python: &str, mode: Mode) -> Result<ParseOutput, S
         builtins: HashSet::new(),
         python_version: String::new(),
         func_anns: HashMap::new(),
+        func_sigs: HashMap::new(),
     };
     let (unit, diags) = ld.load_unit(&entry, "__main__", path);
     let Some(unit) = unit else {
@@ -87,6 +88,53 @@ struct Loader {
     python_version: String,
     /// Annotations per function: (parameters, return).
     func_anns: HashMap<FuncId, (Vec<Option<Ty>>, Option<Ty>)>,
+    /// Call signatures of natively compiled functions.
+    func_sigs: HashMap<FuncId, Sig>,
+}
+
+/// How arguments bind to a native function's parameters.
+#[derive(Clone, Debug, Default)]
+struct Sig {
+    /// Positional-only, then positional-or-keyword, then keyword-only names.
+    names: Vec<String>,
+    n_posonly: usize,
+    /// Number of parameters that can be passed positionally.
+    n_pos: usize,
+    /// Literal default per parameter (as AST JSON).
+    defaults: Vec<Option<Value>>,
+}
+
+/// All parameter nodes of a `def`, in signature order, with the signature.
+fn signature(a: &Value) -> (Vec<&Value>, Sig) {
+    let posonly = arr(a, "posonlyargs");
+    let args = arr(a, "args");
+    let kwonly = arr(a, "kwonlyargs");
+    let params: Vec<&Value> = posonly.iter().chain(args).chain(kwonly).collect();
+    let n_pos = posonly.len() + args.len();
+    let mut defaults: Vec<Option<Value>> = vec![None; params.len()];
+    // `defaults` align with the last positional parameters.
+    let pd = arr(a, "defaults");
+    for (i, d) in pd.iter().enumerate() {
+        defaults[n_pos - pd.len() + i] = Some(d.clone());
+    }
+    for (i, d) in arr(a, "kw_defaults").iter().enumerate() {
+        if !d.is_null() {
+            defaults[n_pos + i] = Some(d.clone());
+        }
+    }
+    let names = params.iter().map(|p| sstr(p, "arg").to_string()).collect();
+    (params, Sig { names, n_posonly: posonly.len(), n_pos, defaults })
+}
+
+/// Defaults are evaluated once, at `def` time, in CPython. pyfast inlines
+/// them at each call, which is only equivalent for immutable literals.
+fn literal_default(v: &Value) -> bool {
+    match ty(v) {
+        "Constant" => v["value"]["kind"] != "other",
+        "UnaryOp" => matches!(ty(&v["op"]), "USub" | "UAdd") && ty(&v["operand"]) == "Constant",
+        "Tuple" => arr(v, "elts").iter().all(literal_default),
+        _ => false,
+    }
 }
 
 impl Loader {
@@ -336,9 +384,10 @@ impl<'l> Lowerer<'l> {
                     continue;
                 }
                 let id = self.ld.alloc_func();
-                let a = &st["args"];
-                let params = arr(a, "args").iter().map(|p| parse_ann(&p["annotation"])).collect();
-                self.ld.func_anns.insert(id, (params, parse_ann(&st["returns"])));
+                let (params, sig) = signature(&st["args"]);
+                let anns = params.iter().map(|p| parse_ann(&p["annotation"])).collect();
+                self.ld.func_anns.insert(id, (anns, parse_ann(&st["returns"])));
+                self.ld.func_sigs.insert(id, sig);
                 self.func_ids.insert(name.clone(), (id, sp));
                 self.bindings.insert(name.clone(), Binding::Func(id));
                 self.ld.unit_funcs[self.unit].insert(name, id);
@@ -600,15 +649,22 @@ impl<'l> Lowerer<'l> {
         if !arr(st, "decorator_list").is_empty() {
             self.err("P101", sp, format!("decorators on `{name}` are not supported yet"));
         }
-        if !arr(a, "posonlyargs").is_empty()
-            || !arr(a, "kwonlyargs").is_empty()
-            || !a["vararg"].is_null()
-            || !a["kwarg"].is_null()
-            || !arr(a, "defaults").is_empty()
-        {
-            self.err("P101", sp, format!("`{name}`: only fixed positional parameters are supported (no defaults, *args, **kwargs, / or *)"));
+        if !a["vararg"].is_null() || !a["kwarg"].is_null() {
+            self.err("P101", sp, format!("`{name}`: `*args` / `**kwargs` parameters are not supported yet"));
         }
-        let params: Vec<String> = arr(a, "args").iter().map(|p| sstr(p, "arg").to_string()).collect();
+        let (_, sig) = signature(a);
+        for (n, d) in sig.names.iter().zip(&sig.defaults) {
+            if let Some(d) = d {
+                if !literal_default(d) {
+                    let dsp = self.span(d);
+                    self.diags.push(
+                        Diagnostic::error("P101", dsp, format!("default value of `{n}` in `{name}` must be a literal"))
+                            .note("CPython evaluates defaults once, at `def` time; pyfast inlines them at each call. Use `None` and assign in the body"),
+                    );
+                }
+            }
+        }
+        let params: Vec<String> = sig.names.clone();
         let mut locals = params.clone();
         collect_bindings(arr(st, "body"), &mut locals, false);
         self.locals = locals.iter().cloned().collect();
@@ -1138,7 +1194,6 @@ impl<'l> Lowerer<'l> {
             let id = sstr(f, "id");
             match self.bindings.get(id).copied() {
                 Some(Binding::Func(fid)) => {
-                    native_only(self, &format!("`{id}`"))?;
                     if self.in_module {
                         if let Some(&(_, def_sp)) = self.func_ids.get(id) {
                             if def_sp.line > sp.line {
@@ -1147,8 +1202,9 @@ impl<'l> Lowerer<'l> {
                             }
                         }
                     }
+                    let (args, order) = self.bind_args(fid, id, args, kwargs, sp)?;
                     let args = self.annotate_args(fid, args);
-                    return Some(Expr { kind: ExprKind::Call { callee: Callee::Func(fid), args }, span: sp });
+                    return Some(Expr { kind: ExprKind::Call { callee: Callee::Func(fid), args, order }, span: sp });
                 }
                 Some(Binding::ExternFn(ext, func)) => {
                     native_only(self, &format!("`{id}`"))?;
@@ -1166,7 +1222,21 @@ impl<'l> Lowerer<'l> {
             if !self.bindings.contains_key(id) && !self.module_vars.contains(id) {
                 if let Some(b) = Builtin::from_name(id) {
                     if kwargs.is_empty() {
-                        return Some(Expr { kind: ExprKind::Call { callee: Callee::Builtin(b), args }, span: sp });
+                        return Some(Expr { kind: ExprKind::Call { callee: Callee::Builtin(b), args, order: vec![] }, span: sp });
+                    }
+                    // print(..., sep=, end=, flush=) stays native; file= uses CPython.
+                    if b == Builtin::Print && kwargs.iter().all(|(k, _)| matches!(k.as_str(), "sep" | "end" | "flush")) {
+                        let mut args = args;
+                        for (k, default) in [("sep", " "), ("end", "\n")] {
+                            let v = kwargs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+                            args.push(match v {
+                                Some(Expr { kind: ExprKind::NoneLit, .. }) | None => Expr { kind: ExprKind::Str(default.into()), span: sp },
+                                Some(v) => v,
+                            });
+                        }
+                        let flush = kwargs.iter().find(|(n, _)| n == "flush").map(|(_, v)| v.clone());
+                        args.push(flush.unwrap_or(Expr { kind: ExprKind::Bool(false), span: sp }));
+                        return Some(Expr { kind: ExprKind::Call { callee: Callee::Builtin(Builtin::PrintKw), args, order: vec![] }, span: sp });
                     }
                     // e.g. print(x, end=""): use the real CPython builtin.
                 }
@@ -1181,9 +1251,9 @@ impl<'l> Lowerer<'l> {
                 match b {
                     Binding::Unit(u) => match self.ld.unit_funcs[u].get(attr).copied() {
                         Some(fid) => {
-                            native_only(self, &format!("`{modname}.{attr}`"))?;
+                            let (args, order) = self.bind_args(fid, &format!("{modname}.{attr}"), args, kwargs, sp)?;
                             let args = self.annotate_args(fid, args);
-                            return Some(Expr { kind: ExprKind::Call { callee: Callee::Func(fid), args }, span: sp });
+                            return Some(Expr { kind: ExprKind::Call { callee: Callee::Func(fid), args, order }, span: sp });
                         }
                         None => {
                             self.err("P140", sp, format!("`{modname}.{attr}` is not a function of the natively compiled module `{modname}`"));
@@ -1213,6 +1283,59 @@ impl<'l> Lowerer<'l> {
         Some(Expr { kind: ExprKind::CallObj { func: Box::new(func), args, kwargs }, span: sp })
     }
 
+    /// Place positional and keyword arguments and defaults into parameter
+    /// order. Returns the arguments and their evaluation order (empty when
+    /// it is already parameter order).
+    fn bind_args(&mut self, fid: FuncId, name: &str, args: Vec<Expr>, kwargs: Vec<(String, Expr)>, sp: Span) -> Option<(Vec<Expr>, Vec<usize>)> {
+        let sig = self.ld.func_sigs.get(&fid).cloned().unwrap_or_default();
+        let mut slots: Vec<Option<(Expr, usize)>> = vec![None; sig.names.len()];
+        let npos = args.len();
+        if npos > sig.n_pos {
+            self.err("P303", sp, format!("{name}() takes {} positional argument(s) but {npos} were given", sig.n_pos));
+            return None;
+        }
+        for (i, a) in args.into_iter().enumerate() {
+            slots[i] = Some((a, i));
+        }
+        for (k, (kw, v)) in kwargs.into_iter().enumerate() {
+            let Some(idx) = sig.names.iter().position(|n| *n == kw).filter(|&i| i >= sig.n_posonly) else {
+                self.err("P303", sp, format!("{name}() got an unexpected keyword argument '{kw}'"));
+                return None;
+            };
+            if slots[idx].is_some() {
+                self.err("P303", sp, format!("{name}() got multiple values for argument '{kw}'"));
+                return None;
+            }
+            slots[idx] = Some((v, npos + k));
+        }
+        let mut out = Vec::new();
+        let mut src = Vec::new();
+        let mut missing = Vec::new();
+        for (i, slot) in slots.into_iter().enumerate() {
+            match slot {
+                Some((e, at)) => {
+                    src.push((at, i));
+                    out.push(e);
+                }
+                None => match sig.defaults[i].clone() {
+                    Some(d) => out.push(self.lower_expr(&d)?),
+                    None => {
+                        missing.push(format!("'{}'", sig.names[i]));
+                        out.push(Expr { kind: ExprKind::NoneLit, span: sp });
+                    }
+                },
+            }
+        }
+        if !missing.is_empty() {
+            self.err("P303", sp, format!("{name}() missing {} required argument(s): {}", missing.len(), missing.join(", ")));
+            return None;
+        }
+        src.sort();
+        let order: Vec<usize> = src.iter().map(|&(_, i)| i).collect();
+        let identity = order.windows(2).all(|w| w[0] < w[1]);
+        Some((out, if identity { vec![] } else { order }))
+    }
+
     /// Arguments to annotated parameters are checked/unboxed at the call.
     fn annotate_args(&self, fid: FuncId, args: Vec<Expr>) -> Vec<Expr> {
         let anns = self.ld.func_anns.get(&fid).map(|a| a.0.clone()).unwrap_or_default();
@@ -1223,7 +1346,7 @@ impl<'l> Lowerer<'l> {
     /// conversions use CPython's `format`/`repr`.
     fn lower_fstring(&mut self, e: &Value) -> Option<Expr> {
         let sp = self.span(e);
-        let str_call = |v: Expr, sp: Span| Expr { kind: ExprKind::Call { callee: Callee::Builtin(Builtin::Str), args: vec![v] }, span: sp };
+        let str_call = |v: Expr, sp: Span| Expr { kind: ExprKind::Call { callee: Callee::Builtin(Builtin::Str), args: vec![v], order: vec![] }, span: sp };
         let mut acc: Option<Expr> = None;
         for part in arr(e, "values") {
             let psp = self.span(part);

@@ -2,7 +2,10 @@
 
 ## Native (pure Rust, no Python objects)
 
-* Top-level `def` with fixed positional parameters, including direct and mutual recursion.
+* Top-level `def`, including recursion. `/` and `*` parameter markers, literal defaults
+  (`def f(x, n=None, *, sep=",")`) and keyword arguments at the call are native.
+* `T | None` is a native `Option<T>`: `def f(x, size=None): if size is None: size = 8`
+  compiles without boxing. Arithmetic on a `None` raises CPython's `TypeError`.
 * Locals: one concrete type per specialization.
 * Literals: `int` (i64), `float`, `str`, `bool`, `None`.
 * Operators: `+ - * / // % ** & | ^ << >> ~`, unary `- + not`, comparisons, including chains
@@ -52,7 +55,7 @@ Lists, dicts, tuples, sets, subscripts and slices, item and attribute assignment
 calls and attributes, keyword arguments, calls of Python objects, `for x in <iterable>` other
 than range, builtins without a native version (`sorted`, `sum`, `round`, `isinstance`,
 `repr`, `enumerate`, `zip`, `range` used as a value, ...), `with` (context managers),
-`print(sep=, end=)`, and boxed
+`print(file=)`, and boxed
 values (mixed types). These keep exact Python semantics, including aliasing.
 
 ## Not supported in any mode → how to rewrite
@@ -62,7 +65,8 @@ values (mixed types). These keep exact Python semantics, including aliasing.
 | `class` in the entry file | Move it into a separate `.py` module (it falls back to CPython, with P220), or use functions plus separate values |
 | `[f(x) for x in xs]`, generators | `out = []` + `for` + `out.append(...)` |
 | `lambda`, nested `def`, closures | A top-level function |
-| `def f(a, b=1)`, `*args`, `**kwargs` | Plain positional parameters, and pass every argument |
+| `*args`, `**kwargs` parameters | Pass a list or explicit parameters |
+| Non-literal default (`def f(x=[])`) | `def f(x=None): if x is None: x = []` |
 | `a, b = b, a` / `for k, v in d.items()` | `t = a; a = b; b = t` / index the tuple: `kv[0]`, `kv[1]` |
 | Reading a module global in a function | Pass it as an argument |
 | `global` / `nonlocal` | Return the new value |

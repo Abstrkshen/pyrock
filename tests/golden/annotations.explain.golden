@@ -23,7 +23,7 @@ Specializations (reachable from module entry)
   scale(x: int, k: int) -> int            native  scale__int_int           effects: may_raise
   scale(x: float, k: float) -> float      native  scale__float_float       effects: pure
   ratio(n: int, d: int) -> float          native  ratio__int_int           effects: may_raise
-  maybe(flag: bool) -> object             bridge  maybe__bool              effects: calls_python
+  maybe(flag: bool) -> int | None         native  maybe__bool              effects: pure
   total(xs: object) -> int                bridge  total__obj               effects: calls_python
   log(msg: str) -> None                   native  log__str                 effects: io
   add(a: str, b: str) -> str              native  add__str_str             effects: pure
@@ -36,8 +36,6 @@ CPython boundaries
       no .py/.rs/.c of that name next to the source: CPython import
   tests/golden/annotations.py:20:12  P210  json.loads(...)  [parse_int(str)]
       CPython attribute lookup + call
-  tests/golden/annotations.py:31:1  P215  return value is int or None  [maybe(bool)]
-      boxed as a Python object (no common native type)
   tests/golden/annotations.py:37:1  P215  variable `t` holds int and object  [total(object)]
       boxed as a Python object (no common native type)
   tests/golden/annotations.py:39:5  P214  for-loop over a Python iterable  [total(object)]
@@ -53,7 +51,7 @@ CPython boundaries
   tests/golden/annotations.py:54:40  P212  list literal  [<module>]
       mutable collection kept as a Python list (preserves aliasing)
 
-Summary: 8 native, 3 bridged specialization(s); module body bridged; 0 linked Rust/C module(s)
+Summary: 9 native, 2 bridged specialization(s); module body bridged; 0 linked Rust/C module(s)
 Runtime: embeds CPython (libpython) for the boundaries above
 Int semantics: i64 subset with checked arithmetic (OverflowError instead of promotion)
 

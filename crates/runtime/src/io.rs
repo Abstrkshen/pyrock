@@ -24,6 +24,23 @@ pub fn print(parts: &[Str]) {
     });
 }
 
+/// `print(*parts, sep=sep, end=end, flush=flush)`
+pub fn print_kw(parts: &[Str], sep: &str, end: &str, flush_now: bool) {
+    OUT.with(|o| {
+        let mut o = o.borrow_mut();
+        for (i, p) in parts.iter().enumerate() {
+            if i > 0 {
+                let _ = o.write_all(sep.as_bytes());
+            }
+            let _ = o.write_all(p.as_bytes());
+        }
+        let _ = o.write_all(end.as_bytes());
+    });
+    if flush_now {
+        flush();
+    }
+}
+
 pub fn flush() {
     OUT.with(|o| {
         let _ = o.borrow_mut().flush();

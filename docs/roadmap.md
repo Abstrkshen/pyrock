@@ -25,7 +25,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
       `Optional[T]`. Gate: behaviour-preserving, every golden snapshot unchanged.
 - [x] `try` / `except` / `else` / `finally`, `raise`, `assert`, exception hierarchy for builtin types
 - [x] `with` (CPython context managers; native ones once classes land), `__file__`
-- [ ] Default parameter values, keyword arguments to native functions
+- [x] Default parameter values, keyword arguments to native functions, `print(sep=, end=, flush=)`
+- [x] `Optional[T]` as a native `Option<T>`; `x is None` folded per specialization
 - [ ] Tuple unpacking (`a, b = f()`, `for k, v in ...`)
 - [ ] Module-level constants readable inside functions (today P140)
 
@@ -118,3 +119,27 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
   metaclass, because its `try` compiles natively now.
 * Effect: `.ignore/samples/rust-http/client.py` (uses `try`/`with`) now compiles natively
   instead of falling back. `samples/run_all.sh` 21/21, `scripts/readme_check.sh` 11/11.
+
+### Phase 1.3: Optional, defaults and keyword arguments (2026-11-22)
+
+* `T | None` is native: joining `None` with `T` gives `Ty::opt(T)` (`Option<T>`) instead of
+  boxing (hybrid) or P304/P305 (native-only); functions that fall off the end return
+  `T | None`. Operators, ordering comparisons, numeric builtins, `range` bounds and Rust/C
+  arguments unwrap it with `rt::unopt`, raising CPython's exact `TypeError` text on `None`.
+  `==`/`is` with `None`, `print`, truthiness and boxing work on the `Option` directly.
+* Per-specialization constant folding: `x is None` / `is not None` on a local whose type is
+  exactly `None` or never `None` (combined with `not`/`and`/`or`) decides `if`, `while`,
+  `and`/`or` and `a if c else b` at compile time, so dead branches are neither type-checked
+  nor emitted. Only side-effect-free tests fold.
+* Parameters whose local type is wider than the argument type (a `None` default later
+  assigned an int) are rebound with a coercion at function entry. This also fixes a latent
+  bug for boxed parameters.
+* Signatures: `/`, `*`, keyword-only parameters and literal defaults. Calls bind keyword
+  arguments and defaults at compile time (CPython's TypeError wording for unexpected,
+  duplicate, missing and surplus arguments, as P303). When keyword arguments are out of
+  parameter order they are evaluated into temporaries in source order.
+* `print(..., sep=, end=, flush=)` is native (`rt::io::print_kw`); only `file=` still uses
+  CPython.
+* Tests: `tests/differential/optional.py`, `tests/differential/call_args.py` (the latter
+  passes `--mode native-only`), `tests/diagnostics/call_errors.py`. Golden change: `maybe()`
+  in `annotations.py` is now native `-> int | None` instead of a boxed object.

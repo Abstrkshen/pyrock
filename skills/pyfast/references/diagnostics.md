@@ -11,7 +11,7 @@ Format: `file.py:LINE:COL  CODE  error|warning: message`, followed by indented
 | P002 | Frontend failure (python3 missing, protocol mismatch) | Make sure `python3` (or `--python`) runs |
 | P003 | An imported `.rs` file doesn't parse | Fix the Rust syntax |
 | P100 | Unsupported statement or expression (`class`, `global` reads, relative import, `import *`, import inside a function, `module.CONST`, a function used as a value, tuple unpacking, ...) | Rewrite (see language.md), or move that code into an imported `.py` so hybrid mode falls back to CPython for it |
-| P101 | Decorators, or parameters with defaults, `*args`, `**kwargs`, `/`, `*` | Use plain positional parameters and pass every argument explicitly |
+| P101 | Decorators, `*args`/`**kwargs` parameters, or a non-literal default | Use `None` as the default and assign in the body |
 | P110 | Integer literal outside i64 | Use a float, or compute it in a CPython module |
 | P120 | Comprehension, generator or lambda | Use a `for` loop with `.append(...)`, or a named top-level function |
 | P140 | Module-level variable read inside a function, or `from mod import NAME` where NAME isn't a function | Pass the value as a parameter, or wrap it in a function that returns it |

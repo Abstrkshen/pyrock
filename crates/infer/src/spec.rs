@@ -32,11 +32,23 @@ pub enum Slot {
     Conflict(Ty, Ty),
 }
 
+/// `None` joined with `T` is `T | None` (a native `Option<T>`), in every mode.
+pub fn opt_join(a: Ty, b: Ty) -> Option<Ty> {
+    let base = |t: Ty| t.as_opt().unwrap_or(t);
+    match (a, b) {
+        _ if a == Ty::Obj || b == Ty::Obj => None,
+        (Ty::None, x) | (x, Ty::None) => Some(Ty::opt(x)),
+        _ if base(a) == base(b) && (a.as_opt().is_some() || b.as_opt().is_some()) => Some(Ty::opt(base(a))),
+        _ => None,
+    }
+}
+
 impl Slot {
     fn join(self, t: Ty, boxing: bool) -> Slot {
         match self {
             Slot::Unknown => Slot::Known(t),
             Slot::Known(a) if a == t => self,
+            Slot::Known(a) if opt_join(a, t).is_some() => Slot::Known(opt_join(a, t).unwrap()),
             Slot::Known(a) if boxing || a == Ty::Obj || t == Ty::Obj => Slot::Boxed(a, t),
             Slot::Known(a) => Slot::Conflict(a, t),
             c => c,
@@ -87,8 +99,8 @@ impl<'m> Program<'m> {
         match (s.ret, s.falls_through) {
             (Slot::Known(Ty::None), _) | (Slot::Unknown, true) => Some(Ty::None),
             (Slot::Known(t), false) => Some(t),
-            (Slot::Known(_), true) if self.boxing() => Some(Ty::Obj),
-            (Slot::Known(t), true) => Some(t),
+            // Falling off the end returns None: `T | None`.
+            (Slot::Known(t), true) => Some(opt_join(t, Ty::None).unwrap_or(Ty::Obj)),
             (Slot::Boxed(..), _) => Some(Ty::Obj),
             _ => None,
         }
@@ -102,6 +114,72 @@ impl<'m> Program<'m> {
         &self.specs[0]
     }
 
+    /// Truth value of a test that is decided by the specialization's types:
+    /// `x is None` / `x is not None` on a local whose type is exactly `None`
+    /// or cannot be `None`, combined with `not`, `and`, `or`. Only
+    /// side-effect-free tests fold, so skipping their evaluation is exact.
+    pub fn static_truth(&self, spec: &Spec, e: &Expr) -> Option<bool> {
+        static_truth(&spec.locals, e)
+    }
+
+    pub fn short_circuit(&self, spec: &Spec, op: BoolOpKind, values: &[Expr]) -> Option<usize> {
+        short_circuit(&spec.locals, op, values)
+    }
+}
+
+pub fn static_truth(locals: &BTreeMap<String, Slot>, e: &Expr) -> Option<bool> {
+    {
+        let none_state = |x: &Expr| -> Option<bool> {
+            match &x.kind {
+                ExprKind::NoneLit => Some(true),
+                ExprKind::Local(n) => match locals.get(n)?.known()? {
+                    Ty::None => Some(true),
+                    Ty::Obj => None,
+                    t if t.as_opt().is_some() => None,
+                    _ => Some(false),
+                },
+                _ => None,
+            }
+        };
+        match &e.kind {
+            ExprKind::Bool(b) => Some(*b),
+            ExprKind::Compare { first, rest } if rest.len() == 1 && matches!(rest[0].0, CmpOp::Is | CmpOp::IsNot) => {
+                let (a, b) = (none_state(first)?, none_state(&rest[0].1)?);
+                // Only `x is None` forms: at least one side must be the None literal.
+                if !matches!(first.kind, ExprKind::NoneLit) && !matches!(rest[0].1.kind, ExprKind::NoneLit) {
+                    return None;
+                }
+                let is = a && b;
+                Some(if rest[0].0 == CmpOp::Is { is } else { !is })
+            }
+            ExprKind::Unary { op: UnaryOp::Not, operand } => static_truth(locals, operand).map(|v| !v),
+            ExprKind::BoolOp { op, values } => {
+                // Decided only if every operand is decided (no side effects to skip).
+                let vs: Option<Vec<bool>> = values.iter().map(|v| static_truth(locals, v)).collect();
+                let vs = vs?;
+                Some(if *op == BoolOpKind::And { vs.iter().all(|v| *v) } else { vs.iter().any(|v| *v) })
+            }
+            _ => None,
+        }
+    }
+
+}
+
+/// For `a and b and c`: the number of leading operands evaluated when an
+/// operand's static truth short-circuits (`None` when not decided).
+pub fn short_circuit(locals: &BTreeMap<String, Slot>, op: BoolOpKind, values: &[Expr]) -> Option<usize> {
+    {
+        for (i, v) in values.iter().enumerate().take(values.len() - 1) {
+            match (static_truth(locals, v), op) {
+                (Some(false), BoolOpKind::And) | (Some(true), BoolOpKind::Or) => return Some(i + 1),
+                _ => {}
+            }
+        }
+        None
+    }
+}
+
+impl Program<'_> {
     /// Type of `e` under the locals of `spec`. Returns `None` when unknown or ill-typed.
     pub fn type_of(&self, spec: &Spec, e: &Expr) -> Option<Ty> {
         let mut ctx = Ctx { prog: self, locals: &spec.locals, requests: None, diags: None };
@@ -182,6 +260,7 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
                 (Slot::Unknown, true) => (Some(Slot::Known(Ty::None)), true),
                 (Slot::Unknown, false) => (None, false),
                 (Slot::Boxed(a, b), _) => (Some(Slot::Boxed(a, b)), true),
+                (Slot::Known(t), true) if opt_join(t, Ty::None).is_some() => (Some(Slot::Known(opt_join(t, Ty::None).unwrap())), true),
                 (Slot::Known(t), true) if boxing => (Some(Slot::Boxed(t, Ty::None)), true),
                 (Slot::Known(t), true) => {
                     diags.push(
@@ -343,12 +422,20 @@ impl Ctx<'_, '_> {
             }
             StmtKind::If { test, body, orelse } => {
                 self.expr(test);
+                match static_truth(self.locals, test) {
+                    Some(true) => return self.block(body, assigns, ret),
+                    Some(false) => return self.block(orelse, assigns, ret),
+                    None => {}
+                }
                 let a = self.block(body, assigns, ret);
                 let b = self.block(orelse, assigns, ret);
                 return a || b;
             }
             StmtKind::While { test, body } => {
                 self.expr(test);
+                if static_truth(self.locals, test) == Some(false) {
+                    return true;
+                }
                 self.block(body, assigns, ret);
                 // `while True:` without break never falls through.
                 if matches!(test.kind, ExprKind::Bool(true)) && !contains_break(body) {
@@ -358,7 +445,7 @@ impl Ctx<'_, '_> {
             StmtKind::ForRange { var, start, stop, step, body } => {
                 for b in [start.as_ref(), Some(stop), step.as_ref()].into_iter().flatten() {
                     if let Some(t) = self.expr(b) {
-                        if !matches!(t, Ty::Int | Ty::Bool | Ty::Obj) {
+                        if !matches!(ops::base(t), Ty::Int | Ty::Bool | Ty::Obj) {
                             self.report(Diagnostic::error("P301", b.span, format!("'{t}' object cannot be interpreted as an integer")));
                         }
                     }
@@ -448,6 +535,9 @@ impl Ctx<'_, '_> {
         if tys.iter().all(|t| *t == first) {
             return Some(first);
         }
+        if let Some(j) = tys[1..].iter().try_fold(first, |acc, t| if acc == *t { Some(acc) } else { opt_join(acc, *t) }) {
+            return Some(j);
+        }
         if self.prog.boxing() || tys.contains(&Ty::Obj) {
             return Some(Ty::Obj);
         }
@@ -522,13 +612,23 @@ impl Ctx<'_, '_> {
                 }
                 Some(Ty::Bool)
             }
-            ExprKind::BoolOp { values, .. } => {
+            ExprKind::BoolOp { op, values } => {
+                if let Some(n) = short_circuit(self.locals, *op, values) {
+                    // Statically decided: the result is operand n-1 itself.
+                    let tys: Vec<Option<Ty>> = values[..n].iter().map(|v| self.expr(v)).collect();
+                    return tys[n - 1];
+                }
                 let tys: Vec<Option<Ty>> = values.iter().map(|v| self.expr(v)).collect();
                 let tys: Vec<Ty> = tys.into_iter().collect::<Option<_>>()?;
                 self.merge(&tys, e, "`and`/`or`")
             }
             ExprKind::IfExp { test, body, orelse } => {
                 self.expr(test);
+                match static_truth(self.locals, test) {
+                    Some(true) => return self.expr(body),
+                    Some(false) => return self.expr(orelse),
+                    None => {}
+                }
                 let a = self.expr(body);
                 let b = self.expr(orelse);
                 self.merge(&[a?, b?], e, "conditional expression")
@@ -547,7 +647,7 @@ impl Ctx<'_, '_> {
                     return None;
                 }
                 for (i, (p, t)) in f.params.iter().zip(&tys).enumerate() {
-                    if !p.accepts(*t) {
+                    if !p.accepts(ops::base(*t)) {
                         self.report(
                             Diagnostic::error("P303", args[i].span, format!("argument {} of {}.{}() expects {} (`{}`), got {t}", i + 1, m.name, f.name, p.ty(), p.rust()))
                                 .note("CPython-side code would raise TypeError here"),
@@ -590,7 +690,7 @@ impl Ctx<'_, '_> {
                 self.all_obj(all)
             }
             ExprKind::Subscript { obj, index } => self.all_obj([&**obj, &**index]),
-            ExprKind::Call { callee, args } => {
+            ExprKind::Call { callee, args, .. } => {
                 let tys: Vec<Option<Ty>> = args.iter().map(|a| self.expr(a)).collect();
                 let tys: Option<Vec<Ty>> = tys.into_iter().collect();
                 let tys = tys?;

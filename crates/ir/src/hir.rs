@@ -154,6 +154,7 @@ impl ExtTy {
 pub struct Function {
     pub id: FuncId,
     pub name: String,
+    /// Positional parameters, then keyword-only ones.
     pub params: Vec<String>,
     /// Every local name (params first), in first-binding order.
     pub locals: Vec<String>,
@@ -250,7 +251,10 @@ pub enum ExprKind {
     Bool(bool),
     NoneLit,
     Local(String),
-    Call { callee: Callee, args: Vec<Expr> },
+    /// `args` are in parameter order (keyword arguments and defaults already
+    /// placed). `order`, when not empty, lists argument indices in Python's
+    /// evaluation (source) order; defaults are not listed (they are literals).
+    Call { callee: Callee, args: Vec<Expr>, order: Vec<usize> },
     BinOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
     Unary { op: UnaryOp, operand: Box<Expr> },
     /// Chained comparison `a < b <= c`; each middle operand is evaluated once.
@@ -312,6 +316,8 @@ pub enum Builtin {
     Len,
     Min,
     Max,
+    /// `print(*items, sep=, end=, flush=)`: the last three arguments are sep, end, flush.
+    PrintKw,
 }
 
 impl Builtin {
@@ -332,7 +338,7 @@ impl Builtin {
 
     pub fn name(self) -> &'static str {
         match self {
-            Builtin::Print => "print",
+            Builtin::Print | Builtin::PrintKw => "print",
             Builtin::Abs => "abs",
             Builtin::Int => "int",
             Builtin::Float => "float",

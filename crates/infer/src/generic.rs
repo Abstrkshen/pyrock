@@ -436,11 +436,11 @@ impl State<'_> {
                 self.expr(index, cx);
                 Sym::Con(Ty::Obj)
             }
-            ExprKind::Call { callee, args } => {
+            ExprKind::Call { callee, args, .. } => {
                 let syms: Vec<Sym> = args.iter().map(|a| self.expr(a, cx)).collect();
                 match callee {
                     Callee::Builtin(b) => match b {
-                        Builtin::Print => Sym::Con(Ty::None),
+                        Builtin::Print | Builtin::PrintKw => Sym::Con(Ty::None),
                         Builtin::Int | Builtin::Len => Sym::Con(Ty::Int),
                         Builtin::Float => Sym::Con(Ty::Float),
                         Builtin::Str => Sym::Con(Ty::Str),

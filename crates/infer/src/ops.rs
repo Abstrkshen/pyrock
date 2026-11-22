@@ -17,8 +17,14 @@ fn intlike(t: Ty) -> bool {
 
 /// Result type of `l op r`. `rhs_literal` is the right operand's value when
 /// it is an int literal (needed for `int ** int`, whose type is value-dependent).
+/// `T | None` used where a `T` is needed: checked at runtime (TypeError on None).
+pub fn base(t: Ty) -> Ty {
+    t.as_opt().unwrap_or(t)
+}
+
 pub fn binop(op: BinOp, l: Ty, r: Ty, rhs_literal: Option<i64>) -> Option<Ty> {
     use BinOp::*;
+    let (l, r) = (base(l), base(r));
     if l == Ty::Obj || r == Ty::Obj {
         return Some(Ty::Obj); // CPython operator protocol
     }
@@ -67,6 +73,7 @@ pub fn satisfies(v: Ty, ann: Ty) -> bool {
 }
 
 pub fn unary(op: UnaryOp, t: Ty) -> Option<Ty> {
+    let t = if op == UnaryOp::Not { t } else { base(t) };
     match op {
         UnaryOp::Not => Some(Ty::Bool),
         _ if t == Ty::Obj => Some(Ty::Obj),
@@ -83,8 +90,11 @@ pub fn compare(op: CmpOp, l: Ty, r: Ty) -> bool {
     if l == Ty::Obj || r == Ty::Obj {
         return true;
     }
+    let optional = |t: Ty| t == Ty::None || t.as_opt().is_some();
     match op {
         CmpOp::Eq | CmpOp::NotEq => true,
+        CmpOp::Is | CmpOp::IsNot if optional(l) || optional(r) => true,
+        _ if l.as_opt().is_some() || r.as_opt().is_some() => compare(op, base(l), base(r)),
         CmpOp::In | CmpOp::NotIn => l == Ty::Str && r == Ty::Str,
         // `x is None` on a native value has a statically known answer.
         CmpOp::Is | CmpOp::IsNot => l == Ty::None || r == Ty::None,
@@ -94,6 +104,8 @@ pub fn compare(op: CmpOp, l: Ty, r: Ty) -> bool {
 
 /// Result type of a builtin call, or an error message (Python's TypeError text).
 pub fn builtin(b: Builtin, args: &[Ty], boxing: bool) -> Result<Ty, String> {
+    let lifted: Vec<Ty> = args.iter().map(|t| base(*t)).collect();
+    let args: &[Ty] = if matches!(b, Builtin::Print | Builtin::PrintKw | Builtin::Str | Builtin::Bool) { args } else { &lifted };
     let any_obj = args.contains(&Ty::Obj);
     let arity = |n: usize| -> Result<(), String> {
         if args.len() == n {
@@ -104,6 +116,15 @@ pub fn builtin(b: Builtin, args: &[Ty], boxing: bool) -> Result<Ty, String> {
     };
     match b {
         Builtin::Print => Ok(Ty::None),
+        Builtin::PrintKw => {
+            let n = args.len();
+            for (i, what) in [(n - 3, "sep"), (n - 2, "end")] {
+                if !matches!(args[i], Ty::Str | Ty::None | Ty::Obj) {
+                    return Err(format!("{what} must be None or a string, not {}", args[i]));
+                }
+            }
+            Ok(Ty::None)
+        }
         Builtin::Abs => {
             arity(1)?;
             if any_obj {

@@ -4,7 +4,15 @@
 
 These constructs become plain Rust with no Python objects involved:
 
-* Top-level functions with fixed positional parameters, including direct and mutual recursion.
+* Top-level functions, including direct and mutual recursion. Parameters may be positional-only
+  (`/`), positional-or-keyword or keyword-only (`*`), with literal defaults (numbers, strings,
+  `None`, booleans, tuples of those). Calls may pass keyword arguments; arguments are still
+  evaluated in source order.
+* `T | None`: a value that is `None` on some paths and a `T` on others is a native
+  `Option<T>` (no boxing, also in native-only mode). Using it where a `T` is needed checks it
+  and raises CPython's `TypeError` on `None`. `x is None` on a value whose type is exactly
+  `None` (or can never be `None`) in a specialization is decided at compile time, so
+  `if size is None: size = 10` with a `None` default compiles to straight-line code.
 * Local variables. Each local has one type per specialization.
 * Literals: `int` (i64 range), `float`, `str`, `bool`, `None`.
 * Operators: `+ - * / // % ** & | ^ << >> ~`, unary `-`/`+`/`not`, and comparisons including
@@ -12,7 +20,7 @@ These constructs become plain Rust with no Python objects involved:
 * `and`/`or` return their deciding operand, as in Python. `x if c else y`.
 * `if/elif/else`, `while`, `for x in range(...)` with 1 to 3 arguments, `break`, `continue`,
   `pass`, `return`, augmented assignment, and chained assignment (`a = b = 1`).
-* Builtins: `print(*args)`, `abs`, `int`, `float`, `str`, `bool`, `len(str)`, and
+* Builtins: `print(*args, sep=, end=, flush=)`, `abs`, `int`, `float`, `str`, `bool`, `len(str)`, and
   `min`/`max` with 2 or more arguments of the same type.
 * f-strings with plain `{expr}` placeholders.
 * Exceptions: `try`/`except`/`else`/`finally` (including `except (A, B) as e`, bare `except:`
@@ -59,7 +67,7 @@ under `--mode native-only`.
 * Variables or returns with no single native type (P215: boxed)
 * `with` statements (CPython context-manager protocol, P216), and `except` clauses naming a
   Python exception class such as `json.JSONDecodeError` (P216)
-* `print(..., sep=, end=)` and f-string format specs (`{x:.3f}`, `{x!r}`) use CPython's
+* `print(..., file=)` and f-string format specs (`{x:.3f}`, `{x!r}`) use CPython's
   `print` and `format`
 
 ## Imports of Rust and C
@@ -90,5 +98,5 @@ variadic functions, `static` C functions) are listed in `explain`. Calling one g
 
 Not yet supported in either mode: classes defined in natively compiled files (an imported
 `.py` that defines a class falls back to CPython; a class in the entry file is rejected),
-comprehensions, lambdas, closures, `*args`/`**kwargs` definitions,
+comprehensions, lambdas, closures, `*args`/`**kwargs` parameters, non-literal defaults,
 tuple unpacking, and reading module-level variables from functions.

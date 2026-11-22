@@ -67,7 +67,7 @@ fn spec_calls(prog: &Program, s: &Spec) -> BTreeSet<usize> {
     let f = &prog.module.funcs[s.key.func];
     let mut out = BTreeSet::new();
     walk_block(&f.body, &mut |e| {
-        if let ExprKind::Call { callee: Callee::Func(fid), args } = &e.kind {
+        if let ExprKind::Call { callee: Callee::Func(fid), args, .. } = &e.kind {
             let tys: Option<Vec<Ty>> = args.iter().map(|a| prog.type_of(s, a)).collect();
             if let Some(args) = tys {
                 if let Some(c) = prog.spec(&pyfast_infer::SpecKey { func: *fid, args }) {
@@ -283,8 +283,8 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
 
 fn local_effects(prog: &Program, s: &Spec, e: &Expr, out: &mut BTreeSet<&'static str>) {
     match &e.kind {
-        ExprKind::Call { callee: Callee::Builtin(b), args } => match b {
-            Builtin::Print => {
+        ExprKind::Call { callee: Callee::Builtin(b), args, .. } => match b {
+            Builtin::Print | Builtin::PrintKw => {
                 out.insert("io");
             }
             Builtin::Int | Builtin::Float | Builtin::Abs => {
