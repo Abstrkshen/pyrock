@@ -6,6 +6,8 @@ called with, and builds a native executable with Cargo. It explains every decisi
 
 Status: **prototype.** Classes, closures, exceptions, native collections, generators and
 async/await compile natively, as does Rust and C interop with structs, slices and callbacks.
+51 of Python's 55 statement and expression kinds compile; on the standard library as it is,
+54% of functions and methods are accepted ([docs/coverage.md](docs/coverage.md)).
 The current state, with measured speedups and known differences, is in
 [docs/status.md](docs/status.md); the history is in [docs/roadmap.md](docs/roadmap.md).
 In hybrid mode (the default), anything that can't be compiled natively crosses into an
@@ -175,6 +177,7 @@ faster, and each boundary crossing has its own cost.
 More documentation:
 
 * [docs/status.md](docs/status.md): the current state, measured speedups, known differences
+* [docs/coverage.md](docs/coverage.md): how much of Python compiles, by construct and measured on real code
 * [docs/imports.md](docs/imports.md): how to import Python, Rust, C and CPython modules
 * [docs/how-it-works.md](docs/how-it-works.md): each compiler stage with real generated code
 * [docs/subset.md](docs/subset.md): the supported subset, known divergences and diagnostic codes

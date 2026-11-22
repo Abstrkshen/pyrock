@@ -56,7 +56,7 @@ imports `.c` files.
 
 | Found | Result |
 |---|---|
-| `x.py` | Compiled natively into the same binary. Functions are specialized per call types, and the module body runs once. If it can't be compiled (classes, try, ...) it falls back to CPython with warning P220 |
+| `x.py` | Compiled natively into the same binary. Functions are specialized per call types, and the module body runs once. If it can't be compiled (a class with a CPython base class, a metaclass, `match`, ...) it falls back to CPython with warning P220 |
 | `x.rs` | `#[path] mod`. `pub fn` with scalars, strings, `Vec`/slices (`&mut` written back), `Option`, tuples, `HashMap`, `impl Fn` callbacks, `pub struct` handles with methods, `Result` (Err → `RuntimeError`); crates via `// pyfast: dep` |
 | `x.c` (+`x.h`) | Built with `cc`, called over FFI. Scalars, strings, pointer+length arrays, `typedef struct` values, function pointers; `// pyfast: link` / `pkg-config` |
 | nothing | CPython import at runtime (stdlib, site-packages, numpy, ...) |
@@ -81,6 +81,11 @@ Not supported in either mode: classes with a CPython base class or a metaclass (
 an imported `.py`, which falls back to CPython),
 relative imports, `import *`.
 
+Not supported either: `match`, `:=`, `for`/`while ... else`, `del name`, imports inside
+functions, non-literal defaults of top-level functions, `Enum`/`NamedTuple` subclasses,
+multiple inheritance, method decorators other than `@property`/`@staticmethod`/`@classmethod`.
+On the standard library as it is, 54% of functions are accepted (`docs/coverage.md` in the repo).
+
 See [references/language.md](references/language.md) for the precise subset, semantics and
 the rewrites that make code compile.
 
@@ -89,7 +94,10 @@ the rewrites that make code compile.
 * Put logic in top-level functions. Module-level variables can be read (and, with `global`,
   assigned) inside functions; they are typed global cells.
 * Keep each variable to one type. `x = 0` then `x = "a"` boxes it (hybrid) or is P304
-  (native-only).
+  (native-only). `int`/`float` mixes (`x = 0; x += 0.5`) stay native as `int | float`.
+* Dicts with literal string keys (`{"x": 1.0, "hp": 3}`) compile to structs with one type
+  per key; using them like generic dicts (`d[k]` with a variable key, `.items()`) keeps one
+  value type for all keys instead.
 * Return one type on every path. `None` on some paths is a native `T | None`; other mixes
   box the result (P215).
 * Define a function before the module-level code that calls it (P144).

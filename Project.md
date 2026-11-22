@@ -1,3 +1,8 @@
+> **Implementation status (2026-11-23):** this is the original design draft and is kept as
+> written. What was built, and where it differs from this draft, is in
+> [docs/status.md](docs/status.md) ("Compared with Project.md"); open items are phase 8 of
+> [docs/roadmap.md](docs/roadmap.md).
+
 Draft v0.1 · 21 November 2026
 
 Build a Python-to-Rust ahead-of-time compiler that infers generic functions from ordinary Python source, specializes them into native machine code, and embeds CPython for external libraries and genuinely dynamic behavior. The project is intended as an independent, open-source engineering experiment for abstrkshen.dev.

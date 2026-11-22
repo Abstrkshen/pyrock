@@ -98,6 +98,43 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] Demo apps compiled and checked in CI: backend (JSON API handlers), AI (tokenizer +
       C/Rust inference glue), GUI (raylib; through the `raylib` Python package, see the log)
 
+## Phase 8: what is still open
+
+From a review of `Project.md` against the implementation (2026-11-23) and the coverage
+measurement in [coverage.md](coverage.md). Not started unless marked.
+
+Language coverage (ordered by how much code each one blocks in the standard library):
+
+- [ ] Imports inside functions and in `try`/`if` blocks (452 stdlib sites)
+- [ ] Non-literal default values of top-level functions, evaluated once at definition (233)
+- [ ] `@abstractmethod`, `@functools.cached_property`, `@lru_cache` on methods, `@contextmanager` (152)
+- [ ] Computed class-body assignments, `del name`, `for`/`while ... else`, `:=`, `[*a, *b]`, `{**d}`, `...`
+- [ ] `Enum`, `NamedTuple` and `TypedDict` classes; multiple inheritance (mixins)
+- [ ] Relative imports (the main blocker in packages), `match`
+- [ ] Arbitrary-precision integers (`Project.md` §6 and M4; today results beyond i64 raise `OverflowError`)
+
+`Project.md` items not implemented:
+
+- [ ] `strict` mode (§4): reject every dynamic fallback, combinable with hybrid/native-only
+- [ ] Release the GIL during long native computations (§8). Today it is held while native
+      code runs, so CPython threads only run while compiled code waits
+- [ ] Closed unions of scalar types such as `int | str` (§6); today they are boxed
+- [ ] A typed block/SSA IR with a verifier (§9). The compiler specializes the HIR directly
+      and relies on rustc to check the emitted code
+- [ ] Tracebacks with every frame, through the source map (only the last line today)
+- [ ] Build checks on macOS (§12; CI runs on Linux only)
+- [ ] Benchmarks of compile time, startup latency, peak RSS, binary size and bridge
+      overhead (§12; only wall time is measured)
+- [ ] Optional C backend (M6)
+
+Known bugs:
+
+- [ ] `globals()` panics at runtime; `eval`, `exec` and `locals()` raise
+      `SystemError: frame does not exist` (compiled code has no Python frame)
+- [ ] `.ignore/samples/raylib-breakout`: the camera offset reaches `draw_sky` as `object`
+      although every call site passes a native number, so part of the per-frame drawing is
+      bridged. Not reproduced in a smaller program yet
+
 ## Log
 
 ### Phase 0 (2026-11-22)
@@ -675,3 +712,21 @@ Each bridged operation cost ~400 ns.
   runs with cached `.pyc` files. pyfast uses the cached-run order.
 * Test: `tests/differential/finalize_modules.py` (with `_fin_*.py`; also identical with
   `--release`).
+
+### Documentation review (2026-11-23)
+
+* Reviewed every document against `Project.md` and the code. New
+  [coverage.md](coverage.md): which `ast` nodes compile (51 of 55), and how much of real code
+  is accepted as it is, measured with the new `scripts/coverage.py` (stdlib: 54.3% of
+  functions and methods, 14 of 167 modules; `requests`, `huggingface_hub`,
+  `langchain_core`: 32–38% of functions), with the blockers ranked.
+* `how-it-works.md`: the type table now covers every representation (records, `Num`,
+  classes, unions, closures, generators, coroutines) and the join rules; a new section 6b
+  shows how classes, records, closures, exceptions, generators, `async def`, globals,
+  native values in CPython and Rust/C imports compile, with real output; the report and
+  source-map formats are described.
+* `subset.md` and the skill's references: removed statements that classes, comprehensions,
+  closures, `sorted`/`sum`/`round` and `with` are rejected or bridged; removed P120 (no
+  longer emitted); added P002, P303, P308; listed every unsupported construct.
+* Phase 8 above lists what `Project.md` asks for that isn't built, plus two known bugs found
+  during the review.

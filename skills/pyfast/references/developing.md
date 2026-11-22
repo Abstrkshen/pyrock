@@ -78,3 +78,7 @@ reserves `test` and doesn't accept hyphens in command names.)
 `docs/status.md` summarizes the current features, measured speedups and known differences;
 `docs/roadmap.md` logs every step (what changed, how it was verified). Update both when a
 change is user-visible.
+
+`docs/coverage.md` says how much of Python compiles. Re-measure after a language change
+with `python3 scripts/coverage.py` (the standard library by default, or any directory of
+`.py` files) and update the numbers there, in `docs/status.md` and in the README.

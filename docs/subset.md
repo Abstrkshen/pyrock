@@ -148,13 +148,18 @@ Each site appears under "CPython boundaries" in `pyfast explain`, and each is a 
 under `--mode native-only`.
 
 * `import x` / `from x import y`, where no `x.py`, `x.rs` or `x.c` exists next to the file (P200)
-* Attribute access, method calls, calls of Python objects, keyword arguments (P210)
-* Builtins without a native implementation, e.g. `sorted`, `sum`, `round`, `isinstance`, `repr` (P210/P211)
-* Containers that escape to Python, subscripts/slices of Python objects, attribute assignment (P212)
-* Operators and comparisons involving a Python object (P213), and `for x in <iterable>` (P214)
-* Variables or returns with no single native type (P215: boxed)
-* `with` statements (CPython context-manager protocol, P216), and `except` clauses naming a
-  Python exception class such as `json.JSONDecodeError` (P216)
+* Attribute access, method calls and calls (with any arguments) on Python objects (P210)
+* Builtins applied to Python objects, and the few builtins with no native version
+  (`getattr`/`setattr`, `open`, `type`, `vars`, ...) (P210/P211)
+* Containers that escape to Python, subscripts/slices of Python objects, attribute
+  assignment on Python objects (P212)
+* Operators and comparisons involving a Python object (P213), and `for x in <python iterable>` (P214)
+* Variables or returns with no single native type (P215: boxed). `T | None`, `int | float`,
+  unions of native classes and record dicts stay native
+* `with` on a Python context manager, and `except` clauses naming a Python exception class
+  such as `json.JSONDecodeError` (P216). `with` on a native class with `__enter__`/`__exit__`
+  is native
+* `await` of a Python awaitable, `async with` / `async for` on Python objects (P217)
 * `print(..., file=)` uses CPython's `print`
 * `bytes` literals (`b"..."`) are CPython `bytes` objects
 
@@ -175,24 +180,35 @@ in `explain`. Calling one gives P150. A struct handle passed to CPython is P231.
 | P001 | Syntax error (from CPython's parser) |
 | P100/P101 | Unsupported statement, expression, decorator or parameter form |
 | P110 | Integer literal outside i64 |
+| P002 | The frontend could not run (`python3` missing, AST protocol mismatch) |
 | P003 | A `.rs` file that does not parse |
-| P120 | Comprehensions and lambdas (closures are M6) |
 | P145 | Circular import between natively compiled modules |
 | P150 | Rust/C module has no callable function of that name (with the reason if its signature was skipped) |
-| P140 | `from mod import NAME` where the native module has no such function or variable |
-| P141/P142 | Rebinding a module-level function or import name; `nonlocal` (closures are phase 4) |
+| P140 | `mod.NAME` / `from mod import NAME` where the native module has no such function, class or variable |
+| P141 | Redefining a module-level function or class, or rebinding a function or import name |
+| P142 | `global`/`nonlocal` of a name that is a function, class or import |
 | P143/P144 | Undefined name; call before definition |
 | P2xx | A CPython boundary, in `--mode native-only` only (see above). P220 is a warning: a local `.py` was imported through CPython |
 | P231 | A Rust/C struct handle passed to CPython (both modes) |
 | P217 | `await` of a Python awaitable, `async with`, `async for` (native-only: error) |
 | P301 (raise) | `raise` of a value that is not an exception |
 | P301 | Operator or builtin applied to types where CPython raises `TypeError` |
+| P303 | Wrong arguments: count, unknown/duplicate keyword, wrong field type of a Rust/C struct |
 | P302/P304/P305 | Value-dependent type in native-only mode (hybrid mode boxes these instead) |
 | P306 | No return type could be inferred |
 | P307 | Warning: a native value contradicts an annotation (it keeps its runtime type, like CPython) |
+| P308 | Warning: an attribute that no code ever assigns is read (`AttributeError` at runtime) |
 | P310/P311 | Specialization limit (16 per function; hybrid mode shares one `object` specialization instead) or inference did not converge |
 
-Not yet supported in either mode: classes with a CPython base class, metaclasses or
-class decorators other than `@dataclass` (in an imported `.py` the whole module falls back
-to CPython; in the entry file they are rejected), non-literal defaults of top-level functions, and `f(*xs)`
-where `xs` is a list (not a tuple of known length) filling fixed parameters.
+Not yet supported in either mode (P100/P101; in an imported `.py`, hybrid mode imports the
+whole module through CPython instead, P220):
+
+* classes with a CPython base class, multiple inheritance, metaclasses and class keywords,
+  class decorators other than `@dataclass`, `@dataclass(...)` options, adding class
+  attributes after the class statement;
+* non-literal defaults of top-level functions; `f(*xs)` where `xs` is a list (not a tuple of
+  known length) filling fixed parameters, and `*`/`**` arguments to Rust/C functions;
+* `for ... else` / `while ... else`, `match`, `del` of a plain name, `except*`, `**` inside a
+  dict literal, complex numbers;
+* relative imports, `from x import *`, imports inside functions;
+* arbitrary-precision integers (results beyond i64 raise `OverflowError`).

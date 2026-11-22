@@ -1,4 +1,4 @@
-# Current state (2026-11-22)
+# Current state (2026-11-23)
 
 What pyfast compiles today, how fast it is, how it is tested, and what is still missing.
 The step-by-step history is in [roadmap.md](roadmap.md); the precise language subset and the
@@ -14,6 +14,15 @@ link libpython at all. Rust (`.rs`) and C (`.c`) files next to the program are i
 like Python modules, without bindings. Output matches CPython: every feature is tested by
 running the same program under both and comparing stdout, exit status and the final
 exception line.
+
+## How much of Python
+
+51 of the 55 statement and expression kinds of Python 3.12 compile natively. The missing
+ones are `match`, `:=`, `type X = ...` and `except*`. Measured on code as it is, 54% of the
+standard library's functions and methods are accepted, and 32–38% of those in `requests`,
+`huggingface_hub` and `langchain_core`. Library code leans on lazy imports, non-literal
+defaults, `abc`/`functools` decorators and relative imports, which are the main gaps.
+Details and the ranked blockers: [coverage.md](coverage.md).
 
 ## What compiles natively
 
@@ -103,9 +112,32 @@ next to the program; compiled dependencies are cached in `~/.cache/pyfast/target
 
 ## Not supported yet
 
-* Classes with a CPython base class, metaclasses, class decorators other than
-  `@dataclass` (a module using them is imported through CPython instead, warning P220).
+* Classes with a CPython base class (`Enum`, `NamedTuple`, ...), multiple inheritance,
+  metaclasses, class decorators other than `@dataclass`, method decorators other than
+  `@property`/`@staticmethod`/`@classmethod` (a module using them is imported through
+  CPython instead, warning P220).
+* `match`, `:=`, `for`/`while ... else`, `del name`, `except*`, `[*a, *b]`, `{**d}`, `...`,
+  complex numbers.
 * Non-literal default values of top-level functions; `f(*xs)` where `xs` is a list filling
   fixed parameters.
-* Relative imports, `import *`, imports inside functions.
+* Relative imports, `import *`, imports inside functions or blocks.
 * Arbitrary-precision integers.
+* `eval`, `exec`, `globals()`, `locals()` (they fail at runtime; see the roadmap's known bugs).
+
+## Compared with Project.md
+
+[Project.md](../Project.md) is the original design. Milestones M0–M4 and the M6 subset
+(collections, classes, closures, callbacks) are done, plus async, generators and rich
+Rust/C interop beyond it. Where the implementation differs:
+
+* Integers are checked 64-bit, the "documented fixed-width subset" option of §6, not
+  arbitrary precision.
+* There is no `strict` mode (§4); `--mode native-only` covers rejecting every boundary.
+* There is no separate block/SSA IR with a verifier (§9): specialization works on the HIR,
+  and rustc checks the emitted code.
+* The GIL is held while native code runs (§8 asks to release it during long computations).
+* The CLI is `pyfast`, not `pyrust`; `emit` has no `--target` (Rust is the only backend).
+* Benchmarks measure wall time and output only, on Linux only (§12 also lists compile time,
+  startup, RSS, code size, bridge overhead and macOS).
+
+These are tracked as phase 8 in [roadmap.md](roadmap.md).

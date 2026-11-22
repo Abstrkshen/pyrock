@@ -24,8 +24,13 @@ The full, authoritative list is `docs/subset.md` in the repo. This is the workin
   compiles without boxing.
 * `try`/`except`/`else`/`finally`, `raise`, `assert`, following CPython's exception
   hierarchy. Exceptions from CPython keep their object (`except json.JSONDecodeError`).
-* Generators: `yield`, `yield from`, generator methods. `for`, `enumerate`, `zip` and
-  `next` pull lazily (infinite generators work).
+* Generators: `yield`, `yield from`, `send`/`throw`/`close`, `return value`, lazy generator
+  expressions, async generators (`asend`/`athrow`/`aclose`) and async comprehensions. `for`,
+  `enumerate`, `zip` and `next` pull lazily (infinite generators work). Open generators are
+  finalized at exit as CPython does.
+* `int | float`: a variable that is an int on some paths and a float on others stays native.
+* Dicts with literal string keys compile to structs with a type per key.
+* `math` is native (CPython's domain/range errors).
 * `async def` / `await`, `async with`, `async for`, run by asyncio (`asyncio.run`,
   `gather`, `create_task`, ...). Awaiting a native coroutine is a direct call; awaiting a
   Python awaitable suspends the coroutine's stack until the event loop has the result.
@@ -34,8 +39,11 @@ The full, authoritative list is `docs/subset.md` in the repo. This is the workin
   object with a checked `TypeError`.
 
 Type mapping: int → `i64`, float → `f64`, bool → `bool`, str → `rt::Str` (`Rc<str>`),
-None → `()`, list → `rt::List<T>`, dict → `rt::Dict<K, V>`, class → `Rc<RefCell<..>>`
-newtype, a value with no single type → `rt::py::Obj` (boxed, hybrid mode).
+None → `()`, `T | None` → `Option<T>`, `int | float` → `rt::Num`, list → `rt::List<T>`,
+dict → `rt::Dict<K, V>`, string-keyed dict literal → generated struct, tuple → Rust tuple,
+class → `Rc<RefCell<..>>` newtype, several classes → generated enum, closure →
+`rt::Env` of shared cells, generator → `rt::gen::Gen`, a value with no single type →
+`rt::py::Obj` (boxed, hybrid mode).
 
 ## Preserved Python semantics
 
@@ -56,6 +64,7 @@ newtype, a value with no single type → `rt::py::Obj` (boxed, hybrid mode).
 | negative float `**` fractional | complex | `NotImplementedError` |
 | traceback | full frames | header + last line |
 | set iteration order | hash order | insertion order |
+| CPython threads during a long native loop | interleave | run only while compiled code waits (I/O, `sleep`, the event loop) |
 | Python object into an `int`/`str`/`bool` annotation of another type | ignored | `TypeError` |
 
 ## Bridged through CPython (hybrid mode only)
@@ -73,6 +82,11 @@ turns them into errors.
 | Class with a CPython base class, a metaclass or a class decorator other than `@dataclass` | Keep it in an imported `.py` (the module falls back to CPython, P220) |
 | Non-literal default of a top-level function (`def f(x=[])`) | `def f(x=None): if x is None: x = []` |
 | Relative imports, `import *`, imports inside functions | Absolute top-level imports |
+| `match` | `if`/`elif` chains |
+| `for ... else` / `while ... else` | A `found` flag checked after the loop |
+| Multiple inheritance | Composition, or keep the class in a CPython-imported module |
+| `del name` | Rebind it (`x = None`) |
+| Complex numbers | Keep that code in a CPython-imported module |
 
 ## Making code fast
 
