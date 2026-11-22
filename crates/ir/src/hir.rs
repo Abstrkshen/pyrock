@@ -756,7 +756,11 @@ pub fn bind_call(sig: &CallSig, fname: &str, args: Vec<Expr>, kwargs: Vec<(Strin
     if !missing.is_empty() {
         return Err(te(format!("{fname}() missing {} required argument(s): {}", missing.len(), missing.join(", "))));
     }
-    if sig.vararg.is_some() {
+    if sig.vararg.is_some() && !extras.iter().any(|x| matches!(x.kind, ExprKind::Starred(_))) {
+        // A fixed-shape tuple: forwarding `f(*args)` can then expand it statically.
+        src.push((sig.n_pos, out.len()));
+        out.push(Expr { kind: ExprKind::Tuple(extras), span: sp });
+    } else if sig.vararg.is_some() {
         let mut list: Option<Expr> = None;
         let mut plain = Vec::new();
         let concat = |l: Option<Expr>, part: Expr| match l {

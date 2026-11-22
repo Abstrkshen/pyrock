@@ -507,6 +507,36 @@ pub fn class_like(t: Ty) -> bool {
     t.class_id().is_some() || t.union_members().is_some()
 }
 
+/// `f(*args, **kwargs)` forwarding: a starred fixed-shape tuple expands into
+/// its items, and an empty `**kwargs` dict forwards nothing (so wrappers can
+/// call functions with fixed parameters).
+pub fn expand_stars(ty: &mut dyn FnMut(&Expr) -> Option<Ty>, args: &[Expr], kwargs: &[(String, Expr)]) -> (Vec<Expr>, Vec<(String, Expr)>) {
+    let simple = |e: &Expr| matches!(e.kind, ExprKind::Local(_) | ExprKind::Global { .. } | ExprKind::Tuple(_));
+    let mut out = Vec::new();
+    for a in args {
+        if let ExprKind::Starred(inner) = &a.kind {
+            if let Some(items) = ty(inner).and_then(|t| t.tuple_items()) {
+                if simple(inner) {
+                    for i in 0..items.len() {
+                        out.push(Expr {
+                            kind: ExprKind::Subscript { obj: inner.clone(), index: Box::new(Expr { kind: ExprKind::Int(i as i64), span: a.span }) },
+                            span: a.span,
+                        });
+                    }
+                    continue;
+                }
+            }
+        }
+        out.push(a.clone());
+    }
+    let kw: Vec<(String, Expr)> = kwargs
+        .iter()
+        .filter(|(k, v)| !(k == "**" && ty(v).and_then(|t| t.dict_kv()).is_some_and(|(k, _)| k.is_never())))
+        .cloned()
+        .collect();
+    (out, kw)
+}
+
 /// Defaults stored in a closure's environment are read from the called value.
 pub fn env_defaults(bound: Vec<Expr>, func: &Expr) -> Vec<Expr> {
     bound
@@ -1280,6 +1310,11 @@ impl Ctx<'_, '_> {
 
     /// Bind call arguments (with the receiver slot removed for methods).
     fn bind(&mut self, e: &Expr, func: FuncId, skip_first: bool, args: &[Expr], kwargs: &[(String, Expr)]) -> Option<Vec<Expr>> {
+        let (args, kwargs) = {
+            let mut ty = |x: &Expr| self.expr(x);
+            expand_stars(&mut ty, args, kwargs)
+        };
+        let (args, kwargs) = (&args[..], &kwargs[..]);
         let f = &self.prog.module.funcs[func];
         let mut sig = f.sig.clone();
         if skip_first && !sig.names.is_empty() {
@@ -2157,7 +2192,12 @@ impl<'m> Program<'m> {
 
     /// Arguments of a call of `func` bound to its parameters (the receiver
     /// slot removed when `skip_first`), with their evaluation order.
-    pub fn bound_args(&self, func: FuncId, skip_first: bool, args: &[Expr], kwargs: &[(String, Expr)], span: Span) -> Option<(Vec<Expr>, Vec<usize>)> {
+    pub fn bound_args(&self, spec: &Spec, func: FuncId, skip_first: bool, args: &[Expr], kwargs: &[(String, Expr)], span: Span) -> Option<(Vec<Expr>, Vec<usize>)> {
+        let (args, kwargs) = {
+            let mut ty = |x: &Expr| self.type_of(spec, x);
+            expand_stars(&mut ty, args, kwargs)
+        };
+        let (args, kwargs) = (&args[..], &kwargs[..]);
         let f = &self.module.funcs[func];
         let mut sig = f.sig.clone();
         if skip_first && !sig.names.is_empty() {

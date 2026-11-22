@@ -99,7 +99,8 @@ pub(crate) fn iter_vec(code: &str, t: Ty) -> String {
                 if ts.is_empty() {
                     return "Vec::<rt::Never>::new()".into();
                 }
-                let parts: Vec<String> = (0..ts.len()).map(|i| format!("__t.{i}")).collect();
+                let el = native::iter_elem(t).unwrap_or(Ty::Obj);
+                let parts: Vec<String> = ts.iter().enumerate().map(|(i, x)| convert(&format!("__t.{i}"), *x, el)).collect();
                 format!("{{ let __t = {code}; vec![{}] }}", parts.join(", "))
             }
             _ => format!("{}.to_vec()", code),

@@ -220,7 +220,7 @@ impl FnEmitter<'_, '_> {
                 // BaseException.__new__ keeps the arguments: str(e) is '' for none,
                 // str(a) for one, the tuple's repr for several -- unless __init__
                 // calls super().__init__ with another message.
-                let (bound, _) = self.prog.bound_args(m.func, true, args, kwargs, e.span).expect("binding checked by inference");
+                let (bound, _) = self.prog.bound_args(self.spec, m.func, true, args, kwargs, e.span).expect("binding checked by inference");
                 let vals: Vec<(String, Ty)> = bound.iter().map(|b| self.expr(b)).collect();
                 let key = SpecKey { func: m.func, args: std::iter::once(t).chain(vals.iter().map(|v| v.1)).collect() };
                 let callee = self.prog.spec(&key).expect("init spec").mangled.clone();
@@ -246,7 +246,7 @@ impl FnEmitter<'_, '_> {
                 )
             }
             Some(m) => {
-                let (bound, order) = self.prog.bound_args(m.func, true, args, kwargs, e.span).expect("binding checked by inference");
+                let (bound, order) = self.prog.bound_args(self.spec, m.func, true, args, kwargs, e.span).expect("binding checked by inference");
                 let init = self.call_bound(m.func, vec![("__o.clone()".into(), t)], &bound, &order);
                 format!("{{ let __o = {rust}::new(); let _ = {init}; __o }}")
             }
@@ -290,7 +290,7 @@ impl FnEmitter<'_, '_> {
         }
         match kind {
             MethodKind::Static => {
-                let (bound, order) = self.prog.bound_args(func, false, args, kwargs, e.span).unwrap();
+                let (bound, order) = self.prog.bound_args(self.spec, func, false, args, kwargs, e.span).unwrap();
                 format!("{{ let _ = {o}; {} }}", self.call_bound(func, vec![], &bound, &order))
             }
             MethodKind::Class => {
@@ -299,11 +299,11 @@ impl FnEmitter<'_, '_> {
                     _ => None,
                 });
                 let tt = Ty::class_type(c.unwrap(), &self.prog.module.class(c.unwrap()).rust);
-                let (bound, order) = self.prog.bound_args(func, true, args, kwargs, e.span).unwrap();
+                let (bound, order) = self.prog.bound_args(self.spec, func, true, args, kwargs, e.span).unwrap();
                 format!("{{ let _ = {o}; {} }}", self.call_bound(func, vec![("()".into(), tt)], &bound, &order))
             }
             _ => {
-                let (bound, order) = self.prog.bound_args(func, true, args, kwargs, e.span).unwrap();
+                let (bound, order) = self.prog.bound_args(self.spec, func, true, args, kwargs, e.span).unwrap();
                 self.call_bound(func, vec![(o, ot)], &bound, &order)
             }
         }

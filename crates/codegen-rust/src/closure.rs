@@ -35,7 +35,7 @@ impl FnEmitter<'_, '_> {
             let mut arms = Vec::new();
             for m in ms {
                 let (fid, caps) = m.as_closure().unwrap();
-                let (bound, _) = self.prog.bound_args(fid, false, args, kwargs, e.span).expect("binding checked by inference");
+                let (bound, _) = self.prog.bound_args(self.spec, fid, false, args, kwargs, e.span).expect("binding checked by inference");
                 let env = env_offset(&self.prog.module.funcs[fid]) == 1;
                 // Defaults stored in this variant's environment are read from it.
                 let vals: Vec<(String, Ty)> = bound
@@ -60,7 +60,7 @@ impl FnEmitter<'_, '_> {
             return format!("{{ let __u = {fv}; match __u {{ {} }} }}", arms.join(", "));
         }
         let (fid, _) = ft.as_closure().expect("closure call on a function value");
-        let (bound, order) = self.prog.bound_args(fid, false, args, kwargs, e.span).expect("binding checked by inference");
+        let (bound, order) = self.prog.bound_args(self.spec, fid, false, args, kwargs, e.span).expect("binding checked by inference");
         let bound = pyfast_infer::spec::env_defaults(bound, func);
         if env_offset(&self.prog.module.funcs[fid]) == 1 {
             self.call_bound(fid, vec![(fv, ft)], &bound, &order)

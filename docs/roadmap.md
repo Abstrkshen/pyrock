@@ -58,7 +58,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] Lambdas, nested functions, captured variables, `nonlocal`, defaults evaluated at creation
 - [x] Functions as values, passing native functions to native functions, `key=` functions, `map`/`filter`, decorators, dispatch tables
 - [x] Native functions callable from Python (callbacks such as `re.sub(p, fn, s)`, `functools.lru_cache`, LangChain `RunnableLambda`)
-- [ ] `f(*args, **kwargs)` forwarding into a native function's fixed parameters (wrappers)
+- [x] `f(*args, **kwargs)` forwarding into a native function's fixed parameters (wrappers, decorator factories, stacked decorators)
 
 ## Phase 5: Rich Rust and C interop
 
@@ -310,3 +310,13 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
   (`re.sub` with native callbacks, `functools.reduce`, `@functools.lru_cache` on a native
   recursive function, exceptions through Python). The `.ignore/samples/langchain` module
   now compiles natively (its lambda is passed to LangChain as a native callable).
+
+### Phase 4.2: forwarding wrappers (2026-11-22)
+
+* Extra positional arguments are packed into a fixed-shape tuple (`tuple[int, str]`), so
+  inside `def wrapper(*args, **kwargs)` the arity is known per specialization;
+  `fn(*args, **kwargs)` expands a starred fixed tuple into its items and drops an empty
+  `**kwargs` (`spec::expand_stars`, shared by inference and codegen).
+* Mixed-type tuples iterate as the join of their items.
+* Test: `tests/differential/wrappers.py` (logging wrapper, `@retry(3)` decorator factory
+  with exceptions, stacked `@timed @logged`, `total(*[1, 2, 3])`).

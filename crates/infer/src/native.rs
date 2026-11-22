@@ -95,7 +95,8 @@ pub fn iter_elem(t: Ty) -> Option<Ty> {
     match t {
         Ty::Str => Some(Ty::Str),
         Ty::Obj => Some(Ty::Obj),
-        t => t.iter_elem(),
+        // A mixed-type tuple iterates as the join of its items (`*args`).
+        t => t.iter_elem().or_else(|| t.tuple_items().and_then(|ts| join_all(ts, true))),
     }
 }
 

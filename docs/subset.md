@@ -159,4 +159,4 @@ Not yet supported in either mode: classes with a CPython base class, metaclasses
 class decorators other than `@dataclass` (in an imported `.py` the whole module falls back
 to CPython; in the entry file they are rejected), passing a native instance to CPython code
 (P230), non-literal defaults of top-level functions, generators (`yield`), and `f(*xs)`
-where `xs` fills a native function's fixed parameters.
+where `xs` is a list (not a tuple of known length) filling fixed parameters.
