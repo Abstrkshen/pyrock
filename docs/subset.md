@@ -82,6 +82,10 @@ These constructs become plain Rust with no Python objects involved:
 * Native function values passed to CPython become Python callables (`re.sub(p, fn, s)`,
   `functools.reduce`, `@functools.lru_cache`, framework callbacks); CPython calls an
   all-`object` specialization, and exceptions cross both ways.
+* Native instances passed to CPython are `native_object`s: Python can read fields, call
+  methods (all-`object` specializations), assign scalar fields, print, compare and hash them,
+  and gets the same Python object back each time (identity). Fields that hold mutable
+  containers become Python objects so both sides see the same list.
 * Module-level variables read inside functions, `global x` in functions, `mod.NAME` /
   `mod.NAME = v` on a natively compiled module, and `from mod import NAME` (copied at import,
   as CPython does). Such variables live in typed global cells; reading one before its
@@ -157,6 +161,5 @@ variadic functions, `static` C functions) are listed in `explain`. Calling one g
 
 Not yet supported in either mode: classes with a CPython base class, metaclasses or
 class decorators other than `@dataclass` (in an imported `.py` the whole module falls back
-to CPython; in the entry file they are rejected), passing a native instance to CPython code
-(P230), non-literal defaults of top-level functions, generators (`yield`), and `f(*xs)`
+to CPython; in the entry file they are rejected), non-literal defaults of top-level functions, generators (`yield`), and `f(*xs)`
 where `xs` is a list (not a tuple of known length) filling fixed parameters.

@@ -800,3 +800,120 @@ pub fn bind_py_args(fname: &str, params: &[&str], args: Vec<Obj>, kwargs: Vec<(S
 pub fn missing_arg(fname: &str, param: &str) -> Exc {
     Exc::new("TypeError", format!("{fname}() missing 1 required positional argument: '{param}'"))
 }
+
+// ---- native class instances seen from Python ----
+
+/// What CPython can do with a native class instance (generated per class).
+pub trait NativeObject: 'static {
+    fn class_name(&self) -> &'static str;
+    /// Attribute read: a field (boxed), a property, or a bound method.
+    fn get(&self, name: &str) -> PyResult<Obj>;
+    /// Attribute write (scalar fields).
+    fn set(&self, name: &str, v: Obj) -> PyResult<()>;
+    fn repr(&self) -> Str;
+    fn str_(&self) -> Str;
+    fn eq_obj(&self, other: &NativeObj) -> bool;
+    fn hash(&self) -> i64;
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+#[pyclass(unsendable, weakref, name = "native_object")]
+pub struct NativeObj {
+    pub inner: Box<dyn NativeObject>,
+}
+
+#[pymethods]
+impl NativeObj {
+    fn __getattr__(&self, name: &str) -> pyo3::PyResult<Py<PyAny>> {
+        self.inner.get(name).map(|o| o.0).map_err(to_pyerr)
+    }
+
+    fn __setattr__(&self, name: &str, v: Bound<'_, PyAny>) -> pyo3::PyResult<()> {
+        self.inner.set(name, own(v)).map_err(to_pyerr)
+    }
+
+    fn __repr__(&self) -> String {
+        self.inner.repr().to_string()
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.str_().to_string()
+    }
+
+    fn __eq__(&self, other: Bound<'_, PyAny>) -> bool {
+        match other.cast::<NativeObj>() {
+            Ok(o) => self.inner.eq_obj(&o.borrow()),
+            Err(_) => false,
+        }
+    }
+
+    fn __hash__(&self) -> i64 {
+        self.inner.hash()
+    }
+}
+
+/// The Python object for a native instance (cached: identity is preserved
+/// while the Python side holds it).
+pub fn native_obj<T: NativeObject + Clone>(v: &T, cache: &crate::PyCache) -> PyResult<Obj> {
+    Python::attach(|py| {
+        if let Some(w) = cache.borrow().as_ref() {
+            if let Some(o) = w.bind(py).upgrade() {
+                return Ok(own(o));
+            }
+        }
+        let o = Py::new(py, NativeObj { inner: Box::new(v.clone()) }).map_err(|e| to_exc(py, e))?;
+        let w = pyo3::types::PyWeakrefReference::new(o.bind(py).as_any()).map_err(|e| to_exc(py, e))?;
+        *cache.borrow_mut() = Some(w.unbind());
+        Ok(Obj(o.into_any()))
+    })
+}
+
+/// A Python value back to a native scalar (attribute writes from Python).
+pub trait FromPy: Sized {
+    fn from_py(o: &Obj) -> PyResult<Self>;
+}
+impl FromPy for i64 {
+    fn from_py(o: &Obj) -> PyResult<Self> {
+        unbox_annotated::<i64>(o, "int")
+    }
+}
+impl FromPy for bool {
+    fn from_py(o: &Obj) -> PyResult<Self> {
+        unbox_annotated::<bool>(o, "bool")
+    }
+}
+impl FromPy for Str {
+    fn from_py(o: &Obj) -> PyResult<Self> {
+        unbox_annotated::<Str>(o, "str")
+    }
+}
+impl FromPy for f64 {
+    fn from_py(o: &Obj) -> PyResult<Self> {
+        with(|py| {
+            let b = o.bind(py);
+            if b.is_instance_of::<pyo3::types::PyFloat>() {
+                b.extract::<f64>()
+            } else {
+                Err(pyo3::exceptions::PyTypeError::new_err("expected a float"))
+            }
+        })
+    }
+}
+impl FromPy for Obj {
+    fn from_py(o: &Obj) -> PyResult<Self> {
+        Ok(o.clone())
+    }
+}
+impl<T: FromPy> FromPy for Option<T> {
+    fn from_py(o: &Obj) -> PyResult<Self> {
+        if Python::attach(|py| o.bind(py).is_none()) {
+            Ok(None)
+        } else {
+            T::from_py(o).map(Some)
+        }
+    }
+}
+
+pub fn from_py<T: FromPy>(o: &Obj) -> PyResult<T> {
+    T::from_py(o)
+}

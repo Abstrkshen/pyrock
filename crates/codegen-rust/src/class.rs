@@ -50,6 +50,7 @@ pub(crate) fn emit_classes(prog: &Program, plan: &Plan, out: &mut String) {
             writeln!(out, "    pub {}: Option<{}>,", field_ident(&f), ft.rust()).unwrap();
         }
         writeln!(out, "    /// Message of an exception instance (`BaseException.__init__`).\n    pub exc_msg: Option<rt::Str>,").unwrap();
+        writeln!(out, "    /// The Python wrapper while CPython holds this instance.\n    pub py: rt::PyCache,").unwrap();
         writeln!(out, "}}\n").unwrap();
         writeln!(out, "#[derive(Clone)]\npub struct {r}(pub std::rc::Rc<std::cell::RefCell<{r}Data>>);\n").unwrap();
         writeln!(out, "impl {r} {{").unwrap();
@@ -134,7 +135,97 @@ pub(crate) fn emit_classes(prog: &Program, plan: &Plan, out: &mut String) {
         };
         writeln!(out, "impl PartialEq for {r} {{\n    fn eq(&self, o: &Self) -> bool {{\n        rt::coll::PyEq::py_eq(self, o)\n    }}\n}}\nimpl Eq for {r} {{}}").unwrap();
         writeln!(out, "impl std::hash::Hash for {r} {{\n    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {{\n        {hash}\n    }}\n}}").unwrap();
+        if plan.uses_python {
+            emit_native_object(prog, c, out);
+        }
     }
+}
+
+/// `ToPy` / `NativeObject` for a class: how CPython sees its instances.
+fn emit_native_object(prog: &Program, c: ClassId, out: &mut String) {
+    let m = prog.module;
+    let cd = m.class(c);
+    let r = &cd.rust;
+    let t = Ty::class(c, r);
+    let short = cd.name.rsplit('.').next().unwrap_or("").to_string();
+    let mut arms: Vec<String> = Vec::new();
+    for (f, ft) in fields(prog, c) {
+        let missing = format!("Err(rt::Exc::new(\"AttributeError\", \"'{short}' object has no attribute '{f}'\"))");
+        arms.push(format!("{f:?} => match self.0.borrow().{}.clone() {{ Some(__v) => Ok({}), None => {missing} }},", field_ident(&f), crate::boxed("__v", ft)));
+    }
+    let mut seen: Vec<String> = Vec::new();
+    for k in m.mro(c) {
+        for meth in &m.class(k).methods {
+            if seen.contains(&meth.name) || meth.kind == MethodKind::Setter {
+                continue;
+            }
+            seen.push(meth.name.clone());
+            let f = &m.funcs[meth.func];
+            let n = f.sig.names.len();
+            let key: Vec<Ty> = match meth.kind {
+                MethodKind::Static => (0..n).map(|_| Ty::Obj).collect(),
+                MethodKind::Class => std::iter::once(Ty::class_type(c, r)).chain((1..n).map(|_| Ty::Obj)).collect(),
+                MethodKind::Property => vec![t],
+                _ => std::iter::once(t).chain((1..n).map(|_| Ty::Obj)).collect(),
+            };
+            let Some(spec) = prog.spec(&SpecKey { func: meth.func, args: key }) else { continue };
+            let ret = match spec.ret {
+                pyfast_infer::Slot::Known(x) => x,
+                pyfast_infer::Slot::Boxed(..) => Ty::Obj,
+                _ => Ty::None,
+            };
+            let name = &meth.name;
+            if meth.kind == MethodKind::Property {
+                arms.push(format!("{name:?} => {{ let __r = {}(self.clone())?; Ok({}) }},", spec.mangled, crate::boxed("__r", ret)));
+                continue;
+            }
+            let skip = usize::from(meth.kind != MethodKind::Static);
+            let params: Vec<String> = f.sig.names.iter().skip(skip).map(|p| format!("{p:?}")).collect();
+            let mut call: Vec<String> = match meth.kind {
+                MethodKind::Static => vec![],
+                MethodKind::Class => vec!["()".into()],
+                _ => vec!["__s.clone()".into()],
+            };
+            for (i, pname) in f.sig.names.iter().skip(skip).enumerate() {
+                let d = f.sig.defaults.get(i + skip).cloned().flatten();
+                let missing = match d {
+                    Some(d) => crate::closure_literal_obj(&d),
+                    None => format!("return Err(rt::py::missing_arg({name:?}, {pname:?}))"),
+                };
+                call.push(format!("match __b[{i}].clone() {{ Some(__v) => __v, None => {missing} }}"));
+            }
+            arms.push(format!(
+                "{name:?} => {{ let __s = self.clone(); Ok(rt::py::native_fn({name:?}, move |__a, __k| {{ let __b = rt::py::bind_py_args({name:?}, &[{}], __a, __k)?; let __r = {}({})?; Ok({}) }})) }},",
+                params.join(", "),
+                spec.mangled,
+                call.join(", "),
+                crate::boxed("__r", ret)
+            ));
+        }
+    }
+    let mut sets: Vec<String> = Vec::new();
+    for (f, ft) in fields(prog, c) {
+        let base = ft.as_opt().unwrap_or(ft);
+        if matches!(base, Ty::Int | Ty::Float | Ty::Str | Ty::Bool | Ty::Obj) {
+            sets.push(format!("{f:?} => {{ self.0.borrow_mut().{} = Some(rt::py::from_py(&__v)?); Ok(()) }},", field_ident(&f)));
+        }
+    }
+    writeln!(out, "impl rt::py::ToPy for {r} {{\n    fn to_py(&self) -> rt::PyResult<rt::py::Obj> {{\n        let d = self.0.borrow();\n        rt::py::native_obj(self, &d.py)\n    }}\n}}").unwrap();
+    writeln!(out, "impl rt::py::NativeObject for {r} {{").unwrap();
+    writeln!(out, "    fn class_name(&self) -> &'static str {{\n        {short:?}\n    }}").unwrap();
+    writeln!(out, "    fn get(&self, __name: &str) -> rt::PyResult<rt::py::Obj> {{\n        match __name {{").unwrap();
+    for a in &arms {
+        writeln!(out, "            {a}").unwrap();
+    }
+    writeln!(out, "            _ => Err(rt::Exc::new(\"AttributeError\", format!(\"'{short}' object has no attribute '{{__name}}'\"))),\n        }}\n    }}").unwrap();
+    writeln!(out, "    fn set(&self, __name: &str, __v: rt::py::Obj) -> rt::PyResult<()> {{\n        match __name {{").unwrap();
+    for a in &sets {
+        writeln!(out, "            {a}").unwrap();
+    }
+    writeln!(out, "            _ => Err(rt::Exc::new(\"AttributeError\", format!(\"cannot set attribute '{{__name}}' of a native '{short}' object from Python\"))),\n        }}\n    }}").unwrap();
+    writeln!(out, "    fn repr(&self) -> rt::Str {{\n        rt::conv::repr_of(self)\n    }}\n    fn str_(&self) -> rt::Str {{\n        rt::conv::str_of(self)\n    }}").unwrap();
+    writeln!(out, "    fn eq_obj(&self, o: &rt::py::NativeObj) -> bool {{\n        o.inner.as_any().downcast_ref::<{r}>().is_some_and(|o| rt::coll::eq(self, o))\n    }}").unwrap();
+    writeln!(out, "    fn hash(&self) -> i64 {{\n        std::rc::Rc::as_ptr(&self.0) as usize as i64\n    }}\n    fn as_any(&self) -> &dyn std::any::Any {{\n        self\n    }}\n}}").unwrap();
 }
 
 /// An enum for every union of native classes, with delegating trait impls.

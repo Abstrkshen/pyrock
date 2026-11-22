@@ -58,6 +58,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] Lambdas, nested functions, captured variables, `nonlocal`, defaults evaluated at creation
 - [x] Functions as values, passing native functions to native functions, `key=` functions, `map`/`filter`, decorators, dispatch tables
 - [x] Native functions callable from Python (callbacks such as `re.sub(p, fn, s)`, `functools.lru_cache`, LangChain `RunnableLambda`)
+- [x] Native class instances visible to Python (attributes, methods, repr, ==, identity), e.g. `json.dumps(objs, default=...)`, `getattr`, `sorted` by Python
 - [x] `f(*args, **kwargs)` forwarding into a native function's fixed parameters (wrappers, decorator factories, stacked decorators)
 
 ## Phase 5: Rich Rust and C interop
@@ -320,3 +321,20 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 * Mixed-type tuples iterate as the join of their items.
 * Test: `tests/differential/wrappers.py` (logging wrapper, `@retry(3)` decorator factory
   with exceptions, stacked `@timed @logged`, `total(*[1, 2, 3])`).
+
+### Phase 4.3: native instances in CPython (2026-11-22)
+
+* Runtime `NativeObj` pyclass (`unsendable`, `weakref`) delegating to a generated
+  `NativeObject` impl per class: `__getattr__` returns fields (boxed), properties and bound
+  methods (`NativeFn` over all-`object` specializations, requested when an instance
+  escapes), `__setattr__` assigns scalar fields (`FromPy`), plus `__repr__`/`__str__`/
+  `__eq__`/`__hash__`. A weak-reference cache in each instance (`rt::PyCache`) keeps Python
+  identity stable.
+* Escape of an instance no longer errors (P230 removed): its class is recorded
+  (`Program::boxed_classes`) and its mutable-container fields become Python objects (shared
+  with Python). Escape records now accumulate across the local fixed point (an escape's
+  trigger disappears once the escaping place has been widened).
+* Fixed: `cur_fid` leaked out of class statements, making module-level lambdas after a
+  class look nested in its last method. Read-only consumers (`json.dumps`) still wrap
+  function values and instances passed to them (`default=to_dict`).
+* Test: `tests/differential/objects_to_python.py`.

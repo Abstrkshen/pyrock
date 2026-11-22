@@ -74,7 +74,6 @@ values (mixed types). These keep exact Python semantics, including aliasing.
 | Construct | Rewrite |
 |---|---|
 | Class with a CPython base class or a metaclass | Keep it in an imported `.py` (the module falls back to CPython, P220) |
-| Native instance passed to a CPython function (P230) | Pass plain values (`obj.x`, a dict) |
 | `yield` generators | Build and return a list |
 | Non-literal default (`def f(x=[])`) | `def f(x=None): if x is None: x = []` |
 | `nonlocal` | Return the new value (closures are phase 4) |

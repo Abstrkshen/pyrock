@@ -13,6 +13,8 @@ mod class;
 mod closure;
 mod coll;
 
+pub(crate) use closure::literal_obj as closure_literal_obj;
+
 use pyfast_analysis::Plan;
 use pyfast_infer::{CallClass, Program, Slot, Spec, SpecKey};
 use pyfast_ir::*;

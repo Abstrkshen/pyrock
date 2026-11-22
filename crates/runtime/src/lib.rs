@@ -199,3 +199,11 @@ impl<T> coll::PyEq for Env<T> {
         std::ptr::eq(self, o)
     }
 }
+
+/// Per-instance cache of the Python wrapper of a native class instance (a
+/// weak reference, so the wrapper keeps its identity while alive).
+#[cfg(feature = "python")]
+pub type PyCache = std::cell::RefCell<Option<pyo3::Py<pyo3::types::PyWeakrefReference>>>;
+#[cfg(not(feature = "python"))]
+#[derive(Default)]
+pub struct PyCache;

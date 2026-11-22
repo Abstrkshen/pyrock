@@ -102,8 +102,19 @@ fn spec_calls(prog: &Program, s: &Spec) -> BTreeSet<usize> {
         }
     });
     // Trait impls of instantiated classes call their dunders; function values
-    // exposed to CPython call their all-`object` specializations.
+    // and instances exposed to CPython call their all-`object` specializations.
     if s.id == 0 {
+        for &c in &prog.boxed_classes {
+            for k in prog.module.mro(c) {
+                for meth in &prog.module.class(k).methods {
+                    for sp in prog.specs.iter().filter(|sp| sp.key.func == meth.func) {
+                        if sp.key.args.first().is_some_and(|a| a.class_id() == Some(c) || matches!(a.as_comp(), Some(Comp::Type(..)))) || sp.key.args.iter().all(|a| *a == Ty::Obj) {
+                            out.insert(sp.id);
+                        }
+                    }
+                }
+            }
+        }
         for &t in &prog.boxed_fns {
             let (fid, _) = t.as_closure().unwrap();
             let f = &prog.module.funcs[fid];

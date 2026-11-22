@@ -98,6 +98,8 @@ pub struct Program<'m> {
     pub instantiated: BTreeSet<ClassId>,
     /// Function values that reach CPython (wrapped as Python callables).
     pub boxed_fns: BTreeSet<Ty>,
+    /// Native classes whose instances reach CPython (wrapped as `native_object`).
+    pub boxed_classes: BTreeSet<ClassId>,
     pub specs: Vec<Spec>,
     pub index: HashMap<SpecKey, usize>,
     pub diagnostics: Vec<Diagnostic>,
@@ -212,6 +214,7 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
         fields: BTreeMap::new(),
         instantiated: BTreeSet::new(),
         boxed_fns: BTreeSet::new(),
+        boxed_classes: BTreeSet::new(),
         specs: vec![],
         index: HashMap::new(),
         diagnostics: vec![],
@@ -236,11 +239,25 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
                     changed = true;
                 }
             }
+            // Instances seen by CPython share their mutable fields with it:
+            // those fields are Python objects (re-applied as fields gain types).
+            let boxing = prog.boxing();
+            let keys: Vec<(ClassId, String)> = prog.fields.keys().filter(|(c, _)| prog.boxed_classes.contains(c)).cloned().collect();
+            for key in keys {
+                let slot = prog.fields[&key];
+                if slot.known().is_some_and(|t| t.has_mutable() && t != Ty::Obj) {
+                    let joined = slot.join(Ty::Obj, boxing);
+                    if joined != slot {
+                        prog.fields.insert(key, joined);
+                        changed = true;
+                    }
+                }
+            }
             for c in news {
-                if let Some(t) = c.1 {
-                    changed |= prog.boxed_fns.insert(t);
-                } else {
-                    changed |= prog.instantiated.insert(c.0);
+                match c.1 {
+                    Some(t) if t.as_closure().is_some() => changed |= prog.boxed_fns.insert(t),
+                    Some(_) => changed |= prog.boxed_classes.insert(c.0),
+                    None => changed |= prog.instantiated.insert(c.0),
                 }
             }
             for (key, t) in ret_widen {
@@ -417,7 +434,7 @@ fn analyze(
     let mut gassigns;
     let mut ret_widen;
     let mut fassigns;
-    let mut news;
+    let mut news_acc: Vec<(ClassId, Option<Ty>)> = Vec::new();
     let cur_ret = match spec.ret.join_slot(spec.ret_floor, prog.boxing()) {
         Slot::Known(t) => Some(t),
         Slot::Boxed(..) => Some(Ty::Obj),
@@ -437,7 +454,9 @@ fn analyze(
         gassigns = std::mem::take(&mut ctx.gassigns);
         ret_widen = std::mem::take(&mut ctx.ret_widen);
         fassigns = std::mem::take(&mut ctx.fassigns);
-        news = std::mem::take(&mut ctx.news);
+        // Escapes are monotone but their trigger can vanish once the place is
+        // widened (a list boxed to `object`): keep what every pass found.
+        news_acc.append(&mut ctx.news);
         assigns.append(&mut ctx.widens);
         for (name, t) in assigns {
             let s = locals.entry(name).or_insert(Slot::Unknown);
@@ -454,7 +473,7 @@ fn analyze(
         let mut ctx = Ctx { prog, locals: &locals, requests: None, diags: Some(d), gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![] };
         ctx.block(&f.body, &mut sink, &mut ret2);
     }
-    (locals, ret, falls, gassigns, ret_widen, (fassigns, news))
+    (locals, ret, falls, gassigns, ret_widen, (fassigns, news_acc))
 }
 
 struct Ctx<'a, 'p> {
@@ -564,6 +583,18 @@ pub fn has_class(t: Ty) -> bool {
         Some(Comp::Dict(k, v) | Comp::View(_, k, v)) => has_class(k) || has_class(v),
         Some(Comp::Tuple(ts)) => ts.iter().any(|t| has_class(*t)),
         _ => false,
+    }
+}
+
+/// Native classes appearing in a type.
+pub fn classes_in(t: Ty) -> Vec<ClassId> {
+    match t.as_comp() {
+        Some(Comp::Class(c, _)) => vec![c],
+        Some(Comp::Union(ms)) => ms.iter().flat_map(|m| classes_in(*m)).collect(),
+        Some(Comp::List(x) | Comp::Set(x) | Comp::Opt(x) | Comp::TupleVar(x)) => classes_in(x),
+        Some(Comp::Dict(k, v) | Comp::View(_, k, v)) => classes_in(k).into_iter().chain(classes_in(v)).collect(),
+        Some(Comp::Tuple(ts)) => ts.iter().flat_map(|t| classes_in(*t)).collect(),
+        _ => vec![],
     }
 }
 
@@ -720,11 +751,15 @@ impl Ctx<'_, '_> {
                 return;
             }
             if has_class(t) {
-                self.report(
-                    Diagnostic::error("P230", e.span, format!("an instance of the native class `{t}` is passed to Python"))
-                        .note("native instances cannot cross into CPython yet (phase 4); pass plain values (ints, strs, lists, dicts) instead"),
-                );
-                return;
+                // Instances become `native_object`s: their methods get
+                // all-`object` specializations; fields holding mutable
+                // containers become Python objects (shared with Python).
+                for c in classes_in(t) {
+                    self.box_class(e, c);
+                }
+                if t.class_id().is_some() || t.union_members().is_some() {
+                    return;
+                }
             }
             if t.has_mutable() && is_place(e) {
                 self.widen(e, Ty::Obj);
@@ -1300,6 +1335,44 @@ impl Ctx<'_, '_> {
                 let el = native::iter_elem(self.expr(&args[1])?)?;
                 self.call_value_tys(e, ft, &[el])?;
                 Some(Ty::list(el))
+            }
+        }
+    }
+
+    fn box_class(&mut self, e: &Expr, c: ClassId) {
+        if self.prog.boxed_classes.contains(&c) && self.diags.is_none() {
+            // Already boxed: still request (idempotent), cheap.
+        }
+        let t = self.class_ty(c);
+        self.news.push((c, Some(t)));
+        let m = self.prog.module;
+        let mut seen: Vec<String> = Vec::new();
+        for k in m.mro(c) {
+            for meth in &m.class(k).methods {
+                if seen.contains(&meth.name) || meth.kind == MethodKind::Setter {
+                    continue;
+                }
+                seen.push(meth.name.clone());
+                let f = &m.funcs[meth.func];
+                let n_params = f.sig.names.len();
+                let args: Vec<Ty> = match meth.kind {
+                    MethodKind::Static => (0..n_params).map(|_| Ty::Obj).collect(),
+                    MethodKind::Class => std::iter::once(Ty::class_type(c, &m.class(c).rust)).chain((1..n_params).map(|_| Ty::Obj)).collect(),
+                    MethodKind::Property => vec![t],
+                    _ => std::iter::once(t).chain((1..n_params).map(|_| Ty::Obj)).collect(),
+                };
+                if f.sig.vararg.is_some() || f.sig.kwarg.is_some() {
+                    continue;
+                }
+                if let Some(req) = self.requests.as_deref_mut() {
+                    req.push((SpecKey { func: meth.func, args }, e.span));
+                }
+            }
+        }
+        let fields: Vec<(String, Ty)> = self.prog.fields.iter().filter(|((k, _), _)| *k == c).filter_map(|((_, n), s)| s.known().map(|t| (n.clone(), t))).collect();
+        for (n, ft) in fields {
+            if ft.has_mutable() && ft != Ty::Obj {
+                self.fassigns.push(((c, n), Ty::Obj));
             }
         }
     }
@@ -2114,7 +2187,13 @@ impl Ctx<'_, '_> {
                 let mut ok = true;
                 for a in args.iter().chain(kwargs.iter().map(|(_, v)| v)) {
                     if read_only {
-                        ok &= self.expr(a).is_some();
+                        // Containers are copied; function values and instances still
+                        // need their Python wrappers.
+                        match self.expr(a) {
+                            Some(t) if has_class(t) || t.as_closure().is_some() || t.union_members().is_some() => self.escape(a),
+                            Some(_) => {}
+                            None => ok = false,
+                        }
                     } else {
                         self.escape(a);
                         ok &= self.expr(a).is_some();

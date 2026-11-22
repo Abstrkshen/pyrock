@@ -729,9 +729,9 @@ impl<'l> Lowerer<'l> {
                     main_body.push(Stmt { kind: StmtKind::AssignGlobal { unit: self.unit, name: name.to_string(), value }, span: fsp });
                 }
             } else if ty(st) == "ClassDef" {
-                let saved = (std::mem::take(&mut self.locals), self.in_module, std::mem::take(&mut self.extra_locals));
+                let saved = (std::mem::take(&mut self.locals), self.in_module, std::mem::take(&mut self.extra_locals), self.cur_fid);
                 let stmts = self.lower_class(st);
-                (self.locals, self.in_module, self.extra_locals) = saved;
+                (self.locals, self.in_module, self.extra_locals, self.cur_fid) = saved;
                 main_body.extend(stmts);
             } else if let Some(s) = self.lower_stmt(st) {
                 main_body.push(s);

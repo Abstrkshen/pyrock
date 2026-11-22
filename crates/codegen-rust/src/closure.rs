@@ -227,7 +227,7 @@ pub(crate) fn emit_boxers(prog: &pyfast_infer::Program, out: &mut String) {
 }
 
 /// A literal default as a Python object.
-fn literal_obj(d: &Expr) -> String {
+pub(crate) fn literal_obj(d: &Expr) -> String {
     match &d.kind {
         ExprKind::Int(v) => format!("rt::py::int({v}_i64)"),
         ExprKind::Float(v) => format!("rt::py::float({v:?}_f64)"),
