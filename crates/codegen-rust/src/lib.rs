@@ -789,6 +789,8 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 let o = self.obj(obj);
                 writeln!(out, "{ind}{{\n{ind}    let __v = {v};\n{ind}    rt::py::setattr(&{}, {name:?}, __v)?;\n{ind}}}", borrow(&o)).unwrap();
             }
+            // `import math` used only by native math calls: nothing to import.
+            StmtKind::Import(ImportAction::Py(i)) if self.plan.native_imports.contains(i) => {}
             StmtKind::Import(ImportAction::Py(i)) => {
                 let slot = &self.prog.module.slots[*i];
                 let name = format!("SLOT_{i}_{}", ident(&slot.binding));
@@ -995,6 +997,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
         }
         let is_class = pyfast_infer::spec::class_like;
         let code = match &e.kind {
+            ExprKind::GetAttr { .. } | ExprKind::Slot(_) if self.prog.math_const_of(e).is_some() => self.prog.math_const_of(e).unwrap().to_string(),
             ExprKind::New { class, args, kwargs } => self.new_instance(e, *class, args, kwargs),
             ExprKind::ClassRef(_) => "()".into(),
             ExprKind::MakeClosure { captures, defaults, .. } => self.make_closure(captures, defaults),
@@ -1355,6 +1358,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                         self.method(obj, recv, &name, args, kwargs, t)
                     }
                     CallClass::Builtin(name) => self.native_builtin(&name, args, kwargs, t),
+                    CallClass::Math(name) => self.math_call(name, args, kwargs),
                     CallClass::RecordGet(key) => {
                         let ExprKind::GetAttr { obj, .. } = &func.kind else { unreachable!() };
                         self.record_get(obj, key, args.get(1), t)
@@ -1748,4 +1752,33 @@ fn compare(op: CmpOp, l: &str, lt: Ty, r: &str, rt: Ty) -> String {
             }
         },
     }
+}
+
+impl FnEmitter<'_, '_> {
+    /// A `math` function on native numbers (`rt::math`, CPython's errors).
+    fn math_call(&mut self, name: &str, args: &[Expr], kwargs: &[(String, Expr)]) -> String {
+        let num = |v: (String, Ty)| unopt(v.0, v.1, "must be real number, not NoneType");
+        let vals: Vec<(String, Ty)> = args.iter().map(|a| num(self.expr(a))).collect();
+        let kw: Vec<(String, (String, Ty))> = kwargs.iter().map(|(k, v)| (k.clone(), num(self.expr(v)))).collect();
+        let f = |v: &(String, Ty)| as_float(&v.0, ops_base(v.1));
+        let i = |v: &(String, Ty)| as_int(&v.0, ops_base(v.1));
+        match name {
+            "hypot" => format!("rt::math::hypot(&[{}])?", vals.iter().map(f).collect::<Vec<_>>().join(", ")),
+            "gcd" | "lcm" => format!("rt::math::{name}(&[{}])?", vals.iter().map(i).collect::<Vec<_>>().join(", ")),
+            // An int argument is already integral.
+            "floor" | "ceil" | "trunc" if matches!(ops_base(vals[0].1), Ty::Int | Ty::Bool) => i(&vals[0]),
+            "log" if vals.len() == 2 => format!("rt::math::log_base({}, {})?", f(&vals[0]), f(&vals[1])),
+            "isclose" => {
+                let get = |k: &str, d: &str| kw.iter().find(|(n, _)| n == k).map(|(_, v)| f(v)).unwrap_or_else(|| d.to_string());
+                format!("rt::math::isclose({}, {}, {}, {})?", f(&vals[0]), f(&vals[1]), get("rel_tol", "1e-09"), get("abs_tol", "0.0"))
+            }
+            "ldexp" => format!("rt::math::ldexp({}, {})?", f(&vals[0]), i(&vals[1])),
+            "factorial" | "isqrt" | "comb" | "perm" => format!("rt::math::{name}({})?", vals.iter().map(i).collect::<Vec<_>>().join(", ")),
+            _ => format!("rt::math::{name}({})?", vals.iter().map(f).collect::<Vec<_>>().join(", ")),
+        }
+    }
+}
+
+fn ops_base(t: Ty) -> Ty {
+    t.as_opt().unwrap_or(t)
 }

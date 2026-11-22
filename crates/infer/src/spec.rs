@@ -165,6 +165,31 @@ impl<'m> Program<'m> {
         generic_key(&self.module.funcs[key.func], &key)
     }
 
+    /// `math.NAME` (`import math`) or `NAME` (`from math import NAME`): the
+    /// name in the `math` module (when that import is the stdlib's).
+    pub fn math_name(&self, e: &Expr) -> Option<&'static str> {
+        let (slot, name) = match &e.kind {
+            ExprKind::GetAttr { obj, name } => match obj.kind {
+                ExprKind::Slot(i) => (i, name.as_str()),
+                _ => return None,
+            },
+            ExprKind::Slot(i) => match &self.module.slots[*i].kind {
+                SlotKind::From { module, attr } if module == "math" => return Some(pyfast_ir::types::intern_str(attr.as_str())),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        match &self.module.slots[slot].kind {
+            SlotKind::Import { module, .. } if module == "math" => Some(pyfast_ir::types::intern_str(name)),
+            _ => None,
+        }
+    }
+
+    /// `math.pi` etc.: the Rust constant.
+    pub fn math_const_of(&self, e: &Expr) -> Option<&'static str> {
+        self.math_name(e).and_then(native::math_const)
+    }
+
     pub fn spec(&self, key: &SpecKey) -> Option<&Spec> {
         self.index.get(key).map(|&i| &self.specs[i])
     }
@@ -615,6 +640,8 @@ pub enum CallClass {
     ExtMethod { ext: usize, func: usize },
     /// `record.get("key"[, default])` with a key of the record (always present).
     RecordGet(&'static str),
+    /// A function of the `math` module on native numbers (`math.sqrt(x)`).
+    Math(&'static str),
 }
 
 /// A native instance or a union of them.
@@ -1356,6 +1383,21 @@ impl Ctx<'_, '_> {
 
     /// Classify a `CallObj` node (method / native builtin / bridge).
     fn classify(&mut self, func: &Expr, args: &[Expr], kwargs: &[(String, Expr)]) -> CallClass {
+        // `math.sqrt(x)` on native numbers.
+        if let Some(name) = self.prog.math_name(func) {
+            if !args.iter().any(|a| matches!(a.kind, ExprKind::Starred(_))) && kwargs.iter().all(|(k, _)| k != "**") {
+                let a: Option<Vec<Ty>> = args.iter().map(|x| self.expr(x).map(ops::base)).collect();
+                let k: Option<Vec<(String, Ty)>> = kwargs.iter().map(|(n, v)| self.expr(v).map(|t| (n.clone(), ops::base(t)))).collect();
+                match (a, k) {
+                    (Some(a), Some(k)) => {
+                        if native::math_call(name, &a, &k).is_some() {
+                            return CallClass::Math(name);
+                        }
+                    }
+                    _ => return CallClass::Pending,
+                }
+            }
+        }
         if let ExprKind::GetAttr { obj, name } = &func.kind {
             if let Some(t) = self.expr(obj) {
                 if let Some((ext, si)) = t.as_ext_struct() {
@@ -1929,6 +1971,8 @@ impl Ctx<'_, '_> {
                 self.yields.push(t);
                 Some(Ty::None)
             }
+            // `math.pi`, `from math import tau`: native float constants.
+            ExprKind::GetAttr { .. } | ExprKind::Slot(_) if self.prog.math_const_of(e).is_some() => Some(Ty::Float),
             ExprKind::Await(v) => {
                 let t = self.expr(v)?;
                 if let Some(r) = t.as_coro() {
@@ -2459,6 +2503,11 @@ impl Ctx<'_, '_> {
                 None
             }
             CallClass::StaticBool(_) => Some(Ty::Bool),
+            CallClass::Math(name) => {
+                let a: Vec<Ty> = args.iter().map(|x| self.expr(x).map(ops::base)).collect::<Option<_>>()?;
+                let k: Vec<(String, Ty)> = kwargs.iter().map(|(n, v)| self.expr(v).map(|t| (n.clone(), ops::base(t)))).collect::<Option<_>>()?;
+                native::math_call(name, &a, &k)?.ok()
+            }
             CallClass::RecordGet(key) => {
                 let ExprKind::GetAttr { obj, .. } = &func.kind else { unreachable!() };
                 let fs = ops::base(self.expr(obj)?).as_record()?;

@@ -78,20 +78,23 @@ pub fn ty_join(a: Ty, b: Ty, boxing: bool) -> Option<Ty> {
         }
         (Comp::TupleVar(x), Comp::TupleVar(y)) => Some(Ty::tuple_var(elem(x, y)?)),
         (Comp::Gen(x), Comp::Gen(y)) => Some(Ty::gen(elem(x, y)?)),
-        // Records with the same literal keys join key by key (keys added
-        // later on either side are optional); otherwise a record is a
-        // `dict[str, V]`.
-        (Comp::Record(fa), Comp::Record(fb)) if fa.iter().filter(|f| !f.optional).map(|f| f.key).eq(fb.iter().filter(|f| !f.optional).map(|f| f.key)) => {
+        // Two records join key by key. The keys both literals start with (the
+        // common prefix) stay required; every other key is optional, filled
+        // in each value's own insertion order, so printing and iteration
+        // order stay exactly CPython's.
+        (Comp::Record(fa), Comp::Record(fb)) => {
+            let ra: Vec<&str> = fa.iter().filter(|f| !f.optional).map(|f| f.key).collect();
+            let rb: Vec<&str> = fb.iter().filter(|f| !f.optional).map(|f| f.key).collect();
+            let p = ra.iter().zip(&rb).take_while(|(x, y)| x == y).count();
             let mut fs: Vec<Field> = Vec::new();
             for f in fa.iter().chain(&fb) {
                 match fs.iter_mut().find(|g| g.key == f.key) {
-                    Some(g) => {
-                        g.ty = elem(g.ty, f.ty)?;
-                        g.optional |= f.optional;
-                    }
-                    None => fs.push(*f),
+                    Some(g) => g.ty = elem(g.ty, f.ty)?,
+                    None => fs.push(Field { optional: !ra[..p].contains(&f.key), ..*f }),
                 }
             }
+            // Required fields first (in literal order), then the optional ones.
+            fs.sort_by_key(|f| f.optional);
             Some(Ty::record(fs))
         }
         (Comp::Record(_), _) | (_, Comp::Record(_)) => {
@@ -770,3 +773,42 @@ pub const READ_ONLY_CALLS: &[&str] = &[
     "statistics.harmonic_mean", "math.fsum", "math.prod", "math.dist", "math.hypot", "os.path.join", "pprint.pprint",
     "pprint.pformat", "repr", "str", "len", "print", "format", "hash", "id", "type", "isinstance", "frozenset", "bytes",
 ];
+
+/// A native `math` function for these argument types (`None`: not native,
+/// e.g. a Python object argument or a function pyfast does not implement).
+pub fn math_call(name: &str, args: &[Ty], kwargs: &[(String, Ty)]) -> Option<Result<Ty, String>> {
+    let num = |t: Ty| matches!(t, Ty::Int | Ty::Float | Ty::Bool);
+    let int = |t: Ty| matches!(t, Ty::Int | Ty::Bool);
+    if !args.iter().all(|t| num(*t)) || !kwargs.iter().all(|(_, t)| num(*t)) {
+        return None;
+    }
+    let n = args.len();
+    let plain = kwargs.is_empty();
+    let t = match name {
+        "sqrt" | "exp" | "exp2" | "expm1" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" | "cbrt" | "fabs" | "degrees" | "radians" | "log2" | "log10" | "log1p" if n == 1 && plain => Ty::Float,
+        "log" if (1..=2).contains(&n) && plain => Ty::Float,
+        "atan2" | "copysign" | "fmod" | "remainder" | "pow" if n == 2 && plain => Ty::Float,
+        "ldexp" if n == 2 && plain && int(args[1]) => Ty::Float,
+        "hypot" if plain => Ty::Float,
+        "floor" | "ceil" | "trunc" if n == 1 && plain => Ty::Int,
+        "isnan" | "isinf" | "isfinite" if n == 1 && plain => Ty::Bool,
+        "isclose" if n == 2 && kwargs.iter().all(|(k, _)| k == "rel_tol" || k == "abs_tol") => Ty::Bool,
+        "gcd" | "lcm" if plain && args.iter().all(|a| int(*a)) => Ty::Int,
+        "factorial" | "isqrt" if n == 1 && plain && int(args[0]) => Ty::Int,
+        "comb" | "perm" if n == 2 && plain && args.iter().all(|a| int(*a)) => Ty::Int,
+        _ => return None,
+    };
+    Some(Ok(t))
+}
+
+/// The Rust value of a `math` constant.
+pub fn math_const(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "pi" => "std::f64::consts::PI",
+        "e" => "std::f64::consts::E",
+        "tau" => "std::f64::consts::TAU",
+        "inf" => "f64::INFINITY",
+        "nan" => "f64::NAN",
+        _ => return None,
+    })
+}

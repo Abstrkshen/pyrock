@@ -96,6 +96,8 @@ These constructs become plain Rust with no Python objects involved:
   and gets the same Python object back each time (identity). Fields that hold mutable
   containers become Python objects so both sides see the same list.
 * `from mod import Class` and `mod.Class(...)` for classes of natively compiled modules.
+* `math` functions and constants on native numbers (with CPython's domain/range errors);
+  an `import math` used only that way needs no CPython.
 * Dicts with literal string keys (`{"x": 1.0, "name": "a"}`) are compiled as structs with
   one type per key (keys added later are optional fields). Reads, writes, `get`, `in`,
   `len`, `del` of added keys, printing, `==` and iterating keys are native; other dict uses

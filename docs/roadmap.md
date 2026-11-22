@@ -82,7 +82,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] Cheaper CPython bridge (attached for the whole run, interned constants, no per-call flush)
 - [x] Native functions and objects callable from CPython threads
 - [x] Per-key types for dicts with fixed string keys (record dicts → structs)
-- [ ] Native `math` module
+- [x] Native `math` module
+- [ ] A native `int | float` value (a variable that holds both now boxes)
 
 ## Throughout
 
@@ -544,3 +545,23 @@ Each bridged operation cost ~400 ns.
   native functions; CPython subscripts in it drop from 280 to 19, operators from 296 to
   131 (most of the rest come from `math.sin` results, which are Python floats).
 * Tests: `tests/differential/record_dicts.py`, `tests/differential/record_state_loop.py`.
+
+### Phase 7.3: native `math`, records of different shapes (2026-11-22)
+
+* `math.f(...)` / `from math import f` on native numbers compile to `rt::math` (sqrt, exp,
+  log/log2/log10/log1p/log with base, trigonometric and hyperbolic functions, pow, fmod,
+  remainder, copysign, hypot, degrees/radians, floor/ceil/trunc → int, isnan/isinf/
+  isfinite/isclose, gcd/lcm, factorial, comb/perm, isqrt, ldexp, cbrt, exp2) with CPython's
+  results and errors (`ValueError: math domain error`, `OverflowError: math range error`,
+  `cannot convert float infinity to integer`, ...). `math.pi/e/tau/inf/nan` are constants.
+  An `import math` whose every use is native is not imported at all, so such programs
+  compile with `--mode native-only`.
+* Records of different shapes join into one record: the keys both literals start with stay
+  required, every other key becomes optional, filled in each literal's own order, so
+  printing and iteration order stay exactly CPython's (a list of platforms where moving
+  ones have extra `mx`/`speed` keys stays native).
+* `raylib-breakout`: 49 native functions, CPython operators 296 → 103. Most of what is left
+  is the raylib API itself, ctypes code in `svgload.py`, and variables that hold an `int` on
+  one path and a `float` on another (boxed; a native `int | float` is the next item).
+* Tests: `tests/differential/math_native.py`, more cases in
+  `tests/differential/record_dicts.py`.

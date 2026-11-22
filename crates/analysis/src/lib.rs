@@ -52,6 +52,8 @@ pub struct Plan {
     /// Specializations reachable from the module body under the final types
     /// (widening can leave earlier, now-unused specializations behind).
     pub reachable: BTreeSet<usize>,
+    /// Import slots (of the stdlib `math`) used only natively: not imported.
+    pub native_imports: BTreeSet<usize>,
 }
 
 impl Plan {
@@ -173,6 +175,7 @@ pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
         false
     };
 
+    let native_imports = native_math_imports(prog, &reachable);
     let mut boundaries = Vec::new();
     let mut per_spec_bridge = vec![false; n];
     let mut externs_used = BTreeSet::new();
@@ -192,7 +195,7 @@ pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
         });
         let before = boundaries.len();
         let label = pyfast_infer::spec_label(prog, s);
-        find_boundaries(prog, s, &label, &mut boundaries);
+        find_boundaries(prog, s, &label, &native_imports, &mut boundaries);
         if boundaries.len() > before {
             per_spec_bridge[s.id] = true;
             e.insert("calls_python");
@@ -281,7 +284,7 @@ pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
         });
     }
     let uses_python = holds_obj || per_spec_bridge.iter().any(|b| *b);
-    (Plan { entries, unreachable, boundaries, uses_python, externs_used, reachable }, diags)
+    (Plan { entries, unreachable, boundaries, uses_python, externs_used, reachable, native_imports }, diags)
 }
 
 fn short(e: &Expr) -> String {
@@ -296,7 +299,7 @@ fn short(e: &Expr) -> String {
     }
 }
 
-fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary>) {
+fn find_boundaries(prog: &Program, s: &Spec, label: &str, native_imports: &BTreeSet<usize>, out: &mut Vec<Boundary>) {
     let f = &prog.module.funcs[s.key.func];
     let slot_name = |e: &Expr| -> Option<String> {
         if let ExprKind::Slot(i) = e.kind {
@@ -324,6 +327,7 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, out: &mut Vec<Boundary
     }
     let ty0 = |e: &Expr| prog.type_of(s, e);
     walk_stmts(&f.body, &mut |st| match &st.kind {
+        StmtKind::Import(ImportAction::Py(slot)) if native_imports.contains(slot) => {}
         StmtKind::Import(ImportAction::Py(slot)) => {
             let sl = &prog.module.slots[*slot];
             let m = match &sl.kind {
@@ -523,6 +527,8 @@ fn walk_live(prog: &Program, s: &Spec, stmts: &[Stmt], f: &mut impl FnMut(&Expr)
 
 fn walk_expr_live(prog: &Program, s: &Spec, e: &Expr, f: &mut impl FnMut(&Expr)) {
     match &e.kind {
+        // `math.pi`: a native constant.
+        ExprKind::GetAttr { .. } | ExprKind::Slot(_) if prog.math_const_of(e).is_some() => {}
         ExprKind::IfExp { test, body, orelse } => match prog.static_truth(s, test) {
             Some(true) => walk_expr_live(prog, s, body, f),
             Some(false) => walk_expr_live(prog, s, orelse, f),
@@ -685,4 +691,50 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr), skip_callee: bool) {
         }
         _ => {}
     }
+}
+
+/// `import math` / `from math import f` whose every use (in reachable
+/// specializations) is a native `math` call or constant: CPython never needs
+/// the module.
+fn native_math_imports(prog: &Program, reachable: &BTreeSet<usize>) -> BTreeSet<usize> {
+    let candidates: BTreeSet<usize> = prog
+        .module
+        .slots
+        .iter()
+        .enumerate()
+        .filter(|(_, sl)| matches!(&sl.kind, SlotKind::Import { module, .. } | SlotKind::From { module, .. } if module == "math"))
+        .map(|(i, _)| i)
+        .collect();
+    if candidates.is_empty() {
+        return candidates;
+    }
+    let mut other = BTreeSet::new();
+    fn visit(prog: &Program, s: &Spec, e: &Expr, other: &mut BTreeSet<usize>) {
+        if prog.math_const_of(e).is_some() {
+            return;
+        }
+        if let ExprKind::CallObj { func, args, kwargs } = &e.kind {
+            if matches!(prog.classify_call(s, func, args, kwargs), CallClass::Math(_)) {
+                for a in args.iter().chain(kwargs.iter().map(|(_, v)| v)) {
+                    visit(prog, s, a, other);
+                }
+                return;
+            }
+        }
+        if let ExprKind::Slot(i) = e.kind {
+            other.insert(i);
+        }
+        for c in children(e, false) {
+            visit(prog, s, c, other);
+        }
+    }
+    for s in prog.specs.iter().filter(|s| reachable.contains(&s.id)) {
+        let f = &prog.module.funcs[s.key.func];
+        walk_stmts(&f.body, &mut |st| {
+            for e in stmt_exprs(st) {
+                visit(prog, s, e, &mut other);
+            }
+        });
+    }
+    candidates.difference(&other).copied().collect()
 }

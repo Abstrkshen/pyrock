@@ -48,12 +48,19 @@ pub(crate) fn convert(code: &str, from: Ty, to: Ty) -> String {
             let own = native::record_dict(from, true).unwrap_or(to);
             convert(&format!("{code}.to_dict()?"), own, to)
         }
-        // Same literal keys (the join rule): copy key by key; added keys keep
-        // their insertion order.
+        // Copy key by key: the target's required keys are the source's
+        // leading ones (the join rule); the source's other keys become the
+        // target's optional fields in the source's insertion order.
         (Some(Comp::Record(fa)), Some(Comp::Record(fb))) => {
             let src = |k: &str| fa.iter().position(|f| f.key == k).unwrap();
             let req: Vec<String> = fb.iter().filter(|f| !f.optional).map(|f| convert(&format!("__r.f{}.clone()", src(f.key)), fa[src(f.key)].ty, f.ty)).collect();
             let mut code_out = format!("{{ let __s = {code}; let __r = __s.0.borrow(); let __n = {}::new({}); ", to.rust(), req.join(", "));
+            for (i, f) in fa.iter().enumerate().filter(|(_, f)| !f.optional) {
+                let j = fb.iter().position(|g| g.key == f.key).unwrap();
+                if fb[j].optional {
+                    write!(code_out, "__n.set_f{j}({}); ", convert(&format!("__r.f{i}.clone()"), f.ty, fb[j].ty)).unwrap();
+                }
+            }
             let arms: Vec<String> = fa
                 .iter()
                 .enumerate()
@@ -167,10 +174,7 @@ impl FnEmitter<'_, '_> {
         }
         let literal = match (&e.kind, to.as_comp()) {
             (ExprKind::List(_), Some(Comp::List(_))) | (ExprKind::Set(_), Some(Comp::Set(_))) | (ExprKind::Dict(_), Some(Comp::Dict(..))) => true,
-            (ExprKind::Dict(pairs), Some(Comp::Record(fs))) => {
-                let req: Vec<&Field> = fs.iter().filter(|f| !f.optional).collect();
-                pairs.len() == req.len() && pairs.iter().zip(&req).all(|((k, _), f)| matches!(&k.kind, ExprKind::Str(s) if s.as_str() == f.key))
-            }
+            (ExprKind::Dict(pairs), Some(Comp::Record(fs))) => record_literal_fits(pairs, &fs),
             (ExprKind::Tuple(items), Some(Comp::Tuple(ts))) => items.len() == ts.len(),
             (ExprKind::Tuple(_), Some(Comp::TupleVar(_))) => true,
             _ => false,
@@ -212,10 +216,24 @@ impl FnEmitter<'_, '_> {
     /// literal's own type, e.g. `[1, 2]` stored into a `list[object]`).
     fn build(&mut self, e: &Expr, to: Ty) -> String {
         match (&e.kind, to.as_comp()) {
-            (ExprKind::Dict(pairs), Some(Comp::Record(fs))) => {
-                let req: Vec<Field> = fs.iter().filter(|f| !f.optional).copied().collect();
-                let parts: Vec<String> = pairs.iter().zip(&req).map(|((_, v), f)| self.expr_as(v, f.ty)).collect();
-                format!("{}::new({})", to.rust(), parts.join(", "))
+            (ExprKind::Dict(pairs), Some(Comp::Record(fs))) if record_literal_fits(pairs, &fs) => {
+                // The required keys come first in the literal; its other keys
+                // are optional fields, set in literal order.
+                let nreq = fs.iter().filter(|f| !f.optional).count();
+                let field = |k: &Expr| fs.iter().position(|f| matches!(&k.kind, ExprKind::Str(s) if s.as_str() == f.key)).unwrap();
+                let parts: Vec<String> = pairs[..nreq].iter().map(|(k, v)| self.expr_as(v, fs[field(k)].ty)).collect();
+                let new = format!("{}::new({})", to.rust(), parts.join(", "));
+                if pairs.len() == nreq {
+                    return new;
+                }
+                let mut code = format!("{{ let __n = {new}; ");
+                for (k, v) in &pairs[nreq..] {
+                    let j = field(k);
+                    let val = self.expr_as(v, fs[j].ty);
+                    write!(code, "__n.set_f{j}({val}); ").unwrap();
+                }
+                code.push_str("__n }");
+                code
             }
             (ExprKind::List(items), Some(Comp::List(b))) => {
                 let parts: Vec<String> = items.iter().map(|x| self.expr_as(x, b)).collect();
@@ -967,4 +985,18 @@ impl FnEmitter<'_, '_> {
             None => format!("{{ let _ = &{o}; {} }}", convert(&d, dt, t)),
         }
     }
+}
+
+/// Whether a dict literal can be built directly as record `fs`: it starts
+/// with the record's required keys (in order), and its other keys are
+/// optional fields.
+fn record_literal_fits(pairs: &[(Expr, Expr)], fs: &[Field]) -> bool {
+    let req: Vec<&Field> = fs.iter().filter(|f| !f.optional).collect();
+    let key = |k: &Expr| match &k.kind {
+        ExprKind::Str(s) => Some(s.clone()),
+        _ => None,
+    };
+    pairs.len() >= req.len()
+        && pairs.iter().zip(&req).all(|((k, _), f)| key(k).as_deref() == Some(f.key))
+        && pairs[req.len()..].iter().all(|(k, _)| key(k).is_some_and(|k| fs.iter().any(|f| f.optional && f.key == k)))
 }

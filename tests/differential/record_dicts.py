@@ -102,3 +102,19 @@ except KeyError as ex:
     print("KeyError", ex)
 print(hero == {"x": 1.0, "vy": 0.0, "prev_bottom": 6.0}, hero == other)
 print(json.dumps(other))
+
+# Records of different shapes in one place: a shared prefix stays required,
+# the other keys are optional, in each value's own order.
+plats = [
+    {"x": 0, "y": 400, "w": 100, "kind": "ground"},
+    {"x": 760, "y": 400, "w": 150, "kind": "stone", "mx": 150, "speed": 0.025},
+    {"x": 5, "kind": "odd", "y": 1, "w": 2},
+]
+for p in plats:
+    print(p, len(p), "mx" in p, p.get("speed", 0.0), list(p))
+moving = [p for p in plats if "mx" in p]
+print(moving[0]["mx"] * 2, sum(p["w"] for p in plats))
+a = {"k": 1, "v": "x"}
+b = {"v": "y", "k": 2}
+pair = [a, b]
+print(pair, [sorted(q) for q in pair])
