@@ -78,7 +78,7 @@ Bridged through CPython (hybrid only): anything touching an object from a CPytho
 and variables or returns with mixed types (boxed).
 
 Not supported in either mode: classes with a CPython base class or a metaclass (keep them in
-an imported `.py`, which falls back to CPython), async comprehensions,
+an imported `.py`, which falls back to CPython),
 relative imports, `import *`.
 
 See [references/language.md](references/language.md) for the precise subset, semantics and

@@ -71,7 +71,6 @@ turns them into errors.
 | Construct | Rewrite |
 |---|---|
 | Class with a CPython base class, a metaclass or a class decorator other than `@dataclass` | Keep it in an imported `.py` (the module falls back to CPython, P220) |
-| Async comprehensions (`[x async for x in g]`) | An `async for` loop |
 | Non-literal default of a top-level function (`def f(x=[])`) | `def f(x=None): if x is None: x = []` |
 | Relative imports, `import *`, imports inside functions | Absolute top-level imports |
 

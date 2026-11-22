@@ -2284,40 +2284,86 @@ impl<'l> Lowerer<'l> {
     /// `(elt for t in it if c ...)`: a hidden generator function called with
     /// the first iterable (evaluated here, in the enclosing scope, as CPython does):
     /// `def <genexpr>(__genexpr_it): for t in __genexpr_it: if c: yield elt`.
-    fn lower_genexp(&mut self, e: &Value) -> Option<Expr> {
+    /// A comprehension as a hidden function called with the first iterable
+    /// (evaluated here, in the enclosing scope, as CPython does):
+    /// * `(elt for t in it if c)`: `def <genexpr>(__genexpr_it): for t in __genexpr_it: if c: yield elt`
+    ///   (an async generator if it has `async for` or `await`);
+    /// * an async list/set/dict comprehension: `async def <acomp>(__genexpr_it): out = []; async for ...: out.append(elt); return out`,
+    ///   awaited in place (awaiting a native coroutine runs it inline).
+    fn lower_hidden_comp(&mut self, e: &Value) -> Option<Expr> {
         let sp = self.span(e);
         let loc = &e["_loc"];
         let gens = arr(e, "generators");
-        if gens.iter().any(|g| g["is_async"].as_u64().unwrap_or(0) != 0) {
-            self.unsupported(sp, "async generator expression", "use an async generator function");
-            return None;
-        }
+        let is_async = gens.iter().any(|g| g["is_async"].as_u64().unwrap_or(0) != 0)
+            || contains_await(&e["elt"])
+            || contains_await(&e["key"])
+            || contains_await(&e["value"])
+            || gens.iter().enumerate().any(|(i, g)| (i > 0 && contains_await(&g["iter"])) || arr(g, "ifs").iter().any(contains_await));
+        let name = |n: &str| serde_json::json!({"_t": "Name", "id": n, "ctx": {"_t": "Load"}, "_loc": loc});
+        let out = "__comp_out";
+        let (inner, init, name_s) = match ty(e) {
+            "GeneratorExp" => (serde_json::json!({"_t": "Expr", "_loc": loc, "value": {"_t": "Yield", "_loc": loc, "value": e["elt"]}}), None, "<genexpr>"),
+            "ListComp" => (
+                serde_json::json!({"_t": "Expr", "_loc": loc, "value": {"_t": "Call", "_loc": loc, "func": {"_t": "Attribute", "_loc": loc, "value": name(out), "attr": "append"}, "args": [e["elt"]], "keywords": []}}),
+                Some(serde_json::json!({"_t": "List", "_loc": loc, "elts": []})),
+                "<listcomp>",
+            ),
+            "SetComp" => (
+                serde_json::json!({"_t": "Expr", "_loc": loc, "value": {"_t": "Call", "_loc": loc, "func": {"_t": "Attribute", "_loc": loc, "value": name(out), "attr": "add"}, "args": [e["elt"]], "keywords": []}}),
+                Some(serde_json::json!({"_t": "Call", "_loc": loc, "func": name("set"), "args": [], "keywords": []})),
+                "<setcomp>",
+            ),
+            _ => (
+                serde_json::json!({"_t": "Assign", "_loc": loc, "targets": [{"_t": "Subscript", "_loc": loc, "value": name(out), "slice": e["key"], "ctx": {"_t": "Store"}}], "value": e["value"]}),
+                Some(serde_json::json!({"_t": "Dict", "_loc": loc, "keys": [], "values": []})),
+                "<dictcomp>",
+            ),
+        };
         let first = self.lower_expr(&gens[0]["iter"])?;
-        let mut body = serde_json::json!([{"_t": "Expr", "_loc": loc, "value": {"_t": "Yield", "_loc": loc, "value": e["elt"]}}]);
+        let mut body = serde_json::json!([inner]);
         for (gi, g) in gens.iter().enumerate().rev() {
             for c in arr(g, "ifs").iter().rev() {
                 body = serde_json::json!([{"_t": "If", "_loc": loc, "test": c, "body": body, "orelse": []}]);
             }
-            let iter = if gi == 0 { serde_json::json!({"_t": "Name", "id": "__genexpr_it", "_loc": loc}) } else { g["iter"].clone() };
-            body = serde_json::json!([{"_t": "For", "_loc": loc, "target": g["target"], "iter": iter, "body": body, "orelse": []}]);
+            let iter = if gi == 0 { name("__genexpr_it") } else { g["iter"].clone() };
+            let is_async_for = g["is_async"].as_u64().unwrap_or(0) != 0;
+            body = serde_json::json!([{"_t": "For", "_loc": loc, "target": g["target"], "iter": iter, "body": body, "orelse": [], "is_async": is_async_for}]);
         }
-        let def = serde_json::json!({
-            "_t": "FunctionDef", "name": "<genexpr>", "decorator_list": [], "returns": null, "_loc": loc, "body": body,
+        if let Some(init) = init {
+            let mut stmts = vec![serde_json::json!({"_t": "Assign", "_loc": loc, "targets": [{"_t": "Name", "id": out, "ctx": {"_t": "Store"}, "_loc": loc}], "value": init})];
+            stmts.extend(body.as_array().unwrap().iter().cloned());
+            stmts.push(serde_json::json!({"_t": "Return", "_loc": loc, "value": name(out)}));
+            body = serde_json::Value::Array(stmts);
+        }
+        let mut def = serde_json::json!({
+            "_t": "FunctionDef", "name": name_s, "decorator_list": [], "returns": null, "_loc": loc, "body": body,
             "args": {"_t": "arguments", "posonlyargs": [], "args": [{"_t": "arg", "arg": "__genexpr_it", "annotation": null, "_loc": loc}],
                      "vararg": null, "kwonlyargs": [], "kw_defaults": [], "kwarg": null, "defaults": []},
         });
+        if is_async {
+            def["is_async"] = serde_json::json!(true);
+        }
         let fid = self.ld.alloc_func();
         let (params, sig) = signature(&def["args"]);
         self.ld.func_anns.insert(fid, (params.iter().map(|_| None).collect(), None));
         self.ld.func_sigs.insert(fid, call_sig(&sig, self.unit));
         let func = self.lower_nested(fid, &def)?;
-        Some(Expr { kind: ExprKind::CallObj { func: Box::new(func), args: vec![first], kwargs: vec![] }, span: sp })
+        let call = Expr { kind: ExprKind::CallObj { func: Box::new(func), args: vec![first], kwargs: vec![] }, span: sp };
+        if is_async && init_is_some(ty(e)) {
+            return Some(Expr { kind: ExprKind::Await(Box::new(call)), span: sp });
+        }
+        Some(call)
     }
 
     fn lower_comp(&mut self, e: &Value) -> Option<Expr> {
         let sp = self.span(e);
-        if ty(e) == "GeneratorExp" {
-            return self.lower_genexp(e);
+        // Generator expressions, and comprehensions with `async for` or
+        // `await`, are hidden functions.
+        let any_async = arr(e, "generators").iter().any(|g| g["is_async"].as_u64().unwrap_or(0) != 0)
+            || ["elt", "key", "value"].iter().any(|k| contains_await(&e[*k]))
+            || arr(e, "generators").iter().any(|g| contains_await(&g["iter"]) || arr(g, "ifs").iter().any(contains_await));
+        if ty(e) == "GeneratorExp" || any_async {
+            return self.lower_hidden_comp(e);
         }
         let kind = match ty(e) {
             "ListComp" => CompKind::List,
@@ -2762,6 +2808,23 @@ fn contains_yield(v: &Value) -> bool {
             _ => m.iter().any(|(k, x)| k != "_t" && contains_yield(x)),
         },
         Value::Array(xs) => xs.iter().any(contains_yield),
+        _ => false,
+    }
+}
+
+fn init_is_some(t: &str) -> bool {
+    t != "GeneratorExp"
+}
+
+/// Whether an expression contains `await` outside nested functions.
+fn contains_await(v: &Value) -> bool {
+    match v {
+        Value::Object(m) => match m.get("_t").and_then(|t| t.as_str()) {
+            Some("Await") => true,
+            Some("FunctionDef" | "ClassDef" | "Lambda") => false,
+            _ => m.iter().any(|(k, x)| k != "_t" && contains_await(x)),
+        },
+        Value::Array(xs) => xs.iter().any(contains_await),
         _ => false,
     }
 }

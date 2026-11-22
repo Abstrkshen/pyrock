@@ -77,7 +77,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] Generator `send`/`throw`/`close`, `return value`, `finally` on abandoned generators
 - [x] Async generators
 - [x] `asend` / `athrow` on async generators
-- [ ] Async comprehensions and async generator expressions
+- [x] Async comprehensions and async generator expressions
 
 ## Phase 7: speed of mixed code
 
@@ -618,3 +618,16 @@ Each bridged operation cost ~400 ns.
   `finally` apply); `asend(non-None)` on a just-started generator is a `TypeError` and a
   finished one raises `StopAsyncIteration`, as in CPython.
 * Test: `tests/differential/async_gen_protocol.py`.
+
+### Phase 6.6: async comprehensions (2026-11-22)
+
+* A list/set/dict comprehension with `async for`, or with `await` in its element, key,
+  value, conditions or inner iterables, lowers to a hidden `async def` that builds the
+  result (`__comp_out.append(elt)` / `.add` / `[k] = v`) and is awaited in place; awaiting a
+  native coroutine runs it inline, so the evaluation order and suspension points are
+  CPython's. The first iterable is evaluated in the enclosing scope, as in CPython.
+* A generator expression with `async for` or `await` is a hidden async generator (lazy:
+  nothing runs before the first `__anext__`).
+* Generator expressions and all comprehension kinds now share one lowering
+  (`lower_hidden_comp`).
+* Test: `tests/differential/async_comprehensions.py` (also identical with `--release`).
