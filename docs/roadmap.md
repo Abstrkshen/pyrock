@@ -73,6 +73,9 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 
 - [x] `async def` / `await` bridged to asyncio (`async with`, `async for`)
 - [x] Generators (`yield`, `yield from`) on the same stackful coroutines
+- [x] Lazy generator expressions
+- [ ] Generator `send`/`throw`/`close`, `return value`, `finally` on abandoned generators
+- [ ] Async generators
 
 ## Throughout
 
@@ -466,3 +469,15 @@ README command, verbatim) in CI:
   * One-character strings (iteration, indexing, `chr`) share 256 cached `Latin-1` values
     instead of allocating per character (BPE benchmark 1.85x → 2.7x).
 * Test: `tests/differential/hybrid_mixing.py`.
+
+### Phase 6.3: lazy generator expressions (2026-11-22)
+
+* `(elt for t in it if c ...)` lowers to a hidden generator function
+  (`def <genexpr>(__genexpr_it): for t in __genexpr_it: if c: yield elt`) called with the
+  first iterable, which is evaluated in the enclosing scope as in CPython; later iterables
+  and the conditions are evaluated lazily, and free variables are closure cells (late
+  binding). Module-level generator expressions mark the module variables they read as
+  global cells, like lambdas.
+* `min`/`max(iterable, default=x)` are native.
+* Test: `tests/differential/genexp.py` (infinite source with `break`, side-effect order,
+  late binding, nested `for`, inside comprehensions, `next`, `itertools.islice`).

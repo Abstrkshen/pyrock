@@ -558,6 +558,21 @@ impl FnEmitter<'_, '_> {
                     format!("rt::coll::sum_float({items}, {start})")
                 }
             }
+            "min" | "max" if kw("default").is_some() => {
+                let d = &kwv[kw("default").unwrap()];
+                let e = native::iter_elem(vals[0].1).unwrap_or(t);
+                if e.is_never() {
+                    format!("{{ let _ = {}; {} }}", vals[0].0, convert(&d.0, d.1, t))
+                } else {
+                    format!(
+                        "{{ let __v = {}; if __v.is_empty() {{ {} }} else {{ let __m = rt::coll::min_of(__v, {})?; {} }} }}",
+                        elems(&vals[0]),
+                        convert(&d.0, d.1, t),
+                        name == "max",
+                        convert("__m", e, t)
+                    )
+                }
+            }
             "min" | "max" => format!("rt::coll::min_of({}, {})?", elems(&vals[0]), name == "max"),
             "any" | "all" => format!("rt::coll::{name}(&{})", elems(&vals[0])),
             "list" => match vals.first() {

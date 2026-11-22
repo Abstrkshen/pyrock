@@ -55,7 +55,6 @@ newtype, a value with no single type → `rt::py::Obj` (boxed, hybrid mode).
 | `int ** negative non-literal int` | float | `NotImplementedError` |
 | negative float `**` fractional | complex | `NotImplementedError` |
 | traceback | full frames | header + last line |
-| generator expressions `(x for x in xs)` | lazy | evaluated eagerly into a list (generator *functions* are lazy) |
 | set iteration order | hash order | insertion order |
 | Python object into an `int`/`str`/`bool` annotation of another type | ignored | `TypeError` |
 

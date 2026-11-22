@@ -540,6 +540,10 @@ pub fn builtin(name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing: bool) -
             Some(elem(args[0]).map(Ty::list).ok_or_else(|| format!("'{}' object is not iterable", args[0])))
         }
         "sum" if (1..=2).contains(&n) && kwargs.is_empty() => numeric_sum(elem(args[0])?, args.get(1).copied()),
+        "min" | "max" if n == 1 && kwargs.len() == 1 && kwargs[0].0 == "default" => {
+            let e = elem(args[0])?;
+            Some(Ok(if e.is_never() { kwargs[0].1 } else { ty_join(e, kwargs[0].1, true).unwrap_or(Ty::Obj) }))
+        }
         "min" | "max" if n == 1 && (kwargs.is_empty() || kwargs.iter().all(|(k, t)| k == "key" && t.as_closure().is_some())) => {
             let e = elem(args[0])?;
             Some(if e.is_never() { Err(format!("{name}() iterable argument is empty")) } else { Ok(e) })

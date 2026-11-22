@@ -56,8 +56,8 @@ These constructs become plain Rust with no Python objects involved:
   native value (decided at compile time).
 * Unpacking: `a, b = ...`, nested and starred targets (`first, *rest = xs`), swaps,
   `for k, v in d.items()`, `with ... as (a, b)`, with CPython's `ValueError` texts.
-* Comprehensions: list, set and dict comprehensions and generator expressions (generators are
-  evaluated eagerly), with nested `for` and `if` clauses; their variables do not leak.
+* Comprehensions: list, set and dict comprehensions, with nested `for` and `if` clauses;
+  their variables do not leak. Generator expressions are lazy native generators.
 * Escape rule: a native mutable container that reaches arbitrary Python code (an argument of
   a CPython call, stored into a Python object) is a Python object from creation, so Python
   can keep or mutate it with the aliasing CPython has. A short list of read-only consumers
@@ -121,7 +121,6 @@ These constructs become plain Rust with no Python objects involved:
 | negative float `**` fractional power | complex | `NotImplementedError` | out of scope |
 | Traceback body | full frames | last line only | source-map-driven tracebacks |
 | Set iteration / printing order | hash order | insertion order | — (string hashes are randomised in CPython anyway) |
-| Generator expressions | lazy | evaluated eagerly into a list | — |
 | Dict views (`keys()`, ...) | support set operations | iteration, `len`, `in`, printing only | — |
 | `RecursionError` threshold | counts every frame | counts recursive frames only | — |
 | Python object returned into an `int`/`str`/`bool` annotation it doesn't match | annotation ignored | `TypeError` at the unbox | — (deliberate: unboxing must not change the value) |

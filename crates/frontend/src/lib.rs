@@ -493,6 +493,10 @@ fn scan_lambda_names(v: &Value, out: &mut HashSet<String>) {
                     scan_names(b, out);
                 }
             }
+            // A generator expression is a hidden generator function too.
+            if m.get("_t").and_then(|t| t.as_str()) == Some("GeneratorExp") {
+                scan_names(v, out);
+            }
             for x in m.values() {
                 scan_lambda_names(x, out);
             }
@@ -2256,8 +2260,44 @@ impl<'l> Lowerer<'l> {
     }
 
     /// `[elt for x in xs if c]`, `{k: v for ...}`, `{e for ...}`, `(e for ...)`.
+    /// `(elt for t in it if c ...)`: a hidden generator function called with
+    /// the first iterable (evaluated here, in the enclosing scope, as CPython does):
+    /// `def <genexpr>(__genexpr_it): for t in __genexpr_it: if c: yield elt`.
+    fn lower_genexp(&mut self, e: &Value) -> Option<Expr> {
+        let sp = self.span(e);
+        let loc = &e["_loc"];
+        let gens = arr(e, "generators");
+        if gens.iter().any(|g| g["is_async"].as_u64().unwrap_or(0) != 0) {
+            self.unsupported(sp, "async generator expression", "use an async generator function");
+            return None;
+        }
+        let first = self.lower_expr(&gens[0]["iter"])?;
+        let mut body = serde_json::json!([{"_t": "Expr", "_loc": loc, "value": {"_t": "Yield", "_loc": loc, "value": e["elt"]}}]);
+        for (gi, g) in gens.iter().enumerate().rev() {
+            for c in arr(g, "ifs").iter().rev() {
+                body = serde_json::json!([{"_t": "If", "_loc": loc, "test": c, "body": body, "orelse": []}]);
+            }
+            let iter = if gi == 0 { serde_json::json!({"_t": "Name", "id": "__genexpr_it", "_loc": loc}) } else { g["iter"].clone() };
+            body = serde_json::json!([{"_t": "For", "_loc": loc, "target": g["target"], "iter": iter, "body": body, "orelse": []}]);
+        }
+        let def = serde_json::json!({
+            "_t": "FunctionDef", "name": "<genexpr>", "decorator_list": [], "returns": null, "_loc": loc, "body": body,
+            "args": {"_t": "arguments", "posonlyargs": [], "args": [{"_t": "arg", "arg": "__genexpr_it", "annotation": null, "_loc": loc}],
+                     "vararg": null, "kwonlyargs": [], "kw_defaults": [], "kwarg": null, "defaults": []},
+        });
+        let fid = self.ld.alloc_func();
+        let (params, sig) = signature(&def["args"]);
+        self.ld.func_anns.insert(fid, (params.iter().map(|_| None).collect(), None));
+        self.ld.func_sigs.insert(fid, call_sig(&sig, self.unit));
+        let func = self.lower_nested(fid, &def)?;
+        Some(Expr { kind: ExprKind::CallObj { func: Box::new(func), args: vec![first], kwargs: vec![] }, span: sp })
+    }
+
     fn lower_comp(&mut self, e: &Value) -> Option<Expr> {
         let sp = self.span(e);
+        if ty(e) == "GeneratorExp" {
+            return self.lower_genexp(e);
+        }
         let kind = match ty(e) {
             "ListComp" => CompKind::List,
             "SetComp" => CompKind::Set,
