@@ -30,7 +30,7 @@ pub mod string;
 pub use coll::{Dict, List, Never, Set, Tup, Tuple0};
 pub use num::Num;
 pub use exc::{Exc, Flow, PyResult};
-pub use io::{print, run_main};
+pub use io::{print, register_module, run_main};
 
 /// A string literal: one shared `Str` per call site (no allocation per use).
 #[macro_export]

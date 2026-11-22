@@ -58,13 +58,46 @@ pub fn flush() {
 pub fn run_main(file: &str, body: impl FnOnce() -> PyResult<()>) -> ! {
     let r = body();
     flush();
-    match r {
-        Ok(()) => std::process::exit(0),
+    let code = match r {
+        Ok(()) => 0,
         Err(e) => {
             if !REPORTED.load(std::sync::atomic::Ordering::Relaxed) {
                 print_traceback(file, &e);
             }
-            std::process::exit(1);
+            1
+        }
+    };
+    finalize_modules();
+    flush();
+    std::process::exit(code);
+}
+
+/// Finalizers of imported native modules: (release function, has a
+/// reference cycle), in import order.
+static MODULES: crate::Shared<Vec<(fn(u8), bool)>> = crate::Shared::new(Vec::new());
+
+/// An imported native module starts running: register its finalizer.
+pub fn register_module(fin: fn(u8), cyclic: bool) {
+    MODULES.with(|m| m.push((fin, cyclic)));
+}
+
+/// At exit, after the main module: release imported modules' variables as
+/// CPython's shutdown does: modules without reference cycles first (freed
+/// by reference counting, each in assignment order), then those with cycles
+/// in one garbage collection (generators held directly by their variables
+/// first, then the rest), each group in import order.
+fn finalize_modules() {
+    let mods = MODULES.with(std::mem::take);
+    for (fin, c) in &mods {
+        if !*c {
+            fin(2);
+        }
+    }
+    for phase in [0, 1] {
+        for (fin, c) in &mods {
+            if *c {
+                fin(phase);
+            }
         }
     }
 }

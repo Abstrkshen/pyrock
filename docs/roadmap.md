@@ -79,6 +79,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 - [x] `asend` / `athrow` on async generators
 - [x] Async comprehensions and async generator expressions
 - [x] Finalization of the main module at exit (open generators, Python objects)
+- [x] Finalization of imported native modules at exit
 
 ## Phase 7: speed of mixed code
 
@@ -650,6 +651,24 @@ Each bridged operation cost ~400 ns.
   and containers/instances that may hold them); programs with only plain native values are
   unchanged.
 * Generators, async generators and coroutines now compare by identity (`g is h`).
-* Remaining divergence: module-level variables of *imported* native modules are not
-  finalized at exit.
 * Test: `tests/differential/finalize_at_exit.py` (also identical with `--release`).
+
+### Phase 6.8: finalizing imported modules (2026-11-22)
+
+* Before, the module-level variables of an imported native module were locals of its init
+  function, dropped when the import finished: its open generators were finalized at import
+  time instead of at exit (and its global cells never).
+* Now an imported module keeps its observable variables alive in static cells
+  (`KEEP_<unit>_<name>`) and registers a finalizer (`fin_unit_<unit>`) when its import
+  starts (`rt::register_module`). At exit, after the main module, `rt::io::run_main` runs
+  them as CPython's shutdown does (measured on CPython 3.12): modules without reference
+  cycles first, in import order, each in plain assignment order (freed by reference
+  counting); then modules whose functions or classes reference their globals, in one
+  garbage collection: generators held directly by variables first (all such modules, in
+  import order), then the rest. The main module follows the same rule (a main without
+  functions is cleared in assignment order).
+* CPython's own order *among several modules with reference cycles* is not stable: it
+  depends on the garbage collector's object lists and changes between the first run and
+  runs with cached `.pyc` files. pyfast uses the cached-run order.
+* Test: `tests/differential/finalize_modules.py` (with `_fin_*.py`; also identical with
+  `--release`).

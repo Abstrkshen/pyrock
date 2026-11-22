@@ -512,7 +512,12 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
         }
         // The main module's variables are released at the end in assignment
         // order (CPython's shutdown), so its statements run in a closure.
-        let finals = if f.is_module && f.unit == 0 { self.module_finals() } else { Vec::new() };
+        let finals = if f.is_module && f.unit == 0 { self.main_finals() } else { Vec::new() };
+        // An imported module keeps its observable variables until exit.
+        let import_fin = if f.is_module && f.unit != 0 { self.import_finals() } else { None };
+        if let Some((_, fin)) = &import_fin {
+            writeln!(out, "    rt::register_module({fin}, {});", module_cyclic(self.prog, f.unit)).unwrap();
+        }
         let captured = has_closure_stmt(&f.body) || !finals.is_empty();
         for name in &f.locals {
             if f.params.contains(name) {
@@ -531,7 +536,12 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             }
         }
         let mut body = String::new();
-        if finals.is_empty() {
+        if let Some((keep, _)) = &import_fin {
+            self.block(&f.body, 1, &mut body);
+            for k in keep {
+                writeln!(body, "    {k}").unwrap();
+            }
+        } else if finals.is_empty() {
             self.block(&f.body, 1, &mut body);
         } else {
             writeln!(body, "    let __r: PyResult<()> = (|| -> PyResult<()> {{").unwrap();
@@ -1935,12 +1945,15 @@ impl FnEmitter<'_, '_> {
 }
 
 impl FnEmitter<'_, '_> {
-    /// Statements releasing the main module's variables in the order they
-    /// were first assigned (CPython clears `__main__` that way at shutdown),
-    /// for the variables whose release can be observed: generators (their
-    /// `finally` runs), Python objects (their finalizers, e.g. a file is
-    /// flushed), and containers or instances that may hold them.
-    fn module_finals(&self) -> Vec<String> {
+    /// The module's variables whose release can be observed (generators,
+    /// Python objects, containers/instances that may hold them), in the order
+    /// CPython releases them at shutdown: a module whose functions or classes
+    /// reference its globals (a reference cycle) is collected by the garbage
+    /// collector, which finalizes variables directly holding a generator
+    /// first, then the others; a module without such a cycle is cleared in
+    /// plain assignment order. Each entry: (global unit if a global cell,
+    /// name, type, shared cell).
+    fn module_finals(&self) -> Vec<(Option<usize>, String, Ty, bool)> {
         let f = self.func;
         let mut order: Vec<(Option<usize>, String)> = Vec::new();
         fn visit(stmts: &[Stmt], order: &mut Vec<(Option<usize>, String)>) {
@@ -1977,25 +1990,13 @@ impl FnEmitter<'_, '_> {
             }
         }
         visit(&f.body, &mut order);
-        // CPython's shutdown collects `__main__` through the garbage
-        // collector: generators bound directly to variables are finalized
-        // first, then those reachable through containers and instances (each
-        // pass in assignment order).
-        let direct = |t: Ty| matches!(t.as_opt().unwrap_or(t).as_comp(), Some(Comp::Gen(..) | Comp::AGen(..)));
-        let (mut first, mut later) = (Vec::new(), Vec::new());
+        let mut vars = Vec::new();
         for (unit, name) in order {
-            let out = |t: Ty, first: &mut Vec<String>, later: &mut Vec<String>, code: String| {
-                if direct(t) {
-                    first.push(code);
-                } else {
-                    later.push(code);
-                }
-            };
             match unit {
                 Some(u) => {
                     let t = self.prog.globals.get(&(u, name.clone())).and_then(|s| s.known()).unwrap_or(Ty::Obj);
                     if finalizable(self.prog, t, &mut Vec::new()) {
-                        out(t, &mut first, &mut later, format!("rt::gclear(&{});", gname(u, &name)));
+                        vars.push((Some(u), name, t, false));
                     }
                 }
                 None => {
@@ -2003,22 +2004,91 @@ impl FnEmitter<'_, '_> {
                         continue;
                     }
                     let Some(t) = self.local_ty(&name) else { continue };
-                    if !finalizable(self.prog, t, &mut Vec::new()) {
-                        continue;
+                    if finalizable(self.prog, t, &mut Vec::new()) {
+                        let cell = f.cells.contains(&name);
+                        vars.push((None, name, t, cell));
                     }
-                    let code = if f.cells.contains(&name) {
-                        // A variable nested functions share: empty the cell.
-                        format!("{{ let __o = {}.borrow_mut().take(); drop(__o); }}", rid(&name))
-                    } else {
-                        format!("drop(std::mem::take(&mut {}));", rid(&name))
-                    };
-                    out(t, &mut first, &mut later, code);
                 }
             }
         }
-        first.extend(later);
-        first
+        if module_cyclic(self.prog, f.unit) {
+            let direct = |t: Ty| matches!(t.as_opt().unwrap_or(t).as_comp(), Some(Comp::Gen(..) | Comp::AGen(..)));
+            let (first, later): (Vec<_>, Vec<_>) = vars.into_iter().partition(|v| direct(v.2));
+            vars = first.into_iter().chain(later).collect();
+        }
+        vars
     }
+
+    /// The main module's variables released in place (end of `module_body`).
+    fn main_finals(&self) -> Vec<String> {
+        self.module_finals()
+            .into_iter()
+            .map(|(unit, name, _, cell)| match unit {
+                Some(u) => format!("rt::gclear(&{});", gname(u, &name)),
+                None if cell => format!("{{ let __o = {}.borrow_mut().take(); drop(__o); }}", rid(&name)),
+                None => format!("drop(std::mem::take(&mut {}));", rid(&name)),
+            })
+            .collect()
+    }
+
+    /// An imported module: its variables are kept alive until exit (moved
+    /// into static cells at the end of its body) and released by a
+    /// finalizer registered when its import starts. Returns (statements
+    /// keeping them, the finalizer's name); program-level items go to
+    /// `cfn_items`.
+    fn import_finals(&mut self) -> Option<(Vec<String>, String)> {
+        let vars = self.module_finals();
+        if vars.is_empty() {
+            return None;
+        }
+        let u = self.func.unit;
+        let fin = format!("fin_unit_{u}");
+        let cyclic = module_cyclic(self.prog, u);
+        let direct = |t: Ty| matches!(t.as_opt().unwrap_or(t).as_comp(), Some(Comp::Gen(..) | Comp::AGen(..)));
+        let mut keep = Vec::new();
+        // Phase 0: generators held directly; phase 1: the rest (one garbage
+        // collection covers all modules with cycles); phase 2: everything,
+        // in order (a module without cycles).
+        let (mut p0, mut p1, mut p2) = (Vec::new(), Vec::new(), Vec::new());
+        for (unit, name, t, cell) in vars {
+            let release = if !cyclic {
+                &mut p2
+            } else if direct(t) {
+                &mut p0
+            } else {
+                &mut p1
+            };
+            match unit {
+                Some(gu) => release.push(format!("        rt::gclear(&{});", gname(gu, &name))),
+                None => {
+                    let k = format!("KEEP_{u}_{}", ident(&name));
+                    let kt = if cell { format!("rt::Cell<{}>", t.rust()) } else { t.rust().to_string() };
+                    self.cfn_items.push(format!("static {k}: rt::Global<{kt}> = rt::Global::new(None);"));
+                    if cell {
+                        keep.push(format!("rt::gset(&{k}, {}.clone());", rid(&name)));
+                        release.push(format!("        if let Ok(__c) = rt::gget(&{k}, \"\") {{ let __o = __c.borrow_mut().take(); drop(__o); }}\n        rt::gclear(&{k});"));
+                    } else {
+                        keep.push(format!("rt::gset(&{k}, std::mem::take(&mut {}));", rid(&name)));
+                        release.push(format!("        rt::gclear(&{k});"));
+                    }
+                }
+            }
+        }
+        let mut body = String::new();
+        for (phase, rel) in [(0, p0), (1, p1), (2, p2)] {
+            if !rel.is_empty() {
+                write!(body, "    if phase == {phase} {{\n{}\n    }}\n", rel.join("\n")).unwrap();
+            }
+        }
+        self.cfn_items.push(format!("/// Releases the module-level variables of an imported module at exit.\nfn {fin}(phase: u8) {{\n{body}}}"));
+        Some((keep, fin))
+    }
+}
+
+/// Whether a module's functions or classes reference its globals (CPython
+/// then frees it through the garbage collector at shutdown).
+fn module_cyclic(prog: &Program, unit: usize) -> bool {
+    prog.module.funcs.iter().any(|f| f.unit == unit && !f.is_module)
 }
 
 /// Whether releasing a value of type `t` can be observed: it is or may hold
