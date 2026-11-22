@@ -173,14 +173,27 @@ pub struct Function {
     pub ret_ann: Option<Ty>,
     /// The class this function is a method of.
     pub class: Option<ClassId>,
+    /// The enclosing function of a nested function or lambda.
+    pub parent: Option<FuncId>,
+    /// Variables of enclosing functions this function uses (closure cells,
+    /// passed in its environment, in this order).
+    pub captures: Vec<String>,
+    /// Own locals that nested functions capture (stored in shared cells).
+    pub cells: Vec<String>,
     /// How call arguments bind to the parameters.
     pub sig: CallSig,
 }
 
 impl Function {
-    /// Rust-safe base name (`helpers.area` -> `helpers_area`).
+    /// Rust-safe base name (`helpers.area` -> `helpers_area`). Nested
+    /// functions and lambdas get their id appended (names can repeat).
     pub fn rust_base(&self) -> String {
-        self.name.replace('.', "_")
+        let base: String = self.name.chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' }).collect();
+        if self.parent.is_some() || self.name.contains('<') {
+            format!("{}_f{}", base.trim_matches('_'), self.id)
+        } else {
+            base
+        }
     }
 }
 
@@ -331,6 +344,16 @@ pub enum ExprKind {
     New { class: ClassId, args: Vec<Expr>, kwargs: Vec<(String, Expr)> },
     /// A natively compiled class used as a value (`isinstance(x, Point)`, `cls`).
     ClassRef(ClassId),
+    /// A function value: a nested function or lambda with its captured cells,
+    /// or a top-level function used as a value (no captures).
+    /// `defaults` are the values of default arguments evaluated at creation
+    /// (`lambda x, i=i: ...`); they occupy the environment slots after `captures`.
+    MakeClosure { func: FuncId, captures: Vec<String>, defaults: Vec<Expr> },
+    /// In a signature: the default stored in environment slot `n` of the
+    /// called function value (replaced by `EnvRead` when a call is bound).
+    EnvDefault(usize),
+    /// Environment slot `index` of function value `value`.
+    EnvRead { value: Box<Expr>, index: usize },
     /// `ValueError(...)`: a builtin exception instance (native `rt::Exc`).
     NewExc { kind: String, args: Vec<Expr> },
 }

@@ -30,12 +30,15 @@ pub(crate) fn convert(code: &str, from: Ty, to: Ty) -> String {
     }
     if let Some(ms) = to.union_members() {
         let ur = to.rust();
-        if from.class_id().is_some() {
-            return format!("{ur}::{}({code})", from.rust());
+        if from.class_id().is_some() || from.as_closure().is_some() {
+            if let Some(target) = ms.iter().find(|m| **m == from) {
+                return format!("{ur}::{}({code})", target.variant_name());
+            }
+            // The same function with wider captures: re-wrap is not possible (cells differ).
         }
         if let Some(fs) = from.union_members() {
             let fr = from.rust();
-            let arms: Vec<String> = fs.iter().filter(|f| ms.contains(f)).map(|f| format!("{fr}::{0}(x) => {ur}::{0}(x)", f.rust())).collect();
+            let arms: Vec<String> = fs.iter().filter(|f| ms.contains(f)).map(|f| format!("{fr}::{0}(x) => {ur}::{0}(x)", f.variant_name())).collect();
             return format!("match {code} {{ {} }}", arms.join(", "));
         }
     }
@@ -454,7 +457,10 @@ impl FnEmitter<'_, '_> {
                 "count" => format!("{o}.count(&{})", convert(&vals[0].0, vals[0].1, e)),
                 "sort" => {
                     let rev = kw("reverse").map(|i| crate::truthy(&kwv[i].0, kwv[i].1)).unwrap_or_else(|| "false".into());
-                    format!("{o}.sort({rev})?")
+                    match kwargs.iter().find(|(n, _)| n == "key") {
+                        Some((_, k)) => self.sort_by_key(&o, e, k, rev),
+                        None => format!("{o}.sort({rev})?"),
+                    }
                 }
                 "reverse" | "clear" => format!("{o}.{name}()"),
                 "copy" => format!("{o}.copy()"),

@@ -156,3 +156,46 @@ pub fn truthy<T: Truthy + ?Sized>(v: &T) -> bool {
 pub fn unopt<T>(v: Option<T>, msg: &str) -> PyResult<T> {
     v.ok_or_else(|| Exc::new("TypeError", msg.to_string()))
 }
+
+/// A closure cell: a variable shared between a function and the nested
+/// functions that capture it (`None` while unbound).
+pub type Cell<T> = std::rc::Rc<std::cell::RefCell<Option<T>>>;
+
+/// A fresh, unbound cell.
+#[inline]
+pub fn cell<T>() -> Cell<T> {
+    std::rc::Rc::new(std::cell::RefCell::new(None))
+}
+
+/// Read a cell (NameError for an unbound free variable, as CPython).
+#[inline]
+pub fn cget<T: Clone>(c: &Cell<T>, name: &str) -> PyResult<T> {
+    c.borrow().clone().ok_or_else(|| Exc::new("NameError", format!("cannot access free variable '{name}' where it is not associated with a value in enclosing scope")))
+}
+
+#[inline]
+pub fn cset<T>(c: &Cell<T>, v: T) {
+    *c.borrow_mut() = Some(v);
+}
+
+/// The environment of a function value (a tuple of the cells it captured).
+#[derive(Clone, Default)]
+pub struct Env<T>(pub T);
+
+impl<T> conv::PyFmt for Env<T> {
+    fn py_repr(&self) -> Str {
+        Str::from(format!("<function at {:#x}>", self as *const _ as usize))
+    }
+}
+
+impl<T> Truthy for Env<T> {
+    fn truthy(&self) -> bool {
+        true
+    }
+}
+
+impl<T> coll::PyEq for Env<T> {
+    fn py_eq(&self, o: &Self) -> bool {
+        std::ptr::eq(self, o)
+    }
+}

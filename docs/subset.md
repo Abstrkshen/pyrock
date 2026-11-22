@@ -73,6 +73,15 @@ These constructs become plain Rust with no Python objects involved:
   Instances are `Rc<RefCell<..>>` newtypes, so identity and shared mutation match Python.
   Values of different classes in one place (a list of shapes) form a closed union (a Rust
   enum) with per-variant method dispatch.
+* Function values: lambdas, nested functions and closures (captured variables are shared
+  cells, so late binding and `nonlocal` behave as in CPython; `lambda x, i=i:` defaults are
+  evaluated when the function is created), top-level functions used as values, decorators
+  (`@timed def f`), dispatch tables of different functions (a generated enum), `sorted`/
+  `min`/`max` with `key=`, `list.sort(key=)`, `map` and `filter` (eager). Builtins passed as
+  `key=` or to `map` (`key=len`) run natively.
+* Native function values passed to CPython become Python callables (`re.sub(p, fn, s)`,
+  `functools.reduce`, `@functools.lru_cache`, framework callbacks); CPython calls an
+  all-`object` specialization, and exceptions cross both ways.
 * Module-level variables read inside functions, `global x` in functions, `mod.NAME` /
   `mod.NAME = v` on a natively compiled module, and `from mod import NAME` (copied at import,
   as CPython does). Such variables live in typed global cells; reading one before its
@@ -149,5 +158,5 @@ variadic functions, `static` C functions) are listed in `explain`. Calling one g
 Not yet supported in either mode: classes with a CPython base class, metaclasses or
 class decorators other than `@dataclass` (in an imported `.py` the whole module falls back
 to CPython; in the entry file they are rejected), passing a native instance to CPython code
-(P230), lambdas, closures, non-literal defaults, and `f(*xs)` where `xs` fills a native
-function's fixed parameters (phase 4).
+(P230), non-literal defaults of top-level functions, generators (`yield`), and `f(*xs)`
+where `xs` fills a native function's fixed parameters.

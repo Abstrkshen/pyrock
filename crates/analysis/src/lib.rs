@@ -101,8 +101,24 @@ fn spec_calls(prog: &Program, s: &Spec) -> BTreeSet<usize> {
             }
         }
     });
-    // Trait impls of instantiated classes call their dunders.
+    // Trait impls of instantiated classes call their dunders; function values
+    // exposed to CPython call their all-`object` specializations.
     if s.id == 0 {
+        for &t in &prog.boxed_fns {
+            let (fid, _) = t.as_closure().unwrap();
+            let f = &prog.module.funcs[fid];
+            let mut args: Vec<Ty> = if pyfast_infer::spec::env_offset(f) == 1 { vec![t] } else { vec![] };
+            args.extend(f.sig.names.iter().map(|_| Ty::Obj));
+            if f.sig.vararg.is_some() {
+                args.push(Ty::tuple_var(Ty::Obj));
+            }
+            if f.sig.kwarg.is_some() {
+                args.push(Ty::dict(Ty::Str, Ty::Obj));
+            }
+            if let Some(sp) = prog.spec(&pyfast_infer::SpecKey { func: fid, args }) {
+                out.insert(sp.id);
+            }
+        }
         for &c in &prog.instantiated {
             let t = Ty::class(c, &prog.module.class(c).rust);
             for (d, args) in [("__repr__", vec![t]), ("__str__", vec![t]), ("__len__", vec![t]), ("__bool__", vec![t]), ("__hash__", vec![t]), ("__eq__", vec![t, t]), ("__lt__", vec![t, t])] {
@@ -544,6 +560,8 @@ fn children(e: &Expr, skip_callee: bool) -> Vec<&Expr> {
             v
         }
         ExprKind::New { args, kwargs, .. } => args.iter().chain(kwargs.iter().map(|(_, x)| x)).collect(),
+        ExprKind::MakeClosure { defaults, .. } => defaults.iter().collect(),
+        ExprKind::EnvRead { value, .. } => vec![value],
         ExprKind::Dict(pairs) => pairs.iter().flat_map(|(k, v)| [k, v]).collect(),
         ExprKind::Subscript { obj, index } => vec![obj, index],
         ExprKind::Slice { lo, hi, step } => [lo, hi, step].into_iter().flatten().map(|b| &**b).collect(),

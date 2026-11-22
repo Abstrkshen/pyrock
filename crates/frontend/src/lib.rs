@@ -55,13 +55,21 @@ pub fn parse_file(path: &str, python: &str, mode: Mode) -> Result<ParseOutput, S
         unit_globals: vec![],
         classes: vec![],
         unit_classes: vec![],
+        func_parent: HashMap::new(),
+        func_captures: HashMap::new(),
+        func_cells: HashMap::new(),
     };
     let (unit, diags) = ld.load_unit(&entry, "__main__", path);
     let Some(unit) = unit else {
         return Ok(ParseOutput { module: None, diagnostics: diags, python_version: ld.python_version });
     };
     let main = ld.units[unit].init;
-    let funcs: Vec<Function> = ld.funcs.into_iter().map(|f| f.expect("function slot never filled")).collect();
+    let mut funcs: Vec<Function> = ld.funcs.into_iter().map(|f| f.expect("function slot never filled")).collect();
+    for f in &mut funcs {
+        f.parent = ld.func_parent.get(&f.id).copied();
+        f.captures = ld.func_captures.remove(&f.id).unwrap_or_default();
+        f.cells = ld.func_cells.remove(&f.id).unwrap_or_default();
+    }
     let mut globals: Vec<(usize, String)> = Vec::new();
     for (u, g) in ld.unit_globals.iter().enumerate() {
         let mut names: Vec<&String> = g.iter().collect();
@@ -106,6 +114,10 @@ struct Loader {
     classes: Vec<ClassDef>,
     /// Per unit: class name -> class.
     unit_classes: Vec<HashMap<String, ClassId>>,
+    /// Closure data per function: enclosing function, captured names, cell names.
+    func_parent: HashMap<FuncId, FuncId>,
+    func_captures: HashMap<FuncId, Vec<String>>,
+    func_cells: HashMap<FuncId, Vec<String>>,
 }
 
 /// How arguments bind to a native function's parameters.
@@ -291,8 +303,18 @@ struct Lowerer<'l> {
     cur_class: Option<(ClassId, Option<String>)>,
     /// Classes of this unit: name -> (class, definition span).
     class_ids: HashMap<String, (ClassId, Span)>,
-    /// Comprehension scopes: source name -> renamed local.
+    /// Comprehension (and `except ... as`) scopes: source name -> renamed
+    /// local, with the function that owns the renamed local.
     comp_scopes: Vec<HashMap<String, String>>,
+    comp_owner: Vec<Option<FuncId>>,
+    /// The function being lowered (None for a module body).
+    cur_fid: Option<FuncId>,
+    /// Enclosing functions of a nested function: (function, its locals).
+    scopes: Vec<(Option<FuncId>, HashSet<String>)>,
+    /// Names declared `nonlocal` in the function being lowered.
+    fn_nonlocals: HashSet<String>,
+    /// Top-level functions with decorators (their name is a module variable).
+    decorated: HashSet<String>,
     /// `from mod import NAME` of module variables, per import statement:
     /// (binding, unit, name). The binding is a global of this unit, assigned
     /// once at the import (CPython copies the value at import time).
@@ -391,6 +413,11 @@ fn scan_self_fields(body: &[Value], self_name: &str, out: &mut Vec<String>) {
     }
 }
 
+/// Number of real (non-default) captures of `fid`.
+fn captures_len(m: &HashMap<FuncId, Vec<String>>, fid: FuncId, n_defaults: usize) -> usize {
+    m.get(&fid).map(|v| v.len()).unwrap_or(0) - n_defaults
+}
+
 /// Every `Name` mentioned anywhere under `v`.
 fn scan_names(v: &Value, out: &mut HashSet<String>) {
     match v {
@@ -405,6 +432,43 @@ fn scan_names(v: &Value, out: &mut HashSet<String>) {
             }
         }
         Value::Array(a) => a.iter().for_each(|x| scan_names(x, out)),
+        _ => {}
+    }
+}
+
+/// Names declared `nonlocal` in a function body (not in nested functions).
+fn nonlocal_decls(body: &[Value], out: &mut HashSet<String>) {
+    for st in body {
+        match ty(st) {
+            "Nonlocal" => out.extend(arr(st, "names").iter().filter_map(|n| n.as_str().map(String::from))),
+            "FunctionDef" | "ClassDef" | "AsyncFunctionDef" => {}
+            _ => {
+                for k in ["body", "orelse", "finalbody"] {
+                    nonlocal_decls(arr(st, k), out);
+                }
+                for h in arr(st, "handlers") {
+                    nonlocal_decls(arr(h, "body"), out);
+                }
+            }
+        }
+    }
+}
+
+/// Every name used inside `lambda` bodies under `v` (module-level lambdas
+/// read module variables, which must then be global cells).
+fn scan_lambda_names(v: &Value, out: &mut HashSet<String>) {
+    match v {
+        Value::Object(m) => {
+            if m.get("_t").and_then(|t| t.as_str()) == Some("Lambda") {
+                if let Some(b) = m.get("body") {
+                    scan_names(b, out);
+                }
+            }
+            for x in m.values() {
+                scan_lambda_names(x, out);
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|x| scan_lambda_names(x, out)),
         _ => {}
     }
 }
@@ -506,6 +570,11 @@ impl<'l> Lowerer<'l> {
             cur_class: None,
             class_ids: HashMap::new(),
             comp_scopes: vec![],
+            comp_owner: vec![],
+            cur_fid: None,
+            scopes: vec![],
+            fn_nonlocals: HashSet::new(),
+            decorated: HashSet::new(),
             locals: HashSet::new(),
             in_module: true,
             ret_ann: None,
@@ -554,8 +623,13 @@ impl<'l> Lowerer<'l> {
                 self.ld.func_anns.insert(id, (anns, parse_ann(&st["returns"])));
                 self.ld.func_sigs.insert(id, call_sig(&sig, self.unit));
                 self.func_ids.insert(name.clone(), (id, sp));
-                self.bindings.insert(name.clone(), Binding::Func(id));
-                self.ld.unit_funcs[self.unit].insert(name, id);
+                if arr(st, "decorator_list").is_empty() {
+                    self.bindings.insert(name.clone(), Binding::Func(id));
+                    self.ld.unit_funcs[self.unit].insert(name, id);
+                } else {
+                    // `@dec def f`: the name is a module variable holding dec(f).
+                    self.decorated.insert(name);
+                }
             }
         }
         // Pass 1a': discover classes (in order: bases must be defined earlier).
@@ -574,7 +648,7 @@ impl<'l> Lowerer<'l> {
         let mut module_locals = Vec::new();
         collect_bindings(body, &mut module_locals, true);
         for name in &module_locals {
-            if self.bindings.contains_key(name) {
+            if self.bindings.contains_key(name) && !self.decorated.contains(name) {
                 let sp = self.func_ids.get(name).map(|x| x.1).unwrap_or_default();
                 self.err("P141", sp, format!("module-level name `{name}` rebinds a function or import; global rebinding is not compiled natively"));
             }
@@ -611,6 +685,12 @@ impl<'l> Lowerer<'l> {
         for v in self.var_imports.values() {
             g.extend(v.iter().map(|(b, _, _)| b.clone()));
         }
+        g.extend(self.decorated.iter().cloned());
+        let mut lam = HashSet::new();
+        for st in body.iter().filter(|st| ty(st) != "FunctionDef") {
+            scan_lambda_names(st, &mut lam);
+        }
+        g.extend(lam.into_iter().filter(|n| self.module_vars.contains(n)));
         if self.unit != 0 {
             g.extend(self.module_vars.iter().cloned());
         }
@@ -635,10 +715,19 @@ impl<'l> Lowerer<'l> {
                 if sp != self.span(st) {
                     continue; // duplicate, already reported
                 }
-                let saved = (std::mem::take(&mut self.locals), self.in_module, std::mem::take(&mut self.extra_locals));
+                let saved = (std::mem::take(&mut self.locals), self.in_module, std::mem::take(&mut self.extra_locals), self.cur_fid);
                 let f = self.lower_function(id, st);
-                (self.locals, self.in_module, self.extra_locals) = saved;
+                (self.locals, self.in_module, self.extra_locals, self.cur_fid) = saved;
                 self.ld.funcs[id] = Some(f);
+                if self.decorated.contains(name) {
+                    let fsp = self.span(st);
+                    let mut value = Expr { kind: ExprKind::MakeClosure { func: id, captures: vec![], defaults: vec![] }, span: fsp };
+                    for d in arr(st, "decorator_list").iter().rev() {
+                        let Some(dec) = self.lower_expr(d) else { continue };
+                        value = Expr { kind: ExprKind::CallObj { func: Box::new(dec), args: vec![value], kwargs: vec![] }, span: fsp };
+                    }
+                    main_body.push(Stmt { kind: StmtKind::AssignGlobal { unit: self.unit, name: name.to_string(), value }, span: fsp });
+                }
             } else if ty(st) == "ClassDef" {
                 let saved = (std::mem::take(&mut self.locals), self.in_module, std::mem::take(&mut self.extra_locals));
                 let stmts = self.lower_class(st);
@@ -686,6 +775,9 @@ impl<'l> Lowerer<'l> {
             ret_ann: None,
             class: None,
             sig: CallSig::default(),
+            parent: None,
+            captures: vec![],
+            cells: vec![],
         });
         self.ld.units[self.unit].init = init;
     }
@@ -875,13 +967,10 @@ impl<'l> Lowerer<'l> {
         };
         let sp = self.span(st);
         let a = &st["args"];
-        if !arr(st, "decorator_list").is_empty() && self.cur_class.is_none() {
-            self.err("P101", sp, format!("decorators on `{name}` are not supported yet"));
-        }
         let (_, sig) = signature(a);
         for (n, d) in sig.names.iter().zip(&sig.defaults) {
             if let Some(d) = d {
-                if !literal_default(d) {
+                if !literal_default(d) && self.scopes.is_empty() {
                     let dsp = self.span(d);
                     self.diags.push(
                         Diagnostic::error("P101", dsp, format!("default value of `{n}` in `{name}` must be a literal"))
@@ -895,10 +984,20 @@ impl<'l> Lowerer<'l> {
         params.extend(sig.kwarg.clone());
         let mut decl = HashSet::new();
         global_decls(arr(st, "body"), &mut decl);
+        let mut nonlocals = HashSet::new();
+        nonlocal_decls(arr(st, "body"), &mut nonlocals);
         let mut locals = params.clone();
         collect_bindings(arr(st, "body"), &mut locals, false);
-        locals.retain(|n| !decl.contains(n));
+        locals.retain(|n| !decl.contains(n) && !nonlocals.contains(n));
         self.fn_globals = decl;
+        self.cur_fid = Some(id);
+        for n in &nonlocals {
+            match self.find_enclosing(n) {
+                Some(k) => self.record_capture(n, k),
+                None => self.err("P001", sp, format!("SyntaxError: no binding for nonlocal '{n}' found")),
+            }
+        }
+        self.fn_nonlocals = nonlocals;
         self.locals = locals.iter().cloned().collect();
         self.in_module = false;
         let (param_ann, ret_ann) = self.ld.func_anns.get(&id).cloned().unwrap_or_default();
@@ -909,7 +1008,7 @@ impl<'l> Lowerer<'l> {
         locals.extend(std::mem::take(&mut self.extra_locals));
         let sig = self.ld.func_sigs.get(&id).cloned().unwrap_or_default();
         let class = self.cur_class.as_ref().map(|c| c.0);
-        Function { id, name: self.qual(&name), params, locals, body, span: sp, is_module: false, unit: self.unit, param_ann, ret_ann, class, sig }
+        Function { id, name: self.qual(&name), params, locals, body, span: sp, is_module: false, unit: self.unit, param_ann, ret_ann, class, sig, parent: None, captures: vec![], cells: vec![] }
     }
 
     fn lower_block(&mut self, body: &[Value]) -> Vec<Stmt> {
@@ -1022,8 +1121,20 @@ impl<'l> Lowerer<'l> {
             "Continue" => StmtKind::Continue,
             "Pass" => StmtKind::Pass,
             "FunctionDef" => {
-                self.unsupported(sp, "nested function definition", "closures are planned for milestone M6");
-                return None;
+                // A nested function: a closure value bound to its name.
+                let name = sstr(st, "name").to_string();
+                let fid = self.ld.alloc_func();
+                let (params, sig) = signature(&st["args"]);
+                let mut anns: Vec<Option<Ty>> = params.iter().map(|p| parse_ann(&p["annotation"])).collect();
+                anns.extend(sig.vararg.iter().chain(&sig.kwarg).map(|_| None));
+                self.ld.func_anns.insert(fid, (anns, parse_ann(&st["returns"])));
+                self.ld.func_sigs.insert(fid, call_sig(&sig, self.unit));
+                let mut value = self.lower_nested(fid, st)?;
+                for d in arr(st, "decorator_list").iter().rev() {
+                    let dec = self.lower_expr(d)?;
+                    value = Expr { kind: ExprKind::CallObj { func: Box::new(dec), args: vec![value], kwargs: vec![] }, span: sp };
+                }
+                self.bind_target(name, value)
             }
             "Import" | "ImportFrom" => {
                 let actions = self.import_actions.remove(&sp).unwrap_or_default();
@@ -1073,10 +1184,12 @@ impl<'l> Lowerer<'l> {
                     };
                     if let Some((orig, r)) = &renamed {
                         self.comp_scopes.push(HashMap::from([(orig.clone(), r.clone())]));
+                        self.comp_owner.push(self.cur_fid);
                     }
                     let mut hbody = self.lower_block(arr(h, "body"));
                     if renamed.is_some() {
                         self.comp_scopes.pop();
+                        self.comp_owner.pop();
                     }
                     if let Some(p) = prefix {
                         hbody.insert(0, p);
@@ -1164,6 +1277,7 @@ impl<'l> Lowerer<'l> {
                     _ => Some(Stmt { kind: StmtKind::If { test: Expr { kind: ExprKind::Bool(true), span: sp }, body: stmts, orelse: vec![] }, span: sp }),
                 };
             }
+            "Nonlocal" if !self.in_module => return None, // handled by the pre-scan
             "Nonlocal" => {
                 self.err("P142", sp, "`global`/`nonlocal` rebinding is never lowered into a native assumption");
                 return None;
@@ -1428,6 +1542,11 @@ impl<'l> Lowerer<'l> {
                         return Some(Expr { kind: ExprKind::Global { unit: u, name: attr.to_string() }, span: sp });
                     }
                 }
+                if let Some(Binding::Unit(u)) = self.module_binding(&e["value"]) {
+                    if let Some(&f) = self.ld.unit_funcs[u].get(attr) {
+                        return Some(Expr { kind: ExprKind::MakeClosure { func: f, captures: vec![], defaults: vec![] }, span: sp });
+                    }
+                }
                 if let Some(b) = self.module_binding(&e["value"]) {
                     let what = match b {
                         Binding::Unit(u) if !self.ld.unit_funcs[u].contains_key(attr) => "module-level variable of a natively compiled module",
@@ -1455,11 +1574,16 @@ impl<'l> Lowerer<'l> {
             "Subscript" => ExprKind::Subscript { obj: Box::new(self.lower_expr(&e["value"])?), index: Box::new(self.lower_index(&e["slice"])?) },
             "ListComp" | "SetComp" | "GeneratorExp" | "DictComp" => return self.lower_comp(e),
             "Lambda" => {
-                self.diags.push(
-                    Diagnostic::error("P120", sp, format!("`{}` is not supported yet", ty(e)))
-                        .note("comprehensions and lambdas need closures (milestone M6); use an explicit loop"),
-                );
-                return None;
+                let fid = self.ld.alloc_func();
+                let (params, sig) = signature(&e["args"]);
+                let anns: Vec<Option<Ty>> = params.iter().map(|_| None).chain(sig.vararg.iter().chain(&sig.kwarg).map(|_| None)).collect();
+                self.ld.func_anns.insert(fid, (anns, None));
+                self.ld.func_sigs.insert(fid, call_sig(&sig, self.unit));
+                let def = serde_json::json!({
+                    "_t": "FunctionDef", "name": "<lambda>", "args": e["args"], "decorator_list": [], "returns": null, "_loc": e["_loc"],
+                    "body": [{"_t": "Return", "value": e["body"], "_loc": e["_loc"]}],
+                });
+                return self.lower_nested(fid, &def);
             }
             other => {
                 self.unsupported(sp, &format!("expression `{other}`"), "see docs/subset.md for the supported subset");
@@ -1763,6 +1887,7 @@ impl<'l> Lowerer<'l> {
                     if item["value"].is_null() || (ty(item) == "AnnAssign" && self.ld.classes[cid as usize].dataclass) {
                         continue;
                     }
+                    self.cur_fid = None;
                     self.locals = self.module_vars.difference(&self.globals).cloned().collect();
                     self.in_module = true;
                     let Some(value) = self.lower_expr(&item["value"]) else { continue };
@@ -1862,6 +1987,9 @@ impl<'l> Lowerer<'l> {
             ret_ann: None,
             class: Some(cid),
             sig,
+            parent: None,
+            captures: vec![],
+            cells: vec![],
         });
         self.ld.classes[cid as usize].methods.push(Method { name: "__init__".into(), func: id, kind: MethodKind::Instance });
         let fields = &mut self.ld.classes[cid as usize].fields;
@@ -1870,6 +1998,114 @@ impl<'l> Lowerer<'l> {
                 fields.push(nm);
             }
         }
+    }
+
+    /// Index (in `scopes`) of the innermost enclosing function that binds `id`.
+    fn find_enclosing(&self, id: &str) -> Option<usize> {
+        self.scopes.iter().rposition(|(f, locals)| f.is_some() && locals.contains(id))
+    }
+
+    /// `id` belongs to `scopes[k]`: it becomes a cell there, and every
+    /// function between (and the current one) captures it.
+    fn record_capture(&mut self, id: &str, k: usize) {
+        let Some(owner) = self.scopes[k].0 else { return };
+        let push = |m: &mut HashMap<FuncId, Vec<String>>, f: FuncId| {
+            let v = m.entry(f).or_default();
+            if !v.iter().any(|x| x == id) {
+                v.push(id.to_string());
+            }
+        };
+        push(&mut self.ld.func_cells, owner);
+        for j in k + 1..self.scopes.len() {
+            if let Some(f) = self.scopes[j].0 {
+                push(&mut self.ld.func_captures, f);
+            }
+        }
+        if let Some(cur) = self.cur_fid {
+            push(&mut self.ld.func_captures, cur);
+        }
+    }
+
+    /// Lower a nested function or lambda; returns its closure value.
+    fn lower_nested(&mut self, fid: FuncId, st: &Value) -> Option<Expr> {
+        let sp = self.span(st);
+        let saved_locals = self.locals.clone();
+        self.scopes.push((self.cur_fid, saved_locals));
+        let saved = (
+            std::mem::take(&mut self.locals),
+            self.in_module,
+            std::mem::take(&mut self.extra_locals),
+            self.ret_ann.take(),
+            self.cur_fid,
+            std::mem::take(&mut self.fn_globals),
+            std::mem::take(&mut self.fn_nonlocals),
+            self.cur_class.take(),
+        );
+        if let Some(p) = self.cur_fid {
+            self.ld.func_parent.insert(fid, p);
+        }
+        // Non-literal defaults are evaluated now, in the enclosing scope (saved
+        // state), and stored in the closure's environment.
+        let (_, jsig) = signature(&st["args"]);
+        let mut env_defaults: Vec<(usize, Expr)> = Vec::new();
+        {
+            let inner = (std::mem::replace(&mut self.locals, saved.0.clone()), self.in_module, self.cur_fid, self.cur_class.take());
+            self.in_module = saved.1;
+            self.cur_fid = saved.4;
+            for (i, d) in jsig.defaults.iter().enumerate() {
+                if let Some(d) = d {
+                    if !literal_default(d) {
+                        if let Some(v) = self.lower_expr(d) {
+                            env_defaults.push((i, v));
+                        }
+                    }
+                }
+            }
+            (self.locals, self.in_module, self.cur_fid, self.cur_class) = inner;
+        }
+        self.cur_fid = Some(fid);
+        let f = self.lower_function(fid, st);
+        self.ld.funcs[fid] = Some(f);
+        (self.locals, self.in_module, self.extra_locals, self.ret_ann, self.cur_fid, self.fn_globals, self.fn_nonlocals, self.cur_class) = saved;
+        self.scopes.pop();
+        let mut captures = self.ld.func_captures.get(&fid).cloned().unwrap_or_default();
+        let mut defaults = Vec::new();
+        for (i, v) in env_defaults {
+            let slot = captures.len();
+            let hidden = format!("__dflt{slot}");
+            captures.push(hidden.clone());
+            self.ld.func_captures.entry(fid).or_default().push(hidden);
+            let dflt = Some(Expr { kind: ExprKind::EnvDefault(slot), span: v.span });
+            if let Some(sig) = self.ld.func_sigs.get_mut(&fid) {
+                if let Some(d) = sig.defaults.get_mut(i) {
+                    *d = dflt.clone();
+                }
+            }
+            if let Some(Some(f)) = self.ld.funcs.get_mut(fid) {
+                if let Some(d) = f.sig.defaults.get_mut(i) {
+                    *d = dflt;
+                }
+            }
+            defaults.push(v);
+        }
+        let captures: Vec<String> = captures.into_iter().take(captures_len(&self.ld.func_captures, fid, defaults.len())).collect();
+        Some(Expr { kind: ExprKind::MakeClosure { func: fid, captures, defaults }, span: sp })
+    }
+
+    /// `len` -> `lambda __x: len(__x)` for builtins passed as function values.
+    fn wrap_builtin_fn(&mut self, e: &Expr, sp: Span) -> Option<Expr> {
+        let ExprKind::PyBuiltin(n) = &e.kind else { return None };
+        if !matches!(n.as_str(), "len" | "str" | "repr" | "abs" | "int" | "float" | "bool" | "ord" | "chr" | "sum" | "sorted" | "list" | "tuple" | "set" | "min" | "max" | "round") {
+            return None;
+        }
+        let loc = serde_json::json!([sp.line, sp.col, sp.end_line, sp.end_col]);
+        let lam = serde_json::json!({
+            "_t": "Lambda", "_loc": loc,
+            "args": {"_t": "arguments", "posonlyargs": [], "args": [{"_t": "arg", "arg": "__x", "annotation": null, "_loc": loc}],
+                     "vararg": null, "kwonlyargs": [], "kw_defaults": [], "kwarg": null, "defaults": []},
+            "body": {"_t": "Call", "_loc": loc, "func": {"_t": "Name", "id": n, "_loc": loc}, "args": [{"_t": "Name", "id": "__x", "_loc": loc}], "keywords": []},
+        });
+        self.lower_expr(&lam)
     }
 
     /// A fresh synthetic local of the current function.
@@ -1949,8 +2185,10 @@ impl<'l> Lowerer<'l> {
             // The first iterable is evaluated in the enclosing scope.
             let iter = if gi == 0 {
                 let saved = self.comp_scopes.split_off(pushed);
+                let saved_owner = self.comp_owner.split_off(pushed);
                 let it = self.lower_expr(&g["iter"]);
                 self.comp_scopes.extend(saved);
+                self.comp_owner.extend(saved_owner);
                 it?
             } else {
                 self.lower_expr(&g["iter"])?
@@ -1966,6 +2204,7 @@ impl<'l> Lowerer<'l> {
                 scope.insert(n, r);
             }
             self.comp_scopes.push(scope);
+            self.comp_owner.push(self.cur_fid);
             let var = self.fresh_local();
             let read = Expr { kind: ExprKind::Local(var.clone()), span: sp };
             let unpack = self.lower_target(&g["target"], read, sp)?;
@@ -1985,12 +2224,16 @@ impl<'l> Lowerer<'l> {
             }
         })();
         self.comp_scopes.truncate(pushed);
+        self.comp_owner.truncate(pushed);
         let (elt, val) = r?;
         Some(Expr { kind: ExprKind::Comp { kind, elt: Box::new(elt), val, gens }, span: sp })
     }
 
     /// `name = value` for a local or a global cell.
     fn bind_target(&mut self, name: String, value: Expr) -> StmtKind {
+        if self.fn_nonlocals.contains(&name) {
+            return StmtKind::Assign { target: name, value };
+        }
         if !self.locals.contains(&name) && (self.fn_globals.contains(&name) || self.globals.contains(&name)) {
             StmtKind::AssignGlobal { unit: self.unit, name, value }
         } else {
@@ -2043,8 +2286,26 @@ impl<'l> Lowerer<'l> {
     }
 
     fn lower_name(&mut self, id: &str, sp: Span) -> Option<Expr> {
-        if let Some(r) = self.comp_scopes.iter().rev().find_map(|m| m.get(id)).cloned() {
+        if let Some(k) = self.comp_scopes.iter().rposition(|m| m.contains_key(id)) {
+            let r = self.comp_scopes[k][id].clone();
+            // A renamed local of an enclosing function: captured.
+            if self.comp_owner[k] != self.cur_fid && !self.locals.contains(&r) {
+                if let Some(owner) = self.comp_owner[k] {
+                    if let Some(si) = self.scopes.iter().position(|s| s.0 == Some(owner)) {
+                        self.record_capture(&r, si);
+                    }
+                }
+            }
             return Some(Expr { kind: ExprKind::Local(r), span: sp });
+        }
+        if self.fn_nonlocals.contains(id) {
+            return Some(Expr { kind: ExprKind::Local(id.to_string()), span: sp });
+        }
+        if !self.locals.contains(id) {
+            if let Some(k) = self.find_enclosing(id) {
+                self.record_capture(id, k);
+                return Some(Expr { kind: ExprKind::Local(id.to_string()), span: sp });
+            }
         }
         let kind = if self.locals.contains(id) {
             ExprKind::Local(id.to_string())
@@ -2062,8 +2323,9 @@ impl<'l> Lowerer<'l> {
                     ExprKind::Slot(s)
                 }
                 Binding::Class(c) => ExprKind::ClassRef(c),
+                Binding::Func(f) => ExprKind::MakeClosure { func: f, captures: vec![], defaults: vec![] },
                 _ => {
-                    self.unsupported(sp, &format!("using `{id}` as a first-class value"), "call it directly; function values are milestone M6");
+                    self.unsupported(sp, &format!("using `{id}` as a first-class value"), "call it directly");
                     return None;
                 }
             }
@@ -2100,6 +2362,27 @@ impl<'l> Lowerer<'l> {
             kwargs.push((name, self.lower_expr(&k["value"])?));
         }
         let starred = args.iter().any(|a| matches!(a.kind, ExprKind::Starred(_))) || kwargs.iter().any(|(k, _)| k == "**");
+        // `key=len`, `map(str, xs)`: a builtin used as a function value is a
+        // one-argument lambda, so it runs natively.
+        let callee_name = if ty(f) == "Name" { sstr(f, "id") } else if ty(f) == "Attribute" { sstr(f, "attr") } else { "" };
+        let mut args = args;
+        let mut kwargs = kwargs;
+        if matches!(callee_name, "sorted" | "min" | "max" | "sort" | "map" | "filter") {
+            for (k, v) in kwargs.iter_mut() {
+                if k == "key" {
+                    if let Some(w) = self.wrap_builtin_fn(v, sp) {
+                        *v = w;
+                    }
+                }
+            }
+            if matches!(callee_name, "map" | "filter") {
+                if let Some(first) = args.first_mut() {
+                    if let Some(w) = self.wrap_builtin_fn(first, sp) {
+                        *first = w;
+                    }
+                }
+            }
+        }
         let native_only = |me: &mut Self, what: &str| -> Option<()> {
             if !kwargs_is_empty(&kwargs) {
                 me.unsupported(sp, &format!("keyword arguments to {what}"), "natively compiled functions take positional arguments only");

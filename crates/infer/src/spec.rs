@@ -96,6 +96,8 @@ pub struct Program<'m> {
     pub fields: BTreeMap<(ClassId, String), Slot>,
     /// Classes instantiated anywhere.
     pub instantiated: BTreeSet<ClassId>,
+    /// Function values that reach CPython (wrapped as Python callables).
+    pub boxed_fns: BTreeSet<Ty>,
     pub specs: Vec<Spec>,
     pub index: HashMap<SpecKey, usize>,
     pub diagnostics: Vec<Diagnostic>,
@@ -209,6 +211,7 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
         globals: BTreeMap::new(),
         fields: BTreeMap::new(),
         instantiated: BTreeSet::new(),
+        boxed_fns: BTreeSet::new(),
         specs: vec![],
         index: HashMap::new(),
         diagnostics: vec![],
@@ -234,7 +237,11 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
                 }
             }
             for c in news {
-                changed |= prog.instantiated.insert(c);
+                if let Some(t) = c.1 {
+                    changed |= prog.boxed_fns.insert(t);
+                } else {
+                    changed |= prog.instantiated.insert(c.0);
+                }
             }
             for (key, t) in ret_widen {
                 let boxing = prog.boxing();
@@ -359,7 +366,13 @@ pub fn spec_label(prog: &Program, s: &Spec) -> String {
     if f.is_module {
         return if f.unit == 0 { "<module>".into() } else { format!("<module {}>", prog.module.units[f.unit].name) };
     }
-    format!("{}({})", f.name, s.key.args.iter().map(|t| t.py_name()).collect::<Vec<_>>().join(", "))
+    format!("{}({})", f.name, s.key.args.iter().skip(env_offset(f)).map(|t| t.py_name()).collect::<Vec<_>>().join(", "))
+}
+
+/// 1 when a function's specializations take a closure environment first
+/// (nested functions and lambdas), else 0.
+pub fn env_offset(f: &Function) -> usize {
+    usize::from(f.parent.is_some())
 }
 
 fn add_spec(prog: &mut Program, key: SpecKey) {
@@ -372,8 +385,17 @@ fn add_spec(prog: &mut Program, key: SpecKey) {
         format!("{}__{}", f.rust_base(), key.args.iter().map(|t| t.mangle()).collect::<Vec<_>>().join("_"))
     };
     let mut locals = BTreeMap::new();
-    for (p, t) in f.params.iter().zip(&key.args) {
+    let off = env_offset(f);
+    for (p, t) in f.params.iter().zip(key.args.iter().skip(off)) {
         locals.insert(p.clone(), Slot::Known(*t));
+    }
+    // A nested function's environment carries its captured variables' types.
+    if off == 1 {
+        if let Some((_, caps)) = key.args.first().and_then(|t| t.as_closure()) {
+            for (n, t) in f.captures.iter().zip(caps) {
+                locals.insert(n.clone(), Slot::Known(t));
+            }
+        }
     }
     let maybe_unbound = definite::maybe_unbound(f);
     let id = prog.specs.len();
@@ -390,7 +412,7 @@ fn analyze(
     idx: usize,
     requests: &mut Requests,
     diags: Option<&mut Vec<Diagnostic>>,
-) -> (BTreeMap<String, Slot>, Slot, bool, Vec<(GlobalKey, Ty)>, Vec<(SpecKey, Ty)>, (Vec<((ClassId, String), Ty)>, Vec<ClassId>)) {
+) -> (BTreeMap<String, Slot>, Slot, bool, Vec<(GlobalKey, Ty)>, Vec<(SpecKey, Ty)>, (Vec<((ClassId, String), Ty)>, Vec<(ClassId, Option<Ty>)>)) {
     let spec = &prog.specs[idx];
     let mut gassigns;
     let mut ret_widen;
@@ -450,8 +472,9 @@ struct Ctx<'a, 'p> {
     cur_ret: Option<Ty>,
     /// Instance-attribute assignments seen in this pass.
     fassigns: Vec<((ClassId, String), Ty)>,
-    /// Classes instantiated in this pass.
-    news: Vec<ClassId>,
+    /// Classes instantiated in this pass, and (with `Some`) function values
+    /// that escape to CPython.
+    news: Vec<(ClassId, Option<Ty>)>,
 }
 
 /// How a `CallObj` node executes.
@@ -475,11 +498,24 @@ pub enum CallClass {
     UnionMethod(String),
     /// `isinstance(u, C)` on a union: decided by the variant at run time.
     RuntimeIsinstance(Vec<ClassId>),
+    /// A call of a function value (closure, lambda, function used as a value).
+    ClosureCall,
 }
 
 /// A native instance or a union of them.
 pub fn class_like(t: Ty) -> bool {
     t.class_id().is_some() || t.union_members().is_some()
+}
+
+/// Defaults stored in a closure's environment are read from the called value.
+pub fn env_defaults(bound: Vec<Expr>, func: &Expr) -> Vec<Expr> {
+    bound
+        .into_iter()
+        .map(|a| match a.kind {
+            ExprKind::EnvDefault(index) => Expr { kind: ExprKind::EnvRead { value: Box::new(func.clone()), index }, span: a.span },
+            _ => a,
+        })
+        .collect()
 }
 
 /// `x` in `type(x)`.
@@ -631,6 +667,28 @@ impl Ctx<'_, '_> {
     /// must be a Python object from creation (a copy would break aliasing).
     fn escape(&mut self, e: &Expr) {
         if let Some(t) = self.expr(e) {
+            // A function value becomes a Python callable over an all-`object`
+            // specialization (its cells stay shared with native callers).
+            let fns: Vec<Ty> = t.union_members().unwrap_or(vec![t]).into_iter().filter(|m| m.as_closure().is_some()).collect();
+            if !fns.is_empty() && fns.len() == t.union_members().map(|m| m.len()).unwrap_or(1) {
+                for m in fns {
+                    let (fid, _) = m.as_closure().unwrap();
+                    let f = &self.prog.module.funcs[fid];
+                    let mut args: Vec<Ty> = if env_offset(f) == 1 { vec![m] } else { vec![] };
+                    args.extend(f.sig.names.iter().map(|_| Ty::Obj));
+                    if f.sig.vararg.is_some() {
+                        args.push(Ty::tuple_var(Ty::Obj));
+                    }
+                    if f.sig.kwarg.is_some() {
+                        args.push(Ty::dict(Ty::Str, Ty::Obj));
+                    }
+                    if let Some(req) = self.requests.as_deref_mut() {
+                        req.push((SpecKey { func: fid, args }, e.span));
+                    }
+                    self.news.push((0, Some(m)));
+                }
+                return;
+            }
             if has_class(t) {
                 self.report(
                     Diagnostic::error("P230", e.span, format!("an instance of the native class `{t}` is passed to Python"))
@@ -1016,10 +1074,14 @@ impl Ctx<'_, '_> {
             }
         }
         if !matches!(func.kind, ExprKind::GetAttr { .. } | ExprKind::PyBuiltin(_) | ExprKind::Slot(_)) {
-            if let Some(t) = self.expr(func) {
-                if let Some(Comp::Type(c, _)) = t.as_comp() {
+            match self.expr(func) {
+                Some(t) if matches!(t.as_comp(), Some(Comp::Type(..))) => {
+                    let Some(Comp::Type(c, _)) = t.as_comp() else { unreachable!() };
                     return CallClass::Construct(c);
                 }
+                Some(t) if t.as_closure().is_some() || t.union_members().is_some_and(|ms| ms.iter().all(|m| m.as_closure().is_some())) => return CallClass::ClosureCall,
+                None => return CallClass::Pending,
+                _ => {}
             }
         }
         match &func.kind {
@@ -1119,6 +1181,95 @@ impl Ctx<'_, '_> {
                         .note("define __lt__ (and friends) on the class"),
                     );
                 }
+            }
+        }
+    }
+
+    /// Call a function value with argument expressions (bound to its signature).
+    fn call_value_exprs(&mut self, e: &Expr, ft: Ty, args: &[Expr], kwargs: &[(String, Expr)]) -> Option<Ty> {
+        if let Some(ms) = ft.union_members() {
+            let mut out: Option<Ty> = None;
+            for m in ms {
+                let r = self.call_value_exprs(e, m, args, kwargs)?;
+                out = Some(match out {
+                    None => r,
+                    Some(p) => native::ty_join(p, r, self.boxing()).or(self.boxing().then_some(Ty::Obj))?,
+                });
+            }
+            return out;
+        }
+        let (fid, _) = ft.as_closure()?;
+        let bound = self.bind(e, fid, false, args, kwargs)?;
+        let ExprKind::CallObj { func, .. } = &e.kind else { return None };
+        let bound = env_defaults(bound, func);
+        let lead: Vec<Ty> = if env_offset(&self.prog.module.funcs[fid]) == 1 { vec![ft] } else { vec![] };
+        self.call_spec(e, fid, &lead, &bound)
+    }
+
+    /// Call a function value with positional argument types (key functions, map, filter).
+    fn call_value_tys(&mut self, e: &Expr, ft: Ty, arg_tys: &[Ty]) -> Option<Ty> {
+        let (fid, _) = ft.as_closure()?;
+        let f = &self.prog.module.funcs[fid];
+        if f.sig.n_pos < arg_tys.len() || f.sig.names.len() > arg_tys.len() && f.sig.defaults.iter().skip(arg_tys.len()).any(|d| d.is_none()) {
+            self.report(Diagnostic::error("P303", e.span, format!("{}() is called with {} argument(s) here", f.name, arg_tys.len())));
+            return None;
+        }
+        let mut args: Vec<Ty> = if env_offset(f) == 1 { vec![ft] } else { vec![] };
+        args.extend(arg_tys);
+        // Defaults fill the remaining parameters (closure-stored ones from the value's type).
+        let (_, caps) = ft.as_closure()?;
+        let defaults: Vec<Expr> = f.sig.defaults.iter().skip(arg_tys.len()).flatten().cloned().collect();
+        for d in &defaults {
+            match d.kind {
+                ExprKind::EnvDefault(i) => args.push(*caps.get(i)?),
+                _ => args.push(self.expr(d)?),
+            }
+        }
+        let key = SpecKey { func: fid, args };
+        let r = self.prog.spec(&key).and_then(|s| self.prog.call_result(s));
+        if let Some(req) = self.requests.as_deref_mut() {
+            req.push((key, e.span));
+        }
+        r
+    }
+
+    /// `sorted(xs, key=f)`, `max(xs, key=f)`, `map(f, xs)`, `filter(f, xs)` with a native function value.
+    fn uses_fn_value(&mut self, name: &str, args: &[Expr], kwargs: &[(String, Expr)]) -> bool {
+        let is_fn = |me: &mut Self, e: &Expr| me.expr(e).is_some_and(|t| t.as_closure().is_some());
+        match name {
+            "sorted" | "min" | "max" => kwargs.iter().any(|(k, v)| k == "key" && is_fn(self, v)),
+            "map" | "filter" => args.first().is_some_and(|f| is_fn(self, f)),
+            _ => false,
+        }
+    }
+
+    fn higher_order(&mut self, e: &Expr, name: &str, args: &[Expr], kwargs: &[(String, Expr)]) -> Option<Ty> {
+        match name {
+            "sorted" | "min" | "max" => {
+                let xs = self.expr(args.first()?)?;
+                let el = native::iter_elem(xs)?;
+                let kf = kwargs.iter().find(|(k, _)| k == "key").map(|(_, v)| v)?;
+                let ft = self.expr(kf)?;
+                let kt = if el.is_never() { Some(Ty::Int) } else { self.call_value_tys(e, ft, &[el]) };
+                kt?;
+                for (k, v) in kwargs {
+                    if k != "key" {
+                        self.expr(v)?;
+                    }
+                }
+                Some(if name == "sorted" { Ty::list(el) } else { el })
+            }
+            "map" => {
+                let ft = self.expr(&args[0])?;
+                let els: Vec<Ty> = args[1..].iter().map(|a| self.expr(a).and_then(native::iter_elem)).collect::<Option<_>>()?;
+                let r = self.call_value_tys(e, ft, &els)?;
+                Some(Ty::list(r))
+            }
+            _ => {
+                let ft = self.expr(&args[0])?;
+                let el = native::iter_elem(self.expr(&args[1])?)?;
+                self.call_value_tys(e, ft, &[el])?;
+                Some(Ty::list(el))
             }
         }
     }
@@ -1225,7 +1376,7 @@ impl Ctx<'_, '_> {
 
     fn new_instance(&mut self, e: &Expr, c: ClassId, args: &[Expr], kwargs: &[(String, Expr)]) -> Option<Ty> {
         let t = self.class_ty(c);
-        self.news.push(c);
+        self.news.push((c, None));
         // The trait impls (printing, ==, <, truthiness, hashing) call these.
         let unary = ["__repr__", "__str__", "__len__", "__bool__", "__hash__"];
         for d in unary {
@@ -1340,6 +1491,29 @@ impl Ctx<'_, '_> {
         match &e.kind {
             ExprKind::New { class, args, kwargs } => self.new_instance(e, *class, args, kwargs),
             ExprKind::ClassRef(c) => Some(Ty::class_type(*c, &self.prog.module.class(*c).rust)),
+            ExprKind::EnvDefault(_) => None,
+            ExprKind::EnvRead { value, index } => {
+                let (_, caps) = self.expr(value)?.as_closure()?;
+                caps.get(*index).copied()
+            }
+            ExprKind::MakeClosure { func, captures, defaults } => {
+                let mut caps: Vec<Ty> = captures.iter().map(|n| self.local_ty(n)).collect::<Option<_>>()?;
+                for d in defaults {
+                    caps.push(self.expr(d)?);
+                }
+                let t = Ty::closure(*func as u32, caps.clone(), &self.prog.module.funcs[*func].name);
+                // `nonlocal` writes in the closure widen the shared variables here.
+                for s in self.prog.specs.iter().filter(|s| s.key.func == *func && s.analyzed && s.key.args.first() == Some(&t)) {
+                    for (n, ct) in captures.iter().zip(&caps) {
+                        if let Some(nt) = s.locals.get(n).and_then(|x| x.known()) {
+                            if nt != *ct {
+                                self.widens.push((n.clone(), nt));
+                            }
+                        }
+                    }
+                }
+                Some(t)
+            }
             ExprKind::Int(_) => Some(Ty::Int),
             ExprKind::Float(_) => Some(Ty::Float),
             ExprKind::Str(_) => Some(Ty::Str),
@@ -1813,6 +1987,10 @@ impl Ctx<'_, '_> {
                 self.method_call(e, recv, name, fid, kind, args, kwargs)
             }
             CallClass::Construct(c) => self.new_instance(e, c, args, kwargs),
+            CallClass::ClosureCall => {
+                let ft = self.expr(func)?;
+                self.call_value_exprs(e, ft, args, kwargs)
+            }
             CallClass::RuntimeIsinstance(_) => {
                 self.expr(&args[0])?;
                 Some(Ty::Bool)
@@ -1849,6 +2027,14 @@ impl Ctx<'_, '_> {
                 let k: Vec<(String, Ty)> = kwargs.iter().map(|(n, v)| self.expr(v).map(|t| (n.clone(), t))).collect::<Option<_>>()?;
                 match native::method(recv, &name, &a, &k, self.boxing())? {
                     Ok(m) => {
+                        // `xs.sort(key=f)`: the key function is called on elements.
+                        if name == "sort" {
+                            if let Some((_, kt)) = k.iter().find(|(n, t)| n == "key" && t.as_closure().is_some()) {
+                                if let Some(el) = recv.list_elem().filter(|e| !e.is_never()) {
+                                    self.call_value_tys(e, *kt, &[el])?;
+                                }
+                            }
+                        }
                         if let Some(w) = m.widen {
                             self.widen(obj, w);
                             // Values stored into the container share its element type.
@@ -1867,6 +2053,7 @@ impl Ctx<'_, '_> {
                     }
                 }
             }
+            CallClass::Builtin(name) if self.uses_fn_value(&name, args, kwargs) => self.higher_order(e, &name, args, kwargs),
             CallClass::Builtin(name) => {
                 let a: Vec<Ty> = args.iter().map(|x| self.expr(x)).collect::<Option<_>>()?;
                 let k: Vec<(String, Ty)> = kwargs.iter().map(|(n, v)| self.expr(v).map(|t| (n.clone(), t))).collect::<Option<_>>()?;
@@ -1913,7 +2100,7 @@ impl<'m> Program<'m> {
             let mut ctx = self.ctx_for(spec);
             ctx.requests = Some(&mut reqs);
             match &e.kind {
-                ExprKind::New { .. } | ExprKind::CallObj { .. } | ExprKind::BinOp { .. } | ExprKind::Unary { .. } | ExprKind::Compare { .. } | ExprKind::Subscript { .. } | ExprKind::GetAttr { .. } => {
+                ExprKind::New { .. } | ExprKind::CallObj { .. } | ExprKind::BinOp { .. } | ExprKind::Unary { .. } | ExprKind::Compare { .. } | ExprKind::Subscript { .. } | ExprKind::GetAttr { .. } | ExprKind::MakeClosure { .. } => {
                     ctx.expr_shallow(e);
                 }
                 ExprKind::Call { callee: Callee::Builtin(_), .. } => {
@@ -1922,7 +2109,7 @@ impl<'m> Program<'m> {
                 _ => {}
             }
         }
-        reqs.into_iter().map(|(k, _)| k).filter(|k| self.module.funcs[k.func].class.is_some()).collect()
+        reqs.into_iter().map(|(k, _)| k).collect()
     }
 
     /// Statement-level dunder calls (`obj[i] = v`, `for x in obj`, `obj.p = v`).
@@ -1953,7 +2140,7 @@ impl<'m> Program<'m> {
                 _ => {}
             }
         }
-        reqs.into_iter().map(|(k, _)| k).filter(|k| self.module.funcs[k.func].class.is_some()).collect()
+        reqs.into_iter().map(|(k, _)| k).collect()
     }
 
     /// Type of `recv.name` (a native instance attribute) in `spec`.

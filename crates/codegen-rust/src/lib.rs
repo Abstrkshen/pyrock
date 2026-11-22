@@ -10,6 +10,7 @@
 //!   where they meet one, and unboxed only through checked conversions.
 
 mod class;
+mod closure;
 mod coll;
 
 use pyfast_analysis::Plan;
@@ -79,6 +80,7 @@ pub fn emit(prog: &Program, plan: &Plan, file_name: &str, py_paths: &[String]) -
     }
     class::emit_classes(prog, plan, &mut out);
     class::emit_unions(prog, &mut out);
+    closure::emit_boxers(prog, &mut out);
     for s in prog.specs.iter().filter(|s| plan.is_reachable(s.id)) {
         let f = &m.funcs[s.key.func];
         if f.is_module && f.unit != 0 {
@@ -140,7 +142,7 @@ pub fn emit(prog: &Program, plan: &Plan, file_name: &str, py_paths: &[String]) -
 /// Rust spelling of a Python local. Rust keywords become raw identifiers
 /// (`type` -> `r#type`); names that cannot be raw (`_`, `self`, ...) and
 /// names that could collide with generated temporaries (`__x`) get a `py_` prefix.
-fn rid(name: &str) -> String {
+pub(crate) fn rid(name: &str) -> String {
     const RAW: &[&str] = &[
         "as", "async", "await", "break", "const", "continue", "dyn", "else", "enum", "extern", "false", "fn", "for", "if",
         "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "static", "struct", "trait",
@@ -228,7 +230,7 @@ fn as_float(code: &str, t: Ty) -> String {
 }
 
 /// Wrap a native value as a Python object.
-fn boxed(code: &str, t: Ty) -> String {
+pub(crate) fn boxed(code: &str, t: Ty) -> String {
     match t {
         Ty::Int => format!("rt::py::int({code})"),
         Ty::Float => format!("rt::py::float({code})"),
@@ -237,6 +239,11 @@ fn boxed(code: &str, t: Ty) -> String {
         Ty::None if code == "()" => "rt::py::none()".into(),
         Ty::None => format!("{{ {code}; rt::py::none() }}"),
         Ty::Obj => code.to_string(),
+        Ty::C(_) if t.as_closure().is_some() => format!("box_{}({code})", t.mangle()),
+        Ty::C(_) if t.union_members().is_some_and(|ms| ms.iter().all(|m| m.as_closure().is_some())) => {
+            let arms: Vec<String> = t.union_members().unwrap().iter().map(|m| format!("{}::{}(__f) => box_{}(__f)", t.rust(), m.variant_name(), m.mangle())).collect();
+            format!("match {code} {{ {} }}", arms.join(", "))
+        }
         Ty::C(_) => format!("rt::py::to_py(&{})?", borrow(code)),
     }
 }
@@ -408,23 +415,38 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 writeln!(out, "    if !rt::first_import(&INIT_{name}) {{\n        return Ok(());\n    }}").unwrap();
             }
         } else {
-            let params: Vec<String> = f.params.iter().zip(&s.key.args).map(|(p, t)| format!("{p}: {t}")).collect();
+            let off = pyfast_infer::spec::env_offset(f);
+            let args = &s.key.args[off..];
+            let params: Vec<String> = f.params.iter().zip(args).map(|(p, t)| format!("{p}: {t}")).collect();
             writeln!(out, "/// `{}({}) -> {ret}`, specialized from {file}:{}", f.name, params.join(", "), f.span.line).unwrap();
             // A parameter whose local type is wider than its argument (e.g. a
-            // `None` default later assigned an int) is rebound with a coercion.
-            let widened = |p: &String, t: &Ty| self.local_ty(p).is_some_and(|lt| lt != *t);
-            let params: Vec<String> = f
-                .params
-                .iter()
-                .zip(&s.key.args)
-                .map(|(p, t)| if widened(p, t) { format!("__arg_{}: {}", rid(p).trim_start_matches("r#"), t.rust()) } else { format!("mut {}: {}", rid(p), t.rust()) })
-                .collect();
+            // `None` default later assigned an int) is rebound with a coercion;
+            // a parameter captured by a nested function moves into a cell.
+            let widened = |p: &String, t: &Ty| self.local_ty(p).is_some_and(|lt| lt != *t) || f.cells.contains(p);
+            let mut params: Vec<String> = if off == 1 { vec![format!("__env: {}", s.key.args[0].rust())] } else { vec![] };
+            params.extend(
+                f.params
+                    .iter()
+                    .zip(args)
+                    .map(|(p, t)| if widened(p, t) { format!("__arg_{}: {}", rid(p).trim_start_matches("r#"), t.rust()) } else { format!("mut {}: {}", rid(p), t.rust()) }),
+            );
             writeln!(out, "fn {}({}) -> PyResult<{}> {{", s.mangled, params.join(", "), ret.rust()).unwrap();
-            for (p, t) in f.params.iter().zip(&s.key.args) {
+            for (p, t) in f.params.iter().zip(args) {
                 if widened(p, t) {
-                    let lt = self.local_ty(p).unwrap();
+                    let lt = self.local_ty(p).unwrap_or(*t);
                     let arg = format!("__arg_{}", rid(p).trim_start_matches("r#"));
-                    writeln!(out, "    let mut {}: {} = {};", rid(p), lt.rust(), coerce(arg, *t, lt)).unwrap();
+                    if f.cells.contains(p) {
+                        writeln!(out, "    let {}: rt::Cell<{}> = rt::cell();\n    rt::cset(&{}, {});", rid(p), lt.rust(), rid(p), coerce(arg, *t, lt)).unwrap();
+                    } else {
+                        writeln!(out, "    let mut {}: {} = {};", rid(p), lt.rust(), coerce(arg, *t, lt)).unwrap();
+                    }
+                }
+            }
+            if off == 1 {
+                if let Some((_, caps)) = s.key.args[0].as_closure() {
+                    for (i, (n, t)) in f.captures.iter().zip(caps).enumerate() {
+                        writeln!(out, "    let {}: rt::Cell<{}> = __env.0.{i}.clone();", rid(n), t.rust()).unwrap();
+                    }
                 }
             }
             if self.plan.is_recursive(s.id) {
@@ -437,7 +459,9 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 continue;
             }
             let Some(t) = self.local_ty(name) else { continue };
-            if s.maybe_unbound.contains(name) {
+            if f.cells.contains(name) {
+                writeln!(out, "    let {}: rt::Cell<{}> = rt::cell();", rid(name), t.rust()).unwrap();
+            } else if s.maybe_unbound.contains(name) {
                 writeln!(out, "    let mut {}: Option<{}> = None;", rid(name), t.rust()).unwrap();
             } else if captured {
                 // Closures (try/with bodies) cannot capture uninitialised locals.
@@ -476,6 +500,10 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
         let to = self.local_ty(target).unwrap_or(from);
         let code = coerce(code, from, to);
         let var = rid(target);
+        if self.is_cell(target) {
+            writeln!(out, "{ind}rt::cset(&{var}, {code});").unwrap();
+            return;
+        }
         if self.spec.maybe_unbound.contains(target) {
             writeln!(out, "{ind}{var} = Some({code});").unwrap();
         } else {
@@ -914,6 +942,12 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
         let code = match &e.kind {
             ExprKind::New { class, args, kwargs } => self.new_instance(e, *class, args, kwargs),
             ExprKind::ClassRef(_) => "()".into(),
+            ExprKind::MakeClosure { captures, defaults, .. } => self.make_closure(captures, defaults),
+            ExprKind::EnvDefault(_) => unreachable!("closure default outside a call"),
+            ExprKind::EnvRead { value, index } => {
+                let (v, _) = self.expr(value);
+                format!("rt::cget(&({v}).0.{index}, \"default\")?")
+            }
             ExprKind::GetAttr { obj, name } if name == "__name__" && t == Ty::Str && pyfast_infer::spec::type_call_arg(obj).is_some() => {
                 let x = pyfast_infer::spec::type_call_arg(obj).unwrap();
                 let (c, xt) = self.expr(x);
@@ -988,6 +1022,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             ExprKind::Global { unit, name } => format!("rt::gget(&{}, {name:?})?", gname(*unit, name)),
             ExprKind::Bool(b) => b.to_string(),
             ExprKind::NoneLit => "()".into(),
+            ExprKind::Local(n) if self.is_cell(n) => format!("rt::cget(&{}, {n:?})?", rid(n)),
             ExprKind::Local(n) => {
                 let copy = !t.is_clone();
                 if self.spec.maybe_unbound.contains(n) {
@@ -1204,6 +1239,10 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                         let ExprKind::GetAttr { obj, .. } = &func.kind else { unreachable!() };
                         self.method_call(e, obj, fid, kind, args, kwargs)
                     }
+                    CallClass::ClosureCall => self.closure_call(e, func, args, kwargs),
+                    CallClass::Builtin(name) if matches!(name.as_str(), "map" | "filter") || (matches!(name.as_str(), "sorted" | "min" | "max") && kwargs.iter().any(|(k, _)| k == "key")) => {
+                        self.higher_order(&name, args, kwargs, t)
+                    }
                     CallClass::UnionMethod(name) => {
                         let ExprKind::GetAttr { obj, .. } = &func.kind else { unreachable!() };
                         self.union_method(e, obj, &name, args, kwargs, t)
@@ -1216,7 +1255,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                             .unwrap()
                             .iter()
                             .filter(|m| cs.iter().any(|k| self.prog.module.is_subclass(m.class_id().unwrap(), *k)))
-                            .map(|m| format!("{ur}::{}(_)", m.rust()))
+                            .map(|m| format!("{ur}::{}(_)", m.variant_name()))
                             .collect();
                         format!("matches!({c}, {})", hits.join(" | "))
                     }

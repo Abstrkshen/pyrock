@@ -141,14 +141,19 @@ pub(crate) fn emit_classes(prog: &Program, plan: &Plan, out: &mut String) {
 pub(crate) fn emit_unions(prog: &Program, out: &mut String) {
     for u in Ty::all_unions() {
         let ms = u.union_members().unwrap();
-        if !ms.iter().all(|m| m.class_id().is_some_and(|c| prog.instantiated.contains(&c) || prog.fields.keys().any(|(k, _)| *k == c))) {
+        let classes = ms.iter().all(|m| m.class_id().is_some());
+        if classes && !ms.iter().all(|m| m.class_id().is_some_and(|c| prog.instantiated.contains(&c) || prog.fields.keys().any(|(k, _)| *k == c))) {
+            continue;
+        }
+        if !classes && !ms.iter().all(|m| m.as_closure().is_some()) {
             continue;
         }
         let r = u.rust();
-        let vs: Vec<&str> = ms.iter().map(|m| m.rust()).collect();
+        let vnames: Vec<String> = ms.iter().map(|m| m.variant_name()).collect();
+        let vs: Vec<&str> = vnames.iter().map(|s| s.as_str()).collect();
         writeln!(out, "\n/// `{}`\n#[derive(Clone)]\npub enum {r} {{", u.py_name()).unwrap();
-        for v in &vs {
-            writeln!(out, "    {v}({v}),").unwrap();
+        for (v, m) in vs.iter().zip(&ms) {
+            writeln!(out, "    {v}({}),", m.rust()).unwrap();
         }
         writeln!(out, "}}\n").unwrap();
         let arms = |body: &str| vs.iter().map(|v| format!("Self::{v}(x) => {body}")).collect::<Vec<_>>().join(", ");
@@ -158,13 +163,19 @@ pub(crate) fn emit_unions(prog: &Program, out: &mut String) {
             a.join(", ")
         };
         writeln!(out, "impl Default for {r} {{\n    fn default() -> Self {{\n        Self::{}(Default::default())\n    }}\n}}", vs[0]).unwrap();
-        writeln!(out, "impl {r} {{\n    pub fn is(&self, o: &Self) -> bool {{\n        match (self, o) {{ {} }}\n    }}\n}}", pair_arms("a.is(b)", "false")).unwrap();
+        if classes {
+            writeln!(out, "impl {r} {{\n    pub fn is(&self, o: &Self) -> bool {{\n        match (self, o) {{ {} }}\n    }}\n}}", pair_arms("a.is(b)", "false")).unwrap();
+        }
         writeln!(out, "impl rt::conv::PyFmt for {r} {{\n    fn py_repr(&self) -> rt::Str {{\n        match self {{ {} }}\n    }}\n    fn py_str(&self) -> rt::Str {{\n        match self {{ {} }}\n    }}\n}}", arms("rt::conv::repr_of(x)"), arms("rt::conv::str_of(x)")).unwrap();
         writeln!(out, "impl rt::coll::PyEq for {r} {{\n    fn py_eq(&self, o: &Self) -> bool {{\n        match (self, o) {{ {} }}\n    }}\n}}", pair_arms("rt::coll::PyEq::py_eq(a, b)", "false")).unwrap();
-        writeln!(out, "impl rt::coll::PyOrd for {r} {{\n    fn py_cmp(&self, o: &Self) -> rt::PyResult<std::cmp::Ordering> {{\n        match (self, o) {{ {} }}\n    }}\n}}", pair_arms("rt::coll::PyOrd::py_cmp(a, b)", "Err(rt::Exc::new(\"TypeError\", \"'<' not supported between instances of different classes\"))")).unwrap();
+        if classes {
+            writeln!(out, "impl rt::coll::PyOrd for {r} {{\n    fn py_cmp(&self, o: &Self) -> rt::PyResult<std::cmp::Ordering> {{\n        match (self, o) {{ {} }}\n    }}\n}}", pair_arms("rt::coll::PyOrd::py_cmp(a, b)", "Err(rt::Exc::new(\"TypeError\", \"'<' not supported between instances of different classes\"))")).unwrap();
+        }
         writeln!(out, "impl rt::Truthy for {r} {{\n    fn truthy(&self) -> bool {{\n        match self {{ {} }}\n    }}\n}}", arms("rt::Truthy::truthy(x)")).unwrap();
-        writeln!(out, "impl PartialEq for {r} {{\n    fn eq(&self, o: &Self) -> bool {{\n        rt::coll::PyEq::py_eq(self, o)\n    }}\n}}\nimpl Eq for {r} {{}}").unwrap();
-        writeln!(out, "impl std::hash::Hash for {r} {{\n    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {{\n        match self {{ {} }}\n    }}\n}}", arms("std::hash::Hash::hash(x, h)")).unwrap();
+        if classes {
+            writeln!(out, "impl PartialEq for {r} {{\n    fn eq(&self, o: &Self) -> bool {{\n        rt::coll::PyEq::py_eq(self, o)\n    }}\n}}\nimpl Eq for {r} {{}}").unwrap();
+            writeln!(out, "impl std::hash::Hash for {r} {{\n    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {{\n        match self {{ {} }}\n    }}\n}}", arms("std::hash::Hash::hash(x, h)")).unwrap();
+        }
     }
 }
 
@@ -182,7 +193,7 @@ impl FnEmitter<'_, '_> {
     }
 
     /// Call specialization `func` with receiver code(s) and bound arguments.
-    fn call_bound(&mut self, func: FuncId, lead: Vec<(String, Ty)>, bound: &[Expr], order: &[usize]) -> String {
+    pub(crate) fn call_bound(&mut self, func: FuncId, lead: Vec<(String, Ty)>, bound: &[Expr], order: &[usize]) -> String {
         let mut vals: Vec<(String, Ty)> = bound.iter().map(|a| self.expr(a)).collect();
         let key = SpecKey { func, args: lead.iter().map(|l| l.1).chain(vals.iter().map(|v| v.1)).collect() };
         let callee = self.prog.spec(&key).expect("missing method specialization").mangled.clone();
@@ -266,7 +277,7 @@ impl FnEmitter<'_, '_> {
             let meth = self.prog.module.find_method(c, name).cloned().unwrap();
             let rt = self.prog.method_type(self.spec, m, meth.func, meth.kind, args, kwargs).unwrap_or(t);
             let call = self.method_call_on(e, "__m".into(), m, meth.func, meth.kind, args, kwargs);
-            arms.push(format!("{ur}::{}(__m) => {}", m.rust(), crate::coll::convert(&call, rt, t)));
+            arms.push(format!("{ur}::{}(__m) => {}", m.variant_name(), crate::coll::convert(&call, rt, t)));
         }
         format!("{{ let __u = {o}; match __u {{ {} }} }}", arms.join(", "))
     }
@@ -329,7 +340,7 @@ impl FnEmitter<'_, '_> {
                 .collect();
             let joined = results.iter().skip(1).try_fold(results[0].1, |a, r| pyfast_infer::native::ty_join(a, r.1, true)).unwrap_or(Ty::Obj);
             let ur = recv.1.rust();
-            let arms: Vec<String> = ms.iter().zip(&results).map(|(m, (code, rt))| format!("{ur}::{}(__m) => {}", m.rust(), crate::coll::convert(code, *rt, joined))).collect();
+            let arms: Vec<String> = ms.iter().zip(&results).map(|(m, (code, rt))| format!("{ur}::{}(__m) => {}", m.variant_name(), crate::coll::convert(code, *rt, joined))).collect();
             return Some(format!("{{ let __u = {}; {lets}match __u {{ {} }} }}", recv.0, arms.join(", ")));
         }
         let c = recv.1.class_id()?;
@@ -349,7 +360,7 @@ impl FnEmitter<'_, '_> {
             for m in ms {
                 let mt = self.prog.attr_type(self.spec, m, name).unwrap_or(t);
                 let code = self.attr_code("__m".into(), m, name, mt);
-                arms.push(format!("{ur}::{}(__m) => {}", m.rust(), crate::coll::convert(&code, mt, t)));
+                arms.push(format!("{ur}::{}(__m) => {}", m.variant_name(), crate::coll::convert(&code, mt, t)));
             }
             return format!("{{ let __u = {o}; match __u {{ {} }} }}", arms.join(", "));
         }
@@ -408,7 +419,7 @@ impl FnEmitter<'_, '_> {
                 .map(|m| {
                     let c = m.class_id().unwrap();
                     let ft = self.prog.fields.get(&(c, name.to_string())).and_then(|s| s.known()).unwrap_or(vt);
-                    format!("{ur}::{}(__m) => {{ __m.0.borrow_mut().{} = Some({}); }}", m.rust(), field_ident(name), crate::coll::convert("__v.clone()", vt, ft))
+                    format!("{ur}::{}(__m) => {{ __m.0.borrow_mut().{} = Some({}); }}", m.variant_name(), field_ident(name), crate::coll::convert("__v.clone()", vt, ft))
                 })
                 .collect();
             return format!("{ind}{{\n{ind}    let __v = {v};\n{ind}    match {o} {{ {} }}\n{ind}}}", arms.join(", "));

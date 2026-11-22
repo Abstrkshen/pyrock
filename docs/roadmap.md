@@ -55,9 +55,9 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 
 ## Phase 4: Closures and callbacks
 
-- [ ] Lambdas, nested functions, captured variables, `nonlocal`
-- [ ] Functions as values (`Fn` type), passing native functions to native functions
-- [ ] Native functions callable from Python (callbacks, decorators such as `@app.get`)
+- [x] Lambdas, nested functions, captured variables, `nonlocal`, defaults evaluated at creation
+- [x] Functions as values, passing native functions to native functions, `key=` functions, `map`/`filter`, decorators, dispatch tables
+- [x] Native functions callable from Python (callbacks such as `re.sub(p, fn, s)`, `functools.lru_cache`, LangChain `RunnableLambda`)
 - [ ] `f(*args, **kwargs)` forwarding into a native function's fixed parameters (wrappers)
 
 ## Phase 5: Rich Rust and C interop
@@ -284,3 +284,29 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
   is decided statically when all variants agree, else by a `matches!` on the variant.
 * Classes stay closed over the program: a union never holds a Python object.
 * Test: `tests/differential/polymorphism.py` (passes `--mode native-only`).
+
+### Phase 4.1: closures, function values, callbacks (2026-11-22)
+
+* Defunctionalization: a function value's type names its function and the types of its
+  captured variables (`Comp::Closure(f, caps)`), like a Rust closure type. Calls through a
+  value are static calls of a specialization; nested functions take their environment
+  (`rt::Env((cells..))`) as the first argument. Values of different functions joined in one
+  place form a union (an enum) with per-variant dispatch.
+* Captured variables live in shared cells (`rt::Cell<T> = Rc<RefCell<Option<T>>>`) in the
+  defining function: late binding (`[lambda: i for ...]` sees the final `i`) and `nonlocal`
+  writes behave like CPython; a `nonlocal` write that widens a type flows back to the
+  enclosing function. Non-literal defaults of nested functions (`lambda x, i=i:`) are
+  evaluated at creation and stored in extra environment slots (`EnvDefault`/`EnvRead`).
+* Decorators: `@dec def f` at module level makes `f` a module variable holding `dec(f)`;
+  nested `def`s apply their decorators the same way.
+* Key functions and higher-order builtins (`sorted`/`min`/`max` with `key=`,
+  `list.sort(key=)`, `map`, `filter`) are native; builtins passed as values in those
+  positions (`key=len`) become one-argument lambdas.
+* Escape: a function value reaching CPython is wrapped as a `NativeFn` pyclass
+  (`rt::py::native_fn`, generated `box_<type>`), which binds Python arguments (keywords,
+  defaults, CPython's TypeError texts) and calls an all-`object` specialization. Native
+  exceptions become Python exceptions and back.
+* Tests: `tests/differential/closures.py` (native-only), `tests/differential/callbacks.py`
+  (`re.sub` with native callbacks, `functools.reduce`, `@functools.lru_cache` on a native
+  recursive function, exceptions through Python). The `.ignore/samples/langchain` module
+  now compiles natively (its lambda is passed to LangChain as a native callable).

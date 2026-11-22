@@ -718,3 +718,85 @@ pub fn kw_items(o: &Obj) -> PyResult<Vec<(String, Obj)>> {
         Ok(out)
     })
 }
+
+// ---- native functions callable from Python ----
+
+/// A native function value exposed to CPython (callbacks, decorators,
+/// `RunnableLambda(lambda x: ...)`). Single-threaded: CPython calls it while
+/// holding the GIL on the thread that created it.
+#[pyclass(unsendable, name = "native_function")]
+pub struct NativeFn {
+    name: String,
+    #[allow(clippy::type_complexity)]
+    f: Box<dyn Fn(Vec<Obj>, Vec<(String, Obj)>) -> PyResult<Obj>>,
+}
+
+/// A native exception as a `PyErr` (the original object if it came from Python).
+pub fn to_pyerr(e: Exc) -> PyErr {
+    match exc_obj(&e) {
+        Ok(o) => Python::attach(|py| PyErr::from_value(o.bind(py).clone())),
+        Err(_) => pyo3::exceptions::PyRuntimeError::new_err(e.to_string()),
+    }
+}
+
+#[pymethods]
+impl NativeFn {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __call__(&self, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> pyo3::PyResult<Py<PyAny>> {
+        let a: Vec<Obj> = args.iter().map(own).collect();
+        let mut k = Vec::new();
+        if let Some(d) = kwargs {
+            for (key, v) in d.iter() {
+                k.push((key.extract::<String>()?, own(v)));
+            }
+        }
+        match (self.f)(a, k) {
+            Ok(o) => Ok(o.0),
+            Err(e) => Err(to_pyerr(e)),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<native function {}>", self.name)
+    }
+
+    #[getter]
+    fn __name__(&self) -> String {
+        self.name.clone()
+    }
+}
+
+/// Wrap a native function value as a Python callable.
+pub fn native_fn(name: &str, f: impl Fn(Vec<Obj>, Vec<(String, Obj)>) -> PyResult<Obj> + 'static) -> Obj {
+    Python::attach(|py| {
+        let o = Py::new(py, NativeFn { name: name.to_string(), f: Box::new(f) }).expect("native function object");
+        Obj(o.into_any())
+    })
+}
+
+/// Bind a Python call's arguments to `params` (positional then keyword);
+/// `None` marks a parameter left to its default.
+pub fn bind_py_args(fname: &str, params: &[&str], args: Vec<Obj>, kwargs: Vec<(String, Obj)>) -> PyResult<Vec<Option<Obj>>> {
+    if args.len() > params.len() {
+        return Err(Exc::new("TypeError", format!("{fname}() takes {} positional argument(s) but {} were given", params.len(), args.len())));
+    }
+    let mut out: Vec<Option<Obj>> = vec![None; params.len()];
+    for (i, a) in args.into_iter().enumerate() {
+        out[i] = Some(a);
+    }
+    for (k, v) in kwargs {
+        let Some(i) = params.iter().position(|p| *p == k) else {
+            return Err(Exc::new("TypeError", format!("{fname}() got an unexpected keyword argument '{k}'")));
+        };
+        if out[i].is_some() {
+            return Err(Exc::new("TypeError", format!("{fname}() got multiple values for argument '{k}'")));
+        }
+        out[i] = Some(v);
+    }
+    Ok(out)
+}
+
+/// A missing required argument (CPython's TypeError).
+pub fn missing_arg(fname: &str, param: &str) -> Exc {
+    Exc::new("TypeError", format!("{fname}() missing 1 required positional argument: '{param}'"))
+}

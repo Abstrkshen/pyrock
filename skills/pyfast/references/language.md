@@ -6,6 +6,8 @@
   (`def f(x, n=None, *, sep=",")`) and keyword arguments at the call are native.
 * Module-level variables in functions (`RATE * x`), `global count`, `config.DEBUG`,
   `from config import LIMIT`: typed global cells, `NameError` if read before assignment.
+* Lambdas, nested functions, closures (`nonlocal`), decorators, function values as
+  arguments (`sorted(key=...)`, `map`, callbacks into Python libraries).
 * Classes: methods, inferred instance attributes, class attributes, `@property`,
   `@staticmethod`/`@classmethod`, dunders, `@dataclass`, single inheritance with `super()`,
   user exception classes, and polymorphism over several classes (a generated enum).
@@ -74,7 +76,6 @@ values (mixed types). These keep exact Python semantics, including aliasing.
 | Class with a CPython base class or a metaclass | Keep it in an imported `.py` (the module falls back to CPython, P220) |
 | Native instance passed to a CPython function (P230) | Pass plain values (`obj.x`, a dict) |
 | `yield` generators | Build and return a list |
-| `lambda`, nested `def`, closures | A top-level function |
 | Non-literal default (`def f(x=[])`) | `def f(x=None): if x is None: x = []` |
 | `nonlocal` | Return the new value (closures are phase 4) |
 | decorators | Call the wrapper explicitly |

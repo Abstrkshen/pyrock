@@ -63,6 +63,9 @@ pub enum Comp {
     Type(ClassId, &'static str),
     /// A closed union of native class instances (`Square | Circle`), a Rust enum.
     Union(Vec<Ty>),
+    /// A function value: which function (its id), the types of its captured
+    /// variables, and its display name. Calls dispatch statically.
+    Closure(u32, Vec<Ty>, &'static str),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -126,7 +129,12 @@ impl Ty {
             ),
             Comp::Class(_, rust) => (rust.to_string(), rust.to_string(), rust.to_string()),
             Comp::Type(_, rust) => (format!("type[{rust}]"), "()".to_string(), format!("type_{rust}")),
-            Comp::Union(ts) => (join(ts, Ty::py_name, " | "), format!("U_{}", join(ts, Ty::rust, "_")), format!("u_{}", join(ts, Ty::mangle, "_"))),
+            Comp::Union(ts) => (join(ts, Ty::py_name, " | "), format!("U_{}", join(ts, Ty::mangle, "_")), format!("u_{}", join(ts, Ty::mangle, "_"))),
+            Comp::Closure(f, caps, name) => (
+                format!("function {name}"),
+                if caps.is_empty() { "rt::Env<()>".to_string() } else { format!("rt::Env<({},)>", caps.iter().map(|c| format!("rt::Cell<{}>", c.rust())).collect::<Vec<_>>().join(", ")) },
+                format!("fn{f}_{}", join(caps, Ty::mangle, "_")),
+            ),
             Comp::Func(ps, r) => (
                 format!("Callable[[{}], {}]", join(ps, Ty::py_name, ", "), r.py_name()),
                 format!("rt::Func<({}), {}>", ps.iter().map(|p| format!("{},", p.rust())).collect::<String>(), r.rust()),
@@ -180,12 +188,32 @@ impl Ty {
                 _ => all.push(t),
             }
         }
-        all.sort_by_key(|t| t.class_id());
+        all.sort_by_key(|t| (t.class_id(), t.mangle()));
         all.dedup();
         if all.len() == 1 {
             return all[0];
         }
         Ty::comp(Comp::Union(all))
+    }
+
+    pub fn closure(func: u32, caps: Vec<Ty>, name: &str) -> Ty {
+        Ty::comp(Comp::Closure(func, caps, Box::leak(name.to_string().into_boxed_str())))
+    }
+
+    /// (function, captured variable types) of a function value.
+    pub fn as_closure(self) -> Option<(usize, Vec<Ty>)> {
+        match self.as_comp() {
+            Some(Comp::Closure(f, caps, _)) => Some((f as usize, caps)),
+            _ => None,
+        }
+    }
+
+    /// Enum variant name of a union member (the class name, or the mangled type).
+    pub fn variant_name(self) -> String {
+        match self.class_id() {
+            Some(_) => self.rust().to_string(),
+            None => format!("V_{}", self.mangle()),
+        }
     }
 
     pub fn union_members(self) -> Option<Vec<Ty>> {

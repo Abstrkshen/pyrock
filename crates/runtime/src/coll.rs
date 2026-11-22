@@ -1345,3 +1345,60 @@ impl<K: Clone + Eq + Hash, V: Clone, T> ViewCursor<K, V, T> {
         Ok(self.c.next()?.map(self.f))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Key functions (`sorted(xs, key=f)`, `max(xs, key=f)`, `xs.sort(key=f)`)
+
+/// Decorate-sort-undecorate: keys are computed once, in order (a raising key
+/// function stops at the same element as CPython), then a stable sort.
+fn keyed_sort<T, K: PyOrd>(v: Vec<T>, mut key: impl FnMut(&T) -> PyResult<K>, reverse: bool) -> PyResult<Vec<T>> {
+    let mut keyed: Vec<(K, T)> = Vec::with_capacity(v.len());
+    for x in v {
+        keyed.push((key(&x)?, x));
+    }
+    let mut err = None;
+    keyed.sort_by(|a, b| {
+        if err.is_some() {
+            return Ordering::Equal;
+        }
+        let r = if reverse { b.0.py_cmp(&a.0) } else { a.0.py_cmp(&b.0) };
+        r.unwrap_or_else(|e| {
+            err = Some(e);
+            Ordering::Equal
+        })
+    });
+    match err {
+        Some(e) => Err(e),
+        None => Ok(keyed.into_iter().map(|(_, x)| x).collect()),
+    }
+}
+
+pub fn sorted_by_key<T, K: PyOrd>(v: Vec<T>, key: impl FnMut(&T) -> PyResult<K>, reverse: bool) -> PyResult<List<T>> {
+    Ok(List::from_vec(keyed_sort(v, key, reverse)?))
+}
+
+/// `min(xs, key=f)` / `max(xs, key=f)`: the first extreme element.
+pub fn min_by_key<T, K: PyOrd>(v: Vec<T>, mut key: impl FnMut(&T) -> PyResult<K>, want_max: bool) -> PyResult<T> {
+    let mut it = v.into_iter();
+    let first = it.next().ok_or_else(|| Exc::new("ValueError", format!("{}() iterable argument is empty", if want_max { "max" } else { "min" })))?;
+    let mut best_k = key(&first)?;
+    let mut best = first;
+    for x in it {
+        let k = key(&x)?;
+        let better = if want_max { k.py_cmp(&best_k)? == Ordering::Greater } else { k.py_cmp(&best_k)? == Ordering::Less };
+        if better {
+            best = x;
+            best_k = k;
+        }
+    }
+    Ok(best)
+}
+
+impl<T: Clone> List<T> {
+    /// `xs.sort(key=f, reverse=r)`
+    pub fn sort_by_key<K: PyOrd>(&self, key: impl FnMut(&T) -> PyResult<K>, reverse: bool) -> PyResult<()> {
+        let v = keyed_sort(self.to_vec(), key, reverse)?;
+        *self.0.borrow_mut() = v;
+        Ok(())
+    }
+}

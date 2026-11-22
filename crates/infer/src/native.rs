@@ -33,10 +33,29 @@ pub fn ty_join(a: Ty, b: Ty, boxing: bool) -> Option<Ty> {
         return ty_join(a, y, boxing).map(Ty::opt);
     }
     let elem = |x: Ty, y: Ty| ty_join(x, y, boxing).or(boxing.then_some(Ty::Obj));
-    // Instances of different native classes: a closed union (a Rust enum).
-    let classy = |t: Ty| t.class_id().is_some() || t.union_members().is_some();
-    if classy(a) && classy(b) {
-        return Some(Ty::union(vec![a, b]));
+    // The same function with captured variables of different types.
+    if let (Some((fa, ca)), Some((fb, cb))) = (a.as_closure(), b.as_closure()) {
+        if fa == fb && ca.len() == cb.len() {
+            let caps: Option<Vec<Ty>> = ca.iter().zip(&cb).map(|(x, y)| ty_join(*x, *y, boxing)).collect();
+            let Some(Comp::Closure(_, _, name)) = a.as_comp() else { unreachable!() };
+            return Some(Ty::closure(fa as u32, caps?, name));
+        }
+    }
+    // Instances of different native classes (or different functions): a
+    // closed union (a Rust enum).
+    let member = |t: Ty, f: &dyn Fn(Ty) -> bool| f(t) || t.union_members().is_some_and(|ms| ms.iter().all(|m| f(*m)));
+    let is_class = |t: Ty| t.class_id().is_some();
+    let is_fn = |t: Ty| t.as_closure().is_some();
+    if (member(a, &is_class) && member(b, &is_class)) || (member(a, &is_fn) && member(b, &is_fn)) {
+        // Members that are the same function join their captures.
+        let mut ms: Vec<Ty> = a.union_members().unwrap_or(vec![a]);
+        for x in b.union_members().unwrap_or(vec![b]) {
+            match ms.iter().position(|m| m.as_closure().is_some() && m.as_closure().map(|c| c.0) == x.as_closure().map(|c| c.0)) {
+                Some(i) => ms[i] = ty_join(ms[i], x, boxing)?,
+                None => ms.push(x),
+            }
+        }
+        return Some(Ty::union(ms));
     }
     match (a.as_comp()?, b.as_comp()?) {
         (Comp::List(x), Comp::List(y)) => Some(Ty::list(elem(x, y)?)),
@@ -338,8 +357,8 @@ pub fn method(recv: Ty, name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing
             }
             "sort" => {
                 check!(arity(0, 0));
-                if kw("key").is_some() {
-                    return err("sort(key=...) needs a function value (closures are phase 4)".into());
+                if kw("key").is_some_and(|t| t.as_closure().is_none()) {
+                    return err("sort(key=...) needs a native function value".into());
                 }
                 m(Ty::None)
             }
@@ -501,14 +520,14 @@ pub fn builtin(name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing: bool) -
         }
     };
     match name {
-        "sorted" if n == 1 && only_kw(&["reverse"]) => {
-            if kwargs.iter().any(|(k, _)| k == "key") {
+        "sorted" if n == 1 && only_kw(&["reverse", "key"]) => {
+            if kwargs.iter().any(|(k, t)| k == "key" && t.as_closure().is_none()) {
                 return None;
             }
             Some(elem(args[0]).map(Ty::list).ok_or_else(|| format!("'{}' object is not iterable", args[0])))
         }
         "sum" if (1..=2).contains(&n) && kwargs.is_empty() => numeric_sum(elem(args[0])?, args.get(1).copied()),
-        "min" | "max" if n == 1 && kwargs.is_empty() => {
+        "min" | "max" if n == 1 && (kwargs.is_empty() || kwargs.iter().all(|(k, t)| k == "key" && t.as_closure().is_some())) => {
             let e = elem(args[0])?;
             Some(if e.is_never() { Err(format!("{name}() iterable argument is empty")) } else { Ok(e) })
         }
@@ -592,6 +611,9 @@ pub fn builtin(name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing: bool) -
         "pow" if n == 2 && kwargs.is_empty() => None, // the operator handles `**`
         "hex" | "oct" | "bin" if n == 1 && kwargs.is_empty() && int_like(base(args[0])) => Some(Ok(Ty::Str)),
         "isinstance" if n == 2 => None, // decided by `isinstance_static`
+        // With a native function value (checked by inference): eager lists.
+        "map" if n >= 2 && args[0].as_closure().is_some() => Some(Ok(Ty::Obj)),
+        "filter" if n == 2 && args[0].as_closure().is_some() => Some(Ok(Ty::Obj)),
         _ => None,
     }
 }
