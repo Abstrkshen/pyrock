@@ -29,6 +29,8 @@ pub fn binop(op: BinOp, l: Ty, r: Ty, rhs_literal: Option<i64>) -> Option<Ty> {
         return Some(Ty::Obj); // CPython operator protocol
     }
     match op {
+        // No native type supports `@` (TypeError, as in CPython).
+        MatMul => None,
         Add => {
             if l == Ty::Str && r == Ty::Str {
                 Some(Ty::Str)

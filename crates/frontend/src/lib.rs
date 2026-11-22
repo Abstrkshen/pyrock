@@ -1456,6 +1456,7 @@ impl<'l> Lowerer<'l> {
             "Mult" => BinOp::Mul,
             "Div" => BinOp::Div,
             "FloorDiv" => BinOp::FloorDiv,
+            "MatMult" => BinOp::MatMul,
             "Mod" => BinOp::Mod,
             "Pow" => BinOp::Pow,
             "BitAnd" => BinOp::BitAnd,
@@ -1479,6 +1480,15 @@ impl<'l> Lowerer<'l> {
     }
 
     fn lower_index(&mut self, idx: &Value) -> Option<Expr> {
+        // `a[:, 4]`, `a[1:3, ::2]` (numpy): a tuple whose items may be slices.
+        if ty(idx) == "Tuple" && arr(idx, "elts").iter().any(|x| ty(x) == "Slice") {
+            let sp = self.span(idx);
+            let mut items = Vec::new();
+            for x in arr(idx, "elts") {
+                items.push(self.lower_index(x)?);
+            }
+            return Some(Expr { kind: ExprKind::Tuple(items), span: sp });
+        }
         if ty(idx) != "Slice" {
             return self.lower_expr(idx);
         }

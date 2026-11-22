@@ -697,6 +697,7 @@ pub fn dunder_name(op: BinOp) -> &'static str {
         BinOp::BitXor => "xor",
         BinOp::LShift => "lshift",
         BinOp::RShift => "rshift",
+        BinOp::MatMul => "matmul",
     }
 }
 

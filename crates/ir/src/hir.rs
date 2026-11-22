@@ -549,6 +549,8 @@ pub enum BinOp {
     BitXor,
     LShift,
     RShift,
+    /// `@` (only Python objects and classes defining `__matmul__`).
+    MatMul,
 }
 
 impl BinOp {
@@ -566,6 +568,7 @@ impl BinOp {
             BinOp::BitXor => "^",
             BinOp::LShift => "<<",
             BinOp::RShift => ">>",
+            BinOp::MatMul => "@",
         }
     }
 
@@ -584,6 +587,7 @@ impl BinOp {
             BinOp::BitXor => "BitXor",
             BinOp::LShift => "LShift",
             BinOp::RShift => "RShift",
+            BinOp::MatMul => "MatMul",
         }
     }
 
@@ -602,6 +606,7 @@ impl BinOp {
             BinOp::BitXor => "bitxor",
             BinOp::LShift => "lshift",
             BinOp::RShift => "rshift",
+            BinOp::MatMul => "matmul",
         }
     }
 }
