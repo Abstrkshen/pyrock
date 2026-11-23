@@ -85,7 +85,7 @@ an imported `.py`, which falls back to CPython),
 
 Not supported either: `match`, `NamedTuple` subclasses,
 multiple inheritance, method decorators other than `@property`/`@staticmethod`/`@classmethod`.
-On the standard library as it is, 61% of functions are accepted (`docs/coverage.md` in the repo).
+On the standard library as it is, 62% of functions are accepted (`docs/coverage.md` in the repo).
 
 See [references/language.md](references/language.md) for the precise subset, semantics and
 the rewrites that make code compile.

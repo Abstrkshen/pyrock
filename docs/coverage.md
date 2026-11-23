@@ -17,9 +17,9 @@ covered.
   tuples, classes, closures, generators, coroutines) is native. Values from CPython imports
   (numpy arrays, sockets, `re` matches, ...) stay Python objects; in hybrid mode they work
   through CPython at reported boundaries, and native-only mode rejects them.
-* **Real code, as it is:** 61% of the functions and methods in the standard library pass
-  (62% of their lines), and 68% / 72% of those in the `requests` / `huggingface_hub`
-  packages. Whole modules pass much less often (40 of 167 stdlib modules), because one
+* **Real code, as it is:** 62% of the functions and methods in the standard library pass,
+  and 68% / 73% / 41% of those in the `requests` / `huggingface_hub` / `langchain_core`
+  packages. Whole modules pass much less often (41 of 167 stdlib modules), because one
   blocker in a module stops that whole module.
 * **Code written for pyfast:** the 21 samples, 3 demos and 14 user samples all compile; the
   fully native ones need no CPython at all.
@@ -78,9 +78,10 @@ Results (pyfast 0.1.0, CPython 3.12.3, 2026-11-23):
 
 | Corpus | Modules with no error | Functions + methods accepted |
 |---|---|---|
-| CPython standard library (top-level modules) | 40 / 167 (24%) | 4140 / 6823 (60.7%; 61.5% of lines) |
+| CPython standard library (top-level modules) | 41 / 167 (25%) | 4260 / 6823 (62.4%; 62.2% of lines) |
 | `requests` (all modules, in place) | 9 / 19 | 182 / 267 (68.2%; 79.7% of lines) |
-| `huggingface_hub` (all modules, in place) | 52 / 182 | 1517 / 2103 (72.1%) |
+| `huggingface_hub` (all modules, in place) | 53 / 182 | 1538 / 2103 (73.1%) |
+| `langchain_core` (all modules, in place) | 45 / 188 | 969 / 2339 (41.4%) |
 
 Before phase 8 started (same day): stdlib 14 modules and 54.3% of functions. The packages
 were then measured one top-level file at a time with relative imports rejected (`requests`
@@ -107,22 +108,24 @@ left out because most of them follow from another blocker):
 
 | Count | Blocker | Typical source |
 |---|---|---|
-| 152 | Method decorator other than `@property`/`@staticmethod`/`@classmethod` | `@abstractmethod` (107), `@functools.cached_property`, `@lru_cache`, `@contextmanager` |
 | 110 | Computed class-body assignment | `__add__, __radd__ = _operator_fallbacks(...)`, dispatch tables |
-| 101 | Base class that isn't a native class | `Enum`, `NamedTuple`, `dict`, `threading.Thread`, ABCs |
-| 41 | Class keywords | `metaclass=ABCMeta` |
-| 40 | `class` inside a function or block | |
+| 96 | Base class that isn't a native class | `NamedTuple`, `dict`, `threading.Thread`, `collections.abc` ABCs |
+| 44 | `class` inside a function or block, `match` | |
+| 42 | Method decorator other than `@property`/`@staticmethod`/`@classmethod`/`@abstractmethod` | `@functools.cached_property`, `@lru_cache`, `@contextmanager` |
 | 39 | Multiple inheritance | mixins |
 | 33 | `eval`/`exec`/`globals()`/`locals()` without a namespace | |
+| 29 | Class keywords | a metaclass other than `ABCMeta` |
 | 27 | Other statements in a class body | `if` / `for` in a class body |
 | 25 | A module-level name bound both by `def`/`import` and by assignment | `try: from _c import f` / `except: f = None` |
 | 24 | A method or class attribute used as a value | `Class.method` passed around |
-| 22 | Class decorators | `@functools.total_ordering`, `@dataclass(frozen=True)` options |
+| 22 | Class decorators | `@functools.total_ordering` |
 | 22 | Adding class attributes after the class statement | `Cls.x = ...` at module level |
 | 20 | `del` of a function or import name | module cleanup: `del _f`, `del re` |
 
-In third-party packages, CPython base classes (`pydantic.BaseModel`, `Enum`, ABCs) and method
-and class decorators lead.
+In third-party packages, method decorators lead (`langchain_core`: 542, mostly its own
+decorators such as `@deprecated` and `@override`), then CPython base classes
+(`pydantic.BaseModel`, `typing.Protocol`, `TypedDict`) and `f(*args)` calls into native
+functions with fixed parameters (121).
 
 ## What this doesn't cover
 

@@ -18,10 +18,12 @@ exception line.
 ## How much of Python
 
 52 of the 55 statement and expression kinds of Python 3.12 compile natively. The missing
-ones are `match`, `type X = ...` and `except*`. Measured on code as it is, 61% of the
-standard library's functions and methods are accepted, and 33–43% of those in `requests`,
-`huggingface_hub` and `langchain_core`. Library code leans on `abc`/`functools` decorators,
-`Enum`/`NamedTuple` classes and mixins, which are the main gaps.
+ones are `match`, `type X = ...` and `except*`. Measured on code as it is, 62% of the
+standard library's functions and methods are accepted, and 68%, 73% and 41% of those in the
+`requests`, `huggingface_hub` and `langchain_core` packages (each measured in place, with
+their relative imports). The main gaps left are other decorators (`functools`,
+library-specific ones), CPython base classes (`NamedTuple`, `pydantic`, `Protocol`), mixins
+and computed class-body assignments.
 Details and the ranked blockers: [coverage.md](coverage.md).
 
 ## What compiles natively

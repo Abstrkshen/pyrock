@@ -937,3 +937,9 @@ runnable ones print the same as CPython.
 * Compile-time folding decides `isinstance(x, C)` for a local that is exactly a `C` or a
   builtin value, so methods with `isinstance` dispatch are typed per specialization.
 * Tests: `tests/differential/enums.py`, `enums_int_str.py` (native-only).
+
+### Phase 8: coverage after packages, ABCs, dataclass options and enums (2026-11-23)
+
+* `scripts/coverage.py`: stdlib 62.4% of functions and methods (41 modules); `requests`
+  68.2%, `huggingface_hub` 73.1%, `langchain_core` 41.4%, each measured in place. Ranked
+  blockers in [coverage.md](coverage.md).
