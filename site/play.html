@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pyrock playground</title>
+<meta name="description" content="Compile Python with pyrock in your browser: diagnostics, inferred types, CPython boundaries and the generated Rust, from the real compiler built to WebAssembly.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3 28 10v12L16 29 4 22V10z' fill='%23C99A1E'/%3E%3Cpath d='M16 3 28 10 16 17 4 10z' fill='%23E9C25A'/%3E%3Cpath d='M16 17v12L4 22V10z' fill='%23A27A10'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<style>
+.play-head { padding-top: 40px; }
+.play-head h1 { font-size: clamp(2.2rem, 4.6vw, 3.4rem); font-weight: 800; font-variation-settings: "wdth" 80; letter-spacing: -0.025em; }
+.play-head p { color: var(--muted); font-size: 1.1rem; max-width: 66ch; margin: 0.8rem 0 0; }
+
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin: 28px 0 14px; }
+.toolbar label { color: var(--muted); font-size: 0.95rem; display: flex; align-items: center; gap: 8px; }
+.toolbar select { font: inherit; font-size: 0.95rem; color: var(--ink); background: var(--surface); border: 1.5px solid var(--line); border-radius: var(--radius-small); padding: 6px 8px; }
+.seg { display: inline-flex; border: 1.5px solid var(--line); border-radius: 999px; overflow: hidden; }
+.seg button { font: inherit; font-size: 0.92rem; background: transparent; color: var(--muted); border: 0; padding: 6px 14px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.act { font: inherit; font-weight: 650; font-size: 0.97rem; border-radius: var(--radius-small); padding: 8px 18px; cursor: pointer; border: 1.5px solid var(--ink); background: transparent; color: var(--ink); }
+.act.primary { background: var(--native); border-color: var(--native); color: var(--bg); }
+.act:disabled { opacity: 0.5; cursor: progress; }
+.act[hidden] { display: none; }
+.toolbar .status { color: var(--muted); font-size: 0.93rem; margin: 0 0 0 auto; min-height: 1.4em; }
+.toolbar .status.busy::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--pyrite); margin-right: 8px; vertical-align: middle; }
+@media (prefers-reduced-motion: no-preference) { .toolbar .status.busy::before { animation: pulse 1s ease-in-out infinite alternate; } @keyframes pulse { from { opacity: 0.25; } } }
+
+.workbench { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); border: 1px solid var(--line); border-radius: var(--radius-pane); overflow: hidden; min-height: 560px; }
+.editor { display: flex; flex-direction: column; background: var(--py-pane); min-width: 0; }
+.editor .label, .results .label { display: flex; justify-content: space-between; padding: 12px 18px 0; font-size: 0.88rem; color: var(--muted); }
+.editor textarea {
+  flex: 1; width: 100%; min-height: 520px; resize: none; border: 0; outline: none;
+  background: transparent; color: var(--ink);
+  font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.86rem; line-height: 1.6; font-variant-ligatures: none;
+  padding: 10px 18px 18px; tab-size: 4; white-space: pre; overflow: auto;
+}
+.editor textarea:focus-visible { box-shadow: inset 0 0 0 2px var(--pyrite); }
+.results { background: var(--rs-pane); color: var(--rs-ink); display: flex; flex-direction: column; min-width: 0; }
+.results .tabs { padding: 12px 14px 0; margin: 0; }
+.results .tabs [role="tab"] { color: var(--rs-muted); border-color: #3A464C; font-size: 0.9rem; padding: 4px 14px; }
+.results .tabs [role="tab"][aria-selected="true"] { background: var(--rs-ink); color: var(--rs-pane); border-color: var(--rs-ink); }
+.results .tabs [role="tab"] .count { display: inline-block; min-width: 1.4em; margin-left: 6px; padding: 0 5px; border-radius: 999px; background: var(--pyrite); color: #1C2326; font-size: 0.78rem; font-weight: 700; }
+.results [role="tabpanel"] { flex: 1; min-height: 0; overflow: auto; }
+.results pre { margin: 0; padding: 14px 18px 18px; font-size: 0.8rem; line-height: 1.6; white-space: pre; }
+.results .empty { color: var(--rs-muted); font-family: "Bricolage Grotesque", system-ui, sans-serif; font-size: 0.97rem; white-space: normal; padding: 18px; max-width: 52ch; }
+.banner { margin: 14px 18px 0; padding: 10px 14px; border-radius: var(--radius-small); font-size: 0.9rem; line-height: 1.45; }
+.banner.ok { background: rgba(92, 201, 162, 0.14); color: #A9E8CF; }
+.banner.bad { background: rgba(231, 190, 85, 0.14); color: #F0D58C; }
+.banner code { background: transparent; border: 0; color: inherit; padding: 0; }
+.stderr { color: #F4A99A; }
+.results .t-k, .results .t-m { color: var(--rs-key); }
+.results .t-s { color: var(--rs-str); }
+.results .t-n { color: var(--rs-num); }
+.results .t-c { color: var(--rs-muted); }
+.exit { color: var(--rs-muted); }
+
+.where { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; margin-top: 44px; }
+.where div { border-top: 3px solid var(--line); padding-top: 12px; }
+.where div.native { border-top-color: var(--native); }
+.where div.bridge { border-top-color: var(--pyrite); }
+.where p { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.97rem; }
+.fine { margin-top: 28px; color: var(--muted); font-size: 0.95rem; max-width: var(--measure); }
+
+@media (max-width: 900px) {
+  .workbench { grid-template-columns: minmax(0, 1fr); }
+  .editor textarea { min-height: 340px; }
+  .results { min-height: 420px; }
+  .where { grid-template-columns: minmax(0, 1fr); }
+  .toolbar .status { margin-left: 0; width: 100%; }
+}
+</style>
+</head>
+<body>
+<header class="wrap top">
+  <a class="brand" href="./">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 28 10v12L16 29 4 22V10z" fill="#C99A1E"/><path d="M16 3 28 10 16 17 4 10z" fill="#E9C25A"/><path d="M16 17v12L4 22V10z" fill="#A27A10"/></svg>
+    pyrock
+  </a>
+  <nav aria-label="Sections">
+    <a href="play.html" aria-current="page">Playground</a>
+    <a href="./#how">How it works</a>
+    <a href="./#install">Install</a>
+    <a href="./#usage">Usage</a>
+    <a href="./#speed">Speed</a>
+    <a href="./#examples">Examples</a>
+    <a href="https://github.com/Abstrkshen/pyrock">GitHub</a>
+  </nav>
+  <button class="theme" type="button" id="theme" aria-label="Switch colour theme">Theme</button>
+</header>
+
+<main class="wrap">
+  <div class="play-head">
+    <h1>Playground</h1>
+    <p>Write Python and compile it with pyrock in your browser. This is the real compiler,
+    built to WebAssembly: you get the same diagnostics, inferred types, CPython boundaries
+    and Rust code as <code>pyrock check</code>, <code>explain</code> and <code>emit</code>
+    print on your machine.</p>
+  </div>
+
+  <div class="toolbar">
+    <label>Example
+      <select id="example" aria-label="Load an example">
+        <option value="generics">One function, three types</option>
+        <option value="classes">Classes and lists</option>
+        <option value="generators">Generators, dicts, lambdas</option>
+        <option value="packages">A Python package (json)</option>
+        <option value="typeerror">A bug pyrock catches</option>
+      </select>
+    </label>
+    <div class="seg" role="group" aria-label="Compilation mode">
+      <button type="button" id="mode-hybrid" aria-pressed="true">hybrid</button>
+      <button type="button" id="mode-native" aria-pressed="false">native-only</button>
+    </div>
+    <button type="button" class="act" id="compile">Compile</button>
+    <button type="button" class="act primary" id="run">Run</button>
+    <button type="button" class="act" id="stop" hidden>Stop</button>
+    <button type="button" class="act" id="share">Copy link</button>
+    <span class="status" id="status" role="status" aria-live="polite"></span>
+  </div>
+
+  <div class="workbench">
+    <div class="editor">
+      <div class="label"><label for="code">main.py</label><span>Ctrl+Enter runs</span></div>
+      <textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Python source"></textarea>
+    </div>
+    <div class="results">
+      <div class="tabs" role="tablist" aria-label="Results">
+        <button role="tab" id="t-output" aria-controls="p-output" aria-selected="true">Output</button>
+        <button role="tab" id="t-check" aria-controls="p-check" aria-selected="false" tabindex="-1">Check</button>
+        <button role="tab" id="t-explain" aria-controls="p-explain" aria-selected="false" tabindex="-1">Explain</button>
+        <button role="tab" id="t-rust" aria-controls="p-rust" aria-selected="false" tabindex="-1">Rust</button>
+      </div>
+      <div role="tabpanel" id="p-output" aria-labelledby="t-output"><div id="banner"></div><pre id="output"><span class="empty">Run the program to see its output. Compile shows what pyrock makes of it without running it.</span></pre></div>
+      <div role="tabpanel" id="p-check" aria-labelledby="t-check" hidden><pre id="check"><span class="empty">pyrock check: diagnostics appear here after Compile or Run.</span></pre></div>
+      <div role="tabpanel" id="p-explain" aria-labelledby="t-explain" hidden><pre id="explain"><span class="empty">pyrock explain: imports, inferred generic signatures, specializations and CPython boundaries.</span></pre></div>
+      <div role="tabpanel" id="p-rust" aria-labelledby="t-rust" hidden><pre id="rust"><span class="empty">The generated src/main.rs, once the program compiles without errors.</span></pre></div>
+    </div>
+  </div>
+
+  <div class="where">
+    <div class="native">
+      <h3>Compiling</h3>
+      <p>The pyrock compiler from this repository (<code>crates/playground</code>), built to
+      WebAssembly. Inference, specialization, the boundary list and Rust code generation all
+      run in your browser.</p>
+    </div>
+    <div>
+      <h3>Parsing</h3>
+      <p>As on your machine, pyrock parses with CPython's own <code>ast</code> module. Here
+      that CPython is <a href="https://pyodide.org">Pyodide</a> (Python 3.12 in WebAssembly),
+      loaded once, about 10&nbsp;MB.</p>
+    </div>
+    <div class="bridge">
+      <h3>Running</h3>
+      <p>The generated Rust needs Cargo to become a program, and a browser has no Cargo. So
+      Run executes your code with CPython in Pyodide. A program compiled by pyrock prints the
+      same output; its test suite checks that for every feature.</p>
+    </div>
+  </div>
+  <p class="fine">One file only: other imports go to CPython (the standard library works, and
+  Pyodide's packages such as <code>numpy</code> load on first import). Where pyrock
+  documents a difference from CPython, the output here is CPython's: for example, integers
+  beyond 64 bits raise <code>OverflowError</code> in a compiled program. For the native
+  executable, <a href="./#install">install pyrock</a> and run <code>pyrock run main.py</code>.</p>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>pyrock, MIT or Apache-2.0.</span>
+    <nav aria-label="Documentation">
+      <a href="./">Home</a>
+      <a href="https://github.com/Abstrkshen/pyrock#readme">README</a>
+      <a href="https://github.com/Abstrkshen/pyrock/blob/main/docs/subset.md">Supported subset</a>
+      <a href="https://github.com/Abstrkshen/pyrock/releases">Releases</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var root = document.documentElement;
+
+  // Theme, shared with the home page.
+  try { var saved = localStorage.getItem("pyrock-theme"); if (saved) root.dataset.theme = saved; } catch (e) {}
+  document.getElementById("theme").addEventListener("click", function () {
+    var dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem("pyrock-theme", root.dataset.theme); } catch (e) {}
+  });
+
+  var EXAMPLES = {
+    generics: {
+      mode: "hybrid",
+      code: [
+        "def add(a, b):",
+        "    return a + b",
+        "",
+        "def fib(n):",
+        "    return n if n < 2 else fib(n - 1) + fib(n - 2)",
+        "",
+        "# add is called with ints, floats and strings:",
+        "# pyrock compiles three Rust functions from it.",
+        "print(add(1, 2), add(1.5, 2.25), add(\"py\", \"rock\"))",
+        "print(fib(25))",
+      ],
+    },
+    classes: {
+      mode: "native",
+      code: [
+        "from dataclasses import dataclass",
+        "",
+        "@dataclass",
+        "class Body:",
+        "    x: float",
+        "    v: float",
+        "",
+        "    def step(self, dt):",
+        "        self.x += self.v * dt",
+        "",
+        "def simulate(bodies, steps):",
+        "    for _ in range(steps):",
+        "        for b in bodies:",
+        "            b.step(0.01)",
+        "    return sum(b.x for b in bodies)",
+        "",
+        "bodies = [Body(float(i), 1.0 + i / 10) for i in range(100)]",
+        "print(round(simulate(bodies, 1000), 3))",
+      ],
+    },
+    generators: {
+      mode: "native",
+      code: [
+        "def primes():",
+        "    found = []",
+        "    n = 2",
+        "    while True:",
+        "        if all(n % p for p in found):",
+        "            found.append(n)",
+        "            yield n",
+        "        n += 1",
+        "",
+        "def take(it, k):",
+        "    out = []",
+        "    for x in it:",
+        "        if len(out) == k:",
+        "            break",
+        "        out.append(x)",
+        "    return out",
+        "",
+        "print(take(primes(), 10))",
+        "",
+        "words = \"the quick brown fox jumps over the lazy dog the end\".split()",
+        "counts = {}",
+        "for w in words:",
+        "    counts[w] = counts.get(w, 0) + 1",
+        "print(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:3])",
+      ],
+    },
+    packages: {
+      mode: "hybrid",
+      code: [
+        "import json",
+        "",
+        "def total(prices):",
+        "    s = 0.0",
+        "    for p in prices:",
+        "        s += p",
+        "    return s",
+        "",
+        "# json is a CPython module: these lines are boundaries (see Explain).",
+        "# total() gets a native list of floats and compiles to plain Rust.",
+        "order = json.loads('{\"items\": [{\"price\": 9.5}, {\"price\": 3.25}]}')",
+        "prices = [float(item[\"price\"]) for item in order[\"items\"]]",
+        "print(total(prices))",
+        "",
+        "# Switch to native-only: every boundary becomes an error.",
+      ],
+    },
+    typeerror: {
+      mode: "hybrid",
+      code: [
+        "def label(count):",
+        "    return \"items: \" + count",
+        "",
+        "print(label(\"three\"))",
+        "print(label(3))   # CPython fails here when it runs; pyrock refuses to compile it",
+      ],
+    },
+  };
+
+  var $ = function (id) { return document.getElementById(id); };
+  var code = $("code"), status = $("status");
+  var btnCompile = $("compile"), btnRun = $("run"), btnStop = $("stop");
+  var nativeOnly = false;
+
+  // ---- tabs ----
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.results [role="tab"]'));
+  function selectTab(name, focus) {
+    tabs.forEach(function (t) {
+      var on = t.id === "t-" + name;
+      t.setAttribute("aria-selected", on);
+      t.tabIndex = on ? 0 : -1;
+      $(t.getAttribute("aria-controls")).hidden = !on;
+      if (on && focus) t.focus();
+    });
+  }
+  tabs.forEach(function (t, i) {
+    t.addEventListener("click", function () { selectTab(t.id.slice(2)); });
+    t.addEventListener("keydown", function (e) {
+      var j = e.key === "ArrowRight" ? i + 1 : e.key === "ArrowLeft" ? i - 1 : null;
+      if (j === null) return;
+      e.preventDefault();
+      selectTab(tabs[(j + tabs.length) % tabs.length].id.slice(2), true);
+    });
+  });
+  function setCount(name, n) {
+    var t = $("t-" + name), c = t.querySelector(".count");
+    if (c) c.remove();
+    if (n > 0) { c = document.createElement("span"); c.className = "count"; c.textContent = n; t.appendChild(c); }
+  }
+
+  // ---- mode ----
+  function setMode(native) {
+    nativeOnly = native;
+    $("mode-hybrid").setAttribute("aria-pressed", !native);
+    $("mode-native").setAttribute("aria-pressed", native);
+  }
+  $("mode-hybrid").addEventListener("click", function () { setMode(false); });
+  $("mode-native").addEventListener("click", function () { setMode(true); });
+
+  // ---- highlighting (escape first, then mark tokens) ----
+  function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+  var SPEC = "\\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*__[A-Za-z][A-Za-z0-9_]*\\b";
+  var RULES = {
+    rs: [["c", "//.*"], ["s", '"(?:[^"\\\\]|\\\\.)*"'], ["spec", SPEC], ["k", "\\b(?:fn|let|mut|return|if|else|for|in|while|pub|use|match|unsafe|as|impl|struct|loop|break|continue|const|static|enum|type|where|move|ref|dyn)\\b"], ["m", "\\b\\w+!"], ["n", "\\b\\d[\\d_]*(?:\\.\\d+)?(?:_?[iuf](?:64|32|size|8))?\\b"]],
+    out: [["spec", SPEC], ["ok", "\\bnative\\b|no CPython needed|\\bok\\b"], ["br", "\\bP[0-9]{3}\\b|\\berror\\b|\\bwarning\\b|embeds CPython"]],
+  };
+  function highlight(text, lang) {
+    var rules = RULES[lang];
+    var rx = new RegExp(rules.map(function (r) { return "(" + r[1] + ")"; }).join("|"), "g");
+    return text.split("\n").map(function (line) {
+      if (lang === "out" && /^[A-Z][A-Za-z ]+(\(.*\))?$/.test(line)) return '<span class="t-head">' + esc(line) + "</span>";
+      var out = "", pos = 0, m;
+      rx.lastIndex = 0;
+      while ((m = rx.exec(line)) !== null) {
+        if (m[0] === "") { rx.lastIndex++; continue; }
+        var g = 1; while (m[g] === undefined) g++;
+        out += esc(line.slice(pos, m.index)) + '<span class="t-' + rules[g - 1][0] + '">' + esc(m[0]) + "</span>";
+        pos = m.index + m[0].length;
+      }
+      return out + esc(line.slice(pos));
+    }).join("\n");
+  }
+
+  // ---- the worker ----
+  var worker = null, nextId = 1, pending = {}, streamTo = null;
+  function startWorker() {
+    worker = new Worker("play-worker.js");
+    worker.onmessage = function (e) {
+      var d = e.data, p = pending[d.id];
+      if (d.type === "stream") { if (streamTo) streamTo(d.stream, d.text); return; }
+      if (!p) return;
+      delete pending[d.id];
+      if (d.type === "error") p.reject(new Error(d.message)); else p.resolve(d.result);
+    };
+    worker.onerror = function (e) {
+      Object.keys(pending).forEach(function (k) { pending[k].reject(new Error(e.message || "worker error")); delete pending[k]; });
+    };
+  }
+  function call(cmd, extra) {
+    var id = nextId++;
+    var msg = Object.assign({ id: id, cmd: cmd }, extra || {});
+    return new Promise(function (resolve, reject) { pending[id] = { resolve: resolve, reject: reject }; worker.postMessage(msg); });
+  }
+
+  var ready = false;
+  function boot() {
+    startWorker();
+    busy(true, "Loading Python and the compiler (about 10 MB the first time)…");
+    return call("init").then(function (info) {
+      ready = true;
+      busy(false, "Ready: pyrock " + info.version + ", CPython " + info.python + " (Pyodide).");
+    }, function (err) {
+      busy(false, "Couldn't load: " + err.message);
+    });
+  }
+  function busy(on, text) {
+    btnCompile.disabled = on; btnRun.disabled = on;
+    status.classList.toggle("busy", on);
+    if (text !== undefined) status.textContent = text;
+  }
+
+  // ---- compile ----
+  function showCompile(r) {
+    var check = r.check.replace(/\n+$/, "");
+    $("check").innerHTML = check ? highlight(check, "out") : '<span class="empty">No diagnostics.</span>';
+    $("explain").innerHTML = r.explain ? highlight(r.explain.replace(/\n+$/, ""), "out") : '<span class="empty">Nothing to explain: the program has errors before inference (see Check).</span>';
+    $("rust").innerHTML = r.rust ? highlight(r.rust, "rs") : '<span class="empty">No Rust is generated while there are errors (see Check).</span>';
+    var errs = (r.check.match(/ error: /g) || []).length;
+    setCount("check", errs);
+  }
+  function summary(r) {
+    var mode = nativeOnly ? "native-only" : "hybrid";
+    if (!r.ok) {
+      var n = (r.check.match(/ error: /g) || []).length;
+      return { ok: false, html: "<strong>pyrock check (" + mode + "): " + (n || "an") + " error" + (n === 1 ? "" : "s") + ".</strong> The compiled program wouldn't build; see Check. The output below is CPython's." };
+    }
+    var line = (r.check.match(/main\.py: ok \(.*\) — (.*)/) || [])[1] || "";
+    var rt = r.uses_python ? "It embeds CPython for the lines listed in Explain." : "It needs no CPython at all.";
+    return { ok: true, html: "<strong>pyrock check (" + mode + "): ok.</strong> " + esc(line) + ". " + rt };
+  }
+  function compile() {
+    return call("compile", { src: code.value, nativeOnly: nativeOnly }).then(function (r) { showCompile(r); return r; });
+  }
+
+  btnCompile.addEventListener("click", function () {
+    if (!ready) return;
+    busy(true, "Compiling…");
+    var t0 = performance.now();
+    compile().then(function (r) {
+      busy(false, (r.ok ? "Compiled" : "Compile errors") + " in " + Math.round(performance.now() - t0) + " ms.");
+      selectTab(r.ok ? "rust" : "check");
+    }, function (err) { busy(false, "Compiler error: " + err.message); });
+  });
+
+  // ---- run ----
+  function run() {
+    if (!ready) return;
+    busy(true, "Compiling…");
+    var out = $("output");
+    compile().then(function (r) {
+      var s = summary(r);
+      $("banner").innerHTML = '<div class="banner ' + (s.ok ? "ok" : "bad") + '">' + s.html + "</div>";
+      out.textContent = "";
+      selectTab("output");
+      streamTo = function (stream, text) {
+        var span = document.createElement("span");
+        if (stream === "stderr") span.className = "stderr";
+        span.textContent = text;
+        out.appendChild(span);
+      };
+      busy(true, "Running in CPython (Pyodide)…");
+      btnStop.hidden = false;
+      return call("run", { src: code.value }).then(function (res) {
+        var end = document.createElement("span");
+        end.className = "exit";
+        end.textContent = (out.textContent && !/\n$/.test(out.textContent) ? "\n" : "") + "\n[exit status " + res.status + ", " + Math.round(res.ms) + " ms in CPython]";
+        out.appendChild(end);
+        busy(false, "Done.");
+      });
+    }).catch(function (err) {
+      busy(false, "Error: " + err.message);
+    }).then(function () { btnStop.hidden = true; streamTo = null; });
+  }
+  btnRun.addEventListener("click", run);
+  btnStop.addEventListener("click", function () {
+    worker.terminate();
+    Object.keys(pending).forEach(function (k) { pending[k].reject(new Error("stopped")); delete pending[k]; });
+    btnStop.hidden = true;
+    var end = document.createElement("span");
+    end.className = "exit";
+    end.textContent = "\n[stopped]";
+    $("output").appendChild(end);
+    ready = false;
+    boot();
+  });
+
+  // ---- editor ----
+  code.addEventListener("keydown", function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); run(); return; }
+    if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      var a = code.selectionStart, b = code.selectionEnd;
+      code.setRangeText("    ", a, b, "end");
+    }
+  });
+
+  function load(name) {
+    var ex = EXAMPLES[name];
+    code.value = ex.code.join("\n") + "\n";
+    setMode(ex.mode === "native");
+  }
+  $("example").addEventListener("change", function (e) { load(e.target.value); });
+
+  // ---- links: #code=<base64url>&mode=native ----
+  function b64(s) {
+    var bytes = new TextEncoder().encode(s), bin = "";
+    bytes.forEach(function (x) { bin += String.fromCharCode(x); });
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function unb64(s) {
+    var bin = atob(s.replace(/-/g, "+").replace(/_/g, "/"));
+    return new TextDecoder().decode(Uint8Array.from(bin, function (c) { return c.charCodeAt(0); }));
+  }
+  $("share").addEventListener("click", function () {
+    var url = location.href.split("#")[0] + "#code=" + b64(code.value) + (nativeOnly ? "&mode=native" : "");
+    history.replaceState(null, "", url);
+    var btn = $("share");
+    navigator.clipboard.writeText(url).then(function () {
+      btn.textContent = "Link copied";
+    }, function () {
+      btn.textContent = "Link in address bar";
+    }).then(function () { setTimeout(function () { btn.textContent = "Copy link"; }, 1800); });
+  });
+
+  var params = new URLSearchParams(location.hash.slice(1));
+  if (params.get("code")) {
+    try { code.value = unb64(params.get("code")); setMode(params.get("mode") === "native"); }
+    catch (e) { load("generics"); }
+  } else {
+    load("generics");
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>

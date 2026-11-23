@@ -1,6 +1,7 @@
 //! `pyrock` command-line driver: parse → infer → plan → emit → cargo.
 
-use pyrock_analysis::{plan, Plan, Tier};
+use pyrock_analysis::explain::{self, mode_str};
+use pyrock_analysis::{plan, Plan};
 use pyrock_infer::{generic, specialize, Program};
 use pyrock_ir::{Diagnostic, Mode, Severity};
 use std::path::{Path, PathBuf};
@@ -129,13 +130,6 @@ fn has_errors(d: &[Diagnostic]) -> bool {
 fn print_diags(files: &[String], d: &[Diagnostic]) {
     for x in d {
         eprintln!("{}", x.render_in(files));
-    }
-}
-
-fn mode_str(m: Mode) -> &'static str {
-    match m {
-        Mode::Hybrid => "hybrid",
-        Mode::NativeOnly => "native-only",
     }
 }
 
@@ -407,69 +401,8 @@ fn cargo_build(out: &Path, release: bool, quiet: bool, python: &str) -> Result<P
     Ok(exe)
 }
 
-fn tier_str(t: Tier) -> &'static str {
-    match t {
-        Tier::Native => "native",
-        Tier::Bridge => "bridge",
-    }
-}
-
 fn explain_text(o: &Opts, py: &str, module: &pyrock_ir::Module, schemes: &generic::Schemes, c: Option<&Compiled>, diags: &[Diagnostic]) {
-    let files = module.files();
-    println!("pyrock explain {}   (mode: {}, parsed with CPython {py})\n", o.file, mode_str(o.mode));
-    if !module.imports.is_empty() {
-        println!("Imports");
-        let w = module.imports.iter().map(|r| r.name.len()).max().unwrap_or(4);
-        for r in &module.imports {
-            let path = r.path.as_deref().map(|p| format!("  {p}")).unwrap_or_default();
-            let note = r.note.as_deref().filter(|_| r.kind != "python (CPython fallback)").map(|n| format!("  ({n})")).unwrap_or_default();
-            println!("  {:<w$}  -> {}{path}{note}", r.name, r.kind);
-        }
-        for x in &module.externs {
-            for f in &x.funcs {
-                let ps: Vec<String> = f.params.iter().map(|p| p.rust()).collect();
-                println!("      {}.{}({}) -> {}{}", x.name, f.name, ps.join(", "), f.ret.rust(), if f.fallible { "  [Result: errors raise RuntimeError]" } else { "" });
-            }
-            for (n, why) in &x.skipped {
-                println!("      {}.{n}: skipped ({why})", x.name);
-            }
-        }
-        println!();
-    }
-    println!("Inferred generic signatures");
-    for (fid, s) in &schemes.by_func {
-        println!("  {}", generic::render(&module.funcs[*fid].name, s));
-    }
-    if let Some(c) = c {
-        println!("\nSpecializations (reachable from module entry)");
-        let w = c.plan.entries.iter().map(|e| e.signature.len()).max().unwrap_or(10);
-        for e in c.plan.entries.iter().skip(1) {
-            let rec = if e.recursive { "  recursive" } else { "" };
-            println!("  {:<w$}  {:<7} {:<24} effects: {}{rec}", e.signature, tier_str(e.tier), e.rust_name, e.effects.join(", "));
-        }
-        if !c.plan.unreachable.is_empty() {
-            println!("\nNot reached from module entry (not compiled): {}", c.plan.unreachable.join(", "));
-        }
-        if !c.plan.boundaries.is_empty() {
-            println!("\nCPython boundaries");
-            for b in &c.plan.boundaries {
-                let f = files.get(b.span.unit as usize).map(|s| s.as_str()).unwrap_or("?");
-                println!("  {f}:{}  {}  {}  [{}]", b.span, b.code, b.what, b.function);
-                println!("      {}", b.reason);
-            }
-        }
-        let (n, b) = c.plan.counts();
-        let body = if c.plan.entries[0].tier == Tier::Native { "native" } else { "bridged" };
-        println!("\nSummary: {n} native, {b} bridged specialization(s); module body {body}; {} linked Rust/C module(s)", c.plan.externs_used.len());
-        println!("Runtime: {}", if c.plan.uses_python { "embeds CPython (libpython) for the boundaries above" } else { "no CPython needed" });
-        println!("Int semantics: i64 subset with checked arithmetic (OverflowError instead of promotion)");
-    }
-    if !diags.is_empty() {
-        println!("\nDiagnostics");
-        for d in diags {
-            println!("  {}", d.render_in(&files).replace('\n', "\n  "));
-        }
-    }
+    print!("{}", explain::explain_text(&o.file, o.mode, py, module, schemes, c.map(|c| &c.plan), diags));
 }
 
 fn report_json(o: &Opts, py: &str, module: &pyrock_ir::Module, schemes: &generic::Schemes, c: Option<&Compiled>, diags: &[Diagnostic]) -> serde_json::Value {

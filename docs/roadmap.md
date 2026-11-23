@@ -1062,3 +1062,23 @@ runnable ones print the same as CPython.
   `macos-14` label, so the macOS job never started. The workflow now uses `macos-15`, and
   v0.1.1 (same compiler, version bump only; the four golden snapshots differ only in their
   version header) is the first release with every target.
+
+### The playground (2026-11-23)
+
+* `site/play.html`: write Python and compile it in the browser. Parsing runs pyrock's own
+  `dump_ast.py` in Pyodide 0.27.7 (CPython 3.12.7 in WebAssembly); the rest of the compiler
+  runs as `crates/playground` built for `wasm32-unknown-unknown` (2 MB, no imports, no
+  generated glue). It shows `check`, `explain` and the generated `main.rs`. Run executes the
+  program with CPython in Pyodide, because building the Rust needs Cargo; the page says so.
+  Both run in a Web Worker, so Stop ends a program that never finishes.
+* Frontend: `parse_ast_json` compiles a file from an AST produced elsewhere, without
+  reading the disk (imports go to CPython). `explain`'s text moved to
+  `analysis/src/explain.rs`, shared by the CLI and the playground (explain goldens
+  unchanged).
+* Verified: `crates/playground/tests/compile.rs` (specializations, boundaries,
+  native-only errors, syntax errors, single-file imports). In Node, the wasm's Rust and
+  explain output for `gen/main.py` are byte-identical to the CLI's (apart from the version
+  header). In headless Chrome (driven over the DevTools protocol), all five examples
+  compile and run, native-only turns boundaries into errors, Stop ends an infinite loop,
+  share links round-trip, and the console shows no errors.
+

@@ -1,0 +1,18 @@
+[package]
+name = "pyrock-playground"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The pyrock compiler as a WebAssembly module, for the browser playground"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json.workspace = true
+pyrock-frontend.workspace = true
+pyrock-ir.workspace = true
+pyrock-infer.workspace = true
+pyrock-analysis.workspace = true
+pyrock-codegen-rust.workspace = true

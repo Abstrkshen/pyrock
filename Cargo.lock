@@ -184,6 +184,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pyrock-playground"
+version = "0.1.1"
+dependencies = [
+ "pyrock-analysis",
+ "pyrock-codegen-rust",
+ "pyrock-frontend",
+ "pyrock-infer",
+ "pyrock-ir",
+ "serde_json",
+]
+
+[[package]]
 name = "pyrock-runtime"
 version = "0.1.1"
 dependencies = [

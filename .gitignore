@@ -23,3 +23,6 @@ examples/opencv-yolo/models/
 *.onnx
 *.pt
 *.mp4
+
+# Built by .github/workflows/pages.yml from crates/playground
+site/pyrock.wasm

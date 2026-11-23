@@ -4,7 +4,8 @@ An ahead-of-time compiler that turns ordinary, unannotated Python into readable 
 infers generic function signatures, specializes each function for the concrete types it is
 called with, and builds a native executable with Cargo. It explains every decision it makes.
 
-Website: **https://abstrkshen.github.io/pyrock/**. Releases: [github.com/Abstrkshen/pyrock/releases](https://github.com/Abstrkshen/pyrock/releases)
+Website: **https://abstrkshen.github.io/pyrock/**, with a [playground](https://abstrkshen.github.io/pyrock/play.html)
+that runs the compiler in your browser. Releases: [github.com/Abstrkshen/pyrock/releases](https://github.com/Abstrkshen/pyrock/releases)
 
 Status: **prototype.** Classes, closures, exceptions, native collections, generators and
 async/await compile natively, as does Rust and C interop with structs, slices and callbacks.
@@ -245,6 +246,7 @@ Python source ─► CPython ast (JSON protocol v1) ─► scope-resolved HIR
 | `crates/codegen-rust` | One Rust function per specialization |
 | `crates/runtime` | Python semantics in Rust (checked ints, floor/mod, float repr, exceptions, `int \| float`), collections, generators and coroutines (stackful, `corosensei`), `math`, FFI conversions, and the PyO3 bridge (`python` feature). Embedded in the `pyrock` binary |
 | `crates/driver` | The `pyrock` CLI |
+| `crates/playground` | The compiler as a WebAssembly module for the website's playground: takes `dump_ast.py`'s JSON (parsed by Pyodide in the browser) and returns `check`, `explain` and the generated Rust |
 
 ## Tests
 

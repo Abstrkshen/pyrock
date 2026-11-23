@@ -28,6 +28,12 @@ pub struct ParseOutput {
     pub python_version: String,
 }
 
+/// The parser script, for hosts that run it themselves (the browser playground
+/// runs it in Pyodide and passes its output to [`parse_ast_json`]).
+pub fn dump_ast_source() -> &'static str {
+    DUMP_AST
+}
+
 /// Load `path` and everything it imports natively.
 pub fn parse_file(path: &str, python: &str, mode: Mode) -> Result<ParseOutput, String> {
     let entry = PathBuf::from(path);
@@ -37,8 +43,21 @@ pub fn parse_file(path: &str, python: &str, mode: Mode) -> Result<ParseOutput, S
         .unwrap_or(Path::new("."))
         .canonicalize()
         .map_err(|e| format!("{path}: {e}"))?;
+    load(path, root_dir, python, None, mode)
+}
+
+/// Compile one file whose AST was already produced by `dump_ast.py` (its JSON
+/// output). Nothing is read from disk: every import goes to CPython.
+pub fn parse_ast_json(file_name: &str, ast_json: &str, mode: Mode) -> Result<ParseOutput, String> {
+    let json: Value = serde_json::from_str(ast_json).map_err(|e| format!("bad AST JSON: {e}"))?;
+    load(file_name, PathBuf::from("."), "", Some(json), mode)
+}
+
+fn load(path: &str, root_dir: PathBuf, python: &str, preparsed: Option<Value>, mode: Mode) -> Result<ParseOutput, String> {
+    let entry = PathBuf::from(path);
     let mut ld = Loader {
         python: python.into(),
+        preparsed,
         mode,
         funcs: vec![],
         units: vec![],
@@ -97,6 +116,8 @@ pub fn parse_file(path: &str, python: &str, mode: Mode) -> Result<ParseOutput, S
 
 struct Loader {
     python: String,
+    /// The entry file's AST, when the host parsed it (no `python` subprocess).
+    preparsed: Option<Value>,
     mode: Mode,
     funcs: Vec<Option<Function>>,
     units: Vec<Unit>,
@@ -225,7 +246,13 @@ fn literal_default(v: &Value) -> bool {
 }
 
 impl Loader {
-    fn dump(&self, path: &Path) -> Result<Value, String> {
+    fn dump(&mut self, path: &Path) -> Result<Value, String> {
+        if let Some(json) = self.preparsed.take() {
+            return check_protocol(json);
+        }
+        if self.python.is_empty() {
+            return Err(format!("{}: only the entry file is available here", path.display()));
+        }
         let out = Command::new(&self.python)
             .arg("-I")
             .arg("-c")
@@ -237,10 +264,7 @@ impl Loader {
             return Err(format!("frontend parser failed on {}:\n{}", path.display(), String::from_utf8_lossy(&out.stderr)));
         }
         let json: Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("bad AST JSON: {e}"))?;
-        if json["protocol"].as_u64() != Some(PROTOCOL) {
-            return Err(format!("frontend protocol mismatch: expected {PROTOCOL}, got {}", json["protocol"]));
-        }
-        Ok(json)
+        check_protocol(json)
     }
 
     /// Parse and lower one Python file. Returns the unit id (None if it
@@ -284,6 +308,13 @@ impl Loader {
         self.funcs.push(None);
         self.funcs.len() - 1
     }
+}
+
+fn check_protocol(json: Value) -> Result<Value, String> {
+    if json["protocol"].as_u64() != Some(PROTOCOL) {
+        return Err(format!("frontend protocol mismatch: expected {PROTOCOL}, got {}", json["protocol"]));
+    }
+    Ok(json)
 }
 
 /// What a module-level name refers to.

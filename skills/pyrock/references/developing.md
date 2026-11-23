@@ -20,8 +20,10 @@ main.py → frontend (python3 -I dump_ast.py → JSON) → HIR (ir)
 | `crates/analysis` | `plan`: call graph, recursion, effects, Native/Bridge tier, boundary list (P2xx) |
 | `crates/codegen-rust` | `emit`: one fn per Spec, slots, unit inits, extern FFI, `rid()` keyword escaping |
 | `crates/runtime` | `pyrock-runtime`, linked into generated programs: `int.rs`, `float.rs`, `string.rs`, `conv.rs`, `exc.rs`, `io.rs`, `ext.rs`, `py.rs` (PyO3 bridge, `python` feature), `stackful.rs` (corosensei coroutines), `gen.rs` (generators), `aio.rs` (async) |
-| `crates/driver` | The `pyrock` CLI (`main.rs`): commands, Cargo.toml/build.rs generation, shared target dir, crate-name hashing, explain rendering |
+| `crates/driver` | The `pyrock` CLI (`main.rs`): commands, Cargo.toml/build.rs generation, shared target dir, crate-name hashing |
+| `crates/playground` | The compiler for `wasm32-unknown-unknown` (website playground, `site/play.html` + `play-worker.js`): `compile(file, ast_json, mode)`, raw `extern "C"` exports, no generated glue. `explain` text lives in `analysis/src/explain.rs`, shared with the CLI |
 
+Website: `site/` (deployed by `.github/workflows/pages.yml`, which also builds `site/pyrock.wasm`).
 Docs: `README.md`, `docs/imports.md`, `docs/how-it-works.md`, `docs/subset.md`, `Project.md` (spec).
 
 ## Adding a feature: the usual path

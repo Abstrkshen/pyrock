@@ -4,6 +4,8 @@
 //!
 //! In `native-only` mode each boundary becomes a compile error.
 
+pub mod explain;
+
 use pyrock_infer::{CallClass, Program, Slot, Spec};
 use pyrock_ir::*;
 use std::collections::{BTreeSet, HashSet};
