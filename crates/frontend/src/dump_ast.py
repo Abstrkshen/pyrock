@@ -321,7 +321,78 @@ class _M:
         cls.body = cls.body + relocate(extra, cls)
 
 
+TYPING_MODULES = ("typing", "typing_extensions")
+
+
+def typing_imports(tree):
+    """Local names bound to typing members (name -> member), and typing module aliases."""
+    names, modules = {}, set()
+    for st in tree.body:
+        if isinstance(st, ast.ImportFrom) and st.module in TYPING_MODULES and st.level == 0:
+            for a in st.names:
+                names[a.asname or a.name] = a.name
+        elif isinstance(st, ast.Import):
+            for a in st.names:
+                if a.name in TYPING_MODULES:
+                    modules.add(a.asname or a.name)
+    return names, modules
+
+
+def typing_ref(node, names, modules):
+    """The typing member a node names (`Protocol`, `typing.Generic`, ...)."""
+    if isinstance(node, ast.Subscript):
+        node = node.value
+    if isinstance(node, ast.Name):
+        return names.get(node.id)
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in modules:
+        return node.attr
+    return None
+
+
+class TypedDictCalls(ast.NodeTransformer):
+    def __init__(self, classes):
+        self.classes = classes
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if isinstance(node.func, ast.Name) and node.func.id in self.classes and not node.args and all(k.arg for k in node.keywords):
+            return ast.copy_location(ast.Dict([ast.Constant(k.arg) for k in node.keywords], [k.value for k in node.keywords]), node)
+        return node
+
+
+def rewrite_typing(tree):
+    """Constructs that only matter to type checkers: `Protocol` / `Generic[T]`
+    bases are dropped, TypeVar-like assignments removed, `NewType` is an
+    identity function, and a TypedDict class is a plain dict (its calls with
+    keyword arguments become dict literals)."""
+    names, modules = typing_imports(tree)
+    if not names and not modules:
+        return
+    typed_dicts = set()
+    body = []
+    for st in tree.body:
+        if isinstance(st, ast.ClassDef):
+            kinds = [typing_ref(b, names, modules) for b in st.bases]
+            if "TypedDict" in kinds and not st.keywords:
+                typed_dicts.add(st.name)
+                continue
+            st.bases = [b for b, k in zip(st.bases, kinds) if k not in ("Protocol", "Generic")]
+        if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name) and isinstance(st.value, ast.Call):
+            k = typing_ref(st.value.func, names, modules)
+            if k in ("TypeVar", "ParamSpec", "TypeVarTuple"):
+                continue
+            if k == "NewType":
+                f = ast.parse(f"def {st.targets[0].id}(x):\n    return x").body[0]
+                body += relocate([f], st)
+                continue
+        body.append(st)
+    tree.body = body
+    if typed_dicts:
+        TypedDictCalls(typed_dicts).visit(tree)
+
+
 def rewrite(tree):
+    rewrite_typing(tree)
     rewrite_namedtuples(tree)
     rewrite_cached_properties(tree)
     names, modules = enum_aliases(tree)

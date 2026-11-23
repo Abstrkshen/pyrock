@@ -127,7 +127,9 @@ Language coverage (ordered by how much code each one blocks in the standard libr
 - [x] `Enum`, `IntEnum`, `StrEnum`, `auto()`
 - [x] `typing.NamedTuple` classes
 - [x] Multiple inheritance (mixins, diamonds) with CPython's C3 MRO
-- [ ] `TypedDict`, `collections.namedtuple`
+- [x] `Protocol` / `Generic[T]` bases, `TypeVar`, `NewType`, `TypedDict`
+- [ ] `collections.namedtuple`
+- [ ] Clearer diagnostic when a field holds several types in native-only mode (reported as P306 today)
 - [x] Packages next to the program, relative imports, re-exported names
 - [ ] `match`
 - [ ] Arbitrary-precision integers (`Project.md` §6 and M4; today results beyond i64 raise `OverflowError`)
@@ -993,3 +995,15 @@ runnable ones print the same as CPython.
   receiver's type in each specialization, so cooperative multiple inheritance matches
   CPython.
 * Test: `tests/differential/mixins.py` (mixins, `super()` chains, a diamond; native-only).
+
+### Phase 8: typing constructs at runtime (2026-11-23)
+
+* With names from `typing` / `typing_extensions`, the AST dump drops `Protocol` and
+  `Generic[...]` bases, removes `TypeVar` / `ParamSpec` / `TypeVarTuple` assignments,
+  turns `X = NewType("X", t)` into an identity function, and treats a `TypedDict` class as
+  what it is at runtime: its class statement is removed and `Movie(title=..., year=...)`
+  becomes a dict literal (a native record dict).
+* Field types are joined program-wide, so a `Generic[T]` container used with several `T`s
+  keeps its field as a Python object (hybrid mode); native-only reports it (currently with
+  a misleading P306 message, listed above).
+* Test: `tests/differential/typing_runtime.py`.

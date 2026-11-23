@@ -71,6 +71,7 @@ These constructs become plain Rust with no Python objects involved:
   `__bool__`, `__hash__`, `__contains__`, `__getitem__`/`__setitem__`, `__iter__` returning a
   native iterable, `__add__`/`__radd__` and the other arithmetic dunders, `__neg__`, ...),
   `typing.NamedTuple` classes (fields, defaults, ordering, indexing, unpacking, `_asdict`),
+  `Protocol`/`Generic[T]` bases, `TypeVar`, `NewType`, `TypedDict` (a plain dict),
   `@functools.cached_property`, enums (`Enum`, `IntEnum`, `StrEnum`, `auto()`: members, `C(value)`, `C["NAME"]`, iteration,
   `len`, `in`, `name`/`value`, CPython's repr/str), abstract base classes (`ABC`, `metaclass=ABCMeta`, `@abstractmethod`, with CPython's
   `TypeError` on instantiating one), `@dataclass` (fields, literal defaults, `field(default_factory=list|dict|set)`,
