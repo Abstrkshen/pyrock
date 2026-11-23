@@ -4,6 +4,8 @@ An ahead-of-time compiler that turns ordinary, unannotated Python into readable 
 infers generic function signatures, specializes each function for the concrete types it is
 called with, and builds a native executable with Cargo. It explains every decision it makes.
 
+Website: **https://abstrkshen.github.io/pyrock/**. Releases: [github.com/Abstrkshen/pyrock/releases](https://github.com/Abstrkshen/pyrock/releases)
+
 Status: **prototype.** Classes, closures, exceptions, native collections, generators and
 async/await compile natively, as does Rust and C interop with structs, slices and callbacks.
 52 of Python's 55 statement and expression kinds compile; on the standard library as it is,
@@ -16,28 +18,40 @@ boundaries instead.
 
 ## Installation
 
-pyrock runs on Linux x86-64 (developed and tested on Ubuntu 24.04; macOS is untested). It
-needs:
+pyrock compiles your program to Rust and builds it with Cargo, so besides the `pyrock`
+command it needs:
 
-* a Rust toolchain ([rustup](https://rustup.rs); tested with Rust 1.96), because pyrock
-  builds the generated code with Cargo;
+* a Rust toolchain ([rustup](https://rustup.rs); tested with Rust 1.96);
 * Python 3 (tested with 3.12): pyrock parses with CPython's own `ast` module, and programs
   that use Python packages embed it, which needs the shared `libpython` (Debian/Ubuntu:
   `sudo apt install python3-dev`);
 * a C compiler (`cc`) if your programs import `.c` files.
 
-Install the `pyrock` command from a clone:
+**Prebuilt binary** (Linux x86-64 and arm64, macOS on Apple silicon):
 
 ```sh
-git clone https://github.com/Abstrkshen/pyrock.git
-cd pyrock
-cargo install --path crates/driver     # installs ~/.cargo/bin/pyrock
-pyrock --version
+curl -fsSL https://raw.githubusercontent.com/Abstrkshen/pyrock/main/install.sh | sh
 ```
 
-The binary carries its runtime crate, so the clone can be moved or deleted afterwards. The
-first build of any program compiles the runtime (and PyO3 if needed) into
-`~/.cache/pyrock/target`, which takes a minute or two; later builds take seconds.
+The script downloads the archive for your platform from the
+[releases](https://github.com/Abstrkshen/pyrock/releases), checks its SHA-256 and installs
+`pyrock` into `~/.local/bin` (`PYROCK_INSTALL_DIR` changes that, `PYROCK_VERSION=v0.1.0`
+picks a release). You can also download an archive from the releases page yourself. The
+Linux binaries are static and run on any distribution.
+
+**From source** (any platform with Rust; tested on Ubuntu 24.04):
+
+```sh
+cargo install --git https://github.com/Abstrkshen/pyrock pyrock
+# or, from a clone:
+git clone https://github.com/Abstrkshen/pyrock.git && cd pyrock
+cargo install --path crates/driver     # installs ~/.cargo/bin/pyrock
+```
+
+Check it with `pyrock --version`. The binary carries its runtime crate, so nothing else
+from the repository is needed. The first build of any program compiles the runtime (and
+PyO3 if needed) into `~/.cache/pyrock/target`, which takes a minute or two; later builds
+take seconds.
 
 A first program:
 
@@ -53,10 +67,63 @@ pyrock explain fib.py        # what was inferred and compiled natively
 pyrock check fib.py --mode native-only
 ```
 
-`pyrock run --python path/to/venv/bin/python` uses that interpreter's packages. The
-[examples](examples/) show Rust and C imports, Python packages and larger programs.
+The [examples](examples/) show Rust and C imports, Python packages and larger programs.
 Optional: `bash skills/install.sh` links an agent skill describing pyrock into Claude
 Code, Codex and Cursor.
+
+## Usage
+
+```sh
+pyrock check   main.py [--mode native-only]          # diagnostics only, no build (fast)
+pyrock explain main.py [--format json]               # imports, inferred types, boundaries
+pyrock run     main.py [--release] [--mode native-only] [-- ARGS...]
+pyrock build   main.py [--release] [--out DIR]       # prints the executable's path
+pyrock emit    main.py [--out DIR]                   # write the Cargo project, don't build
+pyrock bench   main.py [--baseline python] [--runs N]
+```
+
+`main.py` is the program's entry file; the `.py`, `.rs` and `.c` files it imports from its
+directory are compiled into the same executable. A typical session:
+
+1. **`pyrock check main.py`** reports what can't compile, with a code and a reason for each
+   problem (`main.py:12:5  P301  error: ...`). It doesn't build anything, so it is quick.
+2. **`pyrock explain main.py`** shows how each import was resolved (Python, Rust, C or
+   CPython), the generic signature inferred for each function, every specialization that was
+   compiled (`add(a: int, b: int) -> int  native  add__int_int`), and the list of
+   **CPython boundaries**: each line of your program that will run through Python.
+3. **`pyrock run main.py`** builds and runs. Arguments after `--` go to your program. Output,
+   exit status and the final `Kind: message` line of an uncaught exception match `python3`.
+4. **`pyrock run main.py --release`** turns on optimizations; use it to measure speed.
+   **`pyrock bench main.py`** times the program against CPython and checks that both print
+   the same output.
+
+Options:
+
+| Option | Effect |
+|---|---|
+| `--mode hybrid` (default) | Code that can't be compiled natively (Python packages, values without a single type) runs in an embedded CPython at a reported boundary |
+| `--mode native-only` | Every boundary is an error instead. The executable doesn't link libpython and needs no Python to run |
+| `--release` | Optimized build (Cargo's release profile) |
+| `--python PATH` | The interpreter used to parse, to embed, and whose `sys.path` the program sees. Pass a virtualenv's `python` to use its packages |
+| `--out DIR` | Where `emit`/`build` write the Cargo project (default `.pyrock/<name>/` next to the source) |
+| `--format json` | `explain` as JSON, for tools |
+
+**What you get.** `.pyrock/<name>/` holds the generated `Cargo.toml` and `src/main.rs`
+(readable Rust, one function per specialization, each with a comment pointing at its
+Python line), `pyrock-report.json`, `pyrock.sourcemap.json` and, after a build, the
+executable `.pyrock/<name>/<name>`. A native-only executable is self-contained: copy it to
+another machine with the same OS and architecture and run it. A hybrid executable loads
+`libpython` and uses the build interpreter's packages, so it runs where that Python is
+installed.
+
+**Diagnostics.** Codes are grouped by kind: `P0xx` the source couldn't be read, `P1xx` a
+construct pyrock doesn't support or a name problem, `P2xx` a CPython boundary (errors only
+in native-only mode), `P3xx` types (`P301` is an operation CPython would reject with
+`TypeError`). The full table is in [docs/subset.md](docs/subset.md#rejected-at-compile-time-diagnostic-codes).
+
+**Environment.** `PYROCK_TARGET_DIR` moves the shared Cargo build cache (default
+`~/.cache/pyrock/target`); `PYROCK_RUNTIME` points at a runtime crate to use instead of the
+embedded one.
 
 ## Imports: Python, Rust and C
 
@@ -160,20 +227,6 @@ small apps in [demos/](demos/), each with a README, are checked in CI:
 | [backend](demos/backend/) | A JSON API on asyncio: native store, routing and validation; stdlib sockets and `json` through CPython |
 | [ai](demos/ai/) | A BPE tokenizer in Python, a bigram model in Rust (`ngram.rs`), sampling in C (`sampling.c`); no CPython at all (`--mode native-only`) |
 | [gui](demos/gui/) | 300 colliding balls: native physics (17x CPython) drawn with raylib |
-
-## Commands
-
-| Command | What it does |
-|---|---|
-| `pyrock check main.py [--mode native-only]` | Parse, infer and plan; print diagnostics |
-| `pyrock explain main.py [--format json]` | Generic signatures, specializations, effects, diagnostics |
-| `pyrock emit main.py --out DIR` | Write the Cargo project, source map and report |
-| `pyrock build main.py [--release]` | Emit, then `cargo build`; prints the executable path |
-| `pyrock run main.py [-- args]` | Build and run |
-| `pyrock bench main.py --baseline python` | Median, min and max wall time against CPython, with an output check |
-
-By default, generated projects go in `.pyrock/<name>/` next to the source file. Each one
-contains `Cargo.toml`, `src/main.rs`, `pyrock-report.json` and `pyrock.sourcemap.json`.
 
 ## How it works
 

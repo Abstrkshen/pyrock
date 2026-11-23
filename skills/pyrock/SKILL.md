@@ -11,8 +11,9 @@ and compiles one specialized copy per type combination (`add(1, 2)` → `add__in
 Anything it can't compile natively runs in an embedded CPython at an explicit, reported
 **boundary** (hybrid mode, the default). `--mode native-only` turns boundaries into errors.
 
-`pyrock` must be on PATH: install it from a clone of https://github.com/Abstrkshen/pyrock
-with `cargo install --path crates/driver`. Check with `pyrock --version`. The binary carries its runtime crate and
+`pyrock` must be on PATH: install a release with
+`curl -fsSL https://raw.githubusercontent.com/Abstrkshen/pyrock/main/install.sh | sh`, or from source
+with `cargo install --git https://github.com/Abstrkshen/pyrock pyrock`. Check with `pyrock --version`. The binary carries its runtime crate and
 extracts it to `~/.cache/pyrock/runtime/<hash>/` on first use, so it works from anywhere
 (`PYROCK_RUNTIME` overrides it with a runtime crate path).
 

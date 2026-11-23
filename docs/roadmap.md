@@ -1040,3 +1040,21 @@ runnable ones print the same as CPython.
 * Fix: recursion through a conditional expression (`return n if n < 2 else fib(n - 1) +
   fib(n - 2)`) failed with P306; the expression now keeps the typed branch while the other
   is still unknown. Test: `tests/differential/recursive_ifexp.py`.
+
+### Releases and the website (2026-11-23)
+
+* `.github/workflows/release.yml`: pushing a `v*` tag builds `pyrock` for
+  `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` (static) and
+  `aarch64-apple-darwin`, runs `scripts/release_smoke.sh` with each binary on its own
+  platform (a native-only program; a hybrid one importing `json`, a `.rs` and a `.c` file;
+  `explain`), and publishes the archives that passed, with `SHA256SUMS`, as a GitHub
+  release. Verified locally: the static x86-64 build passes the smoke test.
+* `install.sh`: picks the archive for the platform, checks its SHA-256 and installs into
+  `~/.local/bin` (`PYROCK_INSTALL_DIR`, `PYROCK_VERSION`).
+* `LICENSE-MIT` and `LICENSE-APACHE`, matching the `MIT OR Apache-2.0` already declared in
+  `Cargo.toml`.
+* README: prebuilt and source installation, and a Usage section (workflow, options, output
+  layout, diagnostics, environment).
+* `site/index.html`: the project website (how it works, install, usage, speed, comparison,
+  examples, roadmap), published to GitHub Pages by `.github/workflows/pages.yml`. Every code
+  sample on it is real output of pyrock 0.1.0.

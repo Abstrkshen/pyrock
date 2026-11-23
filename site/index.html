@@ -1,0 +1,950 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pyrock: Python to native code through Rust</title>
+<meta name="description" content="pyrock compiles ordinary, unannotated Python into readable Rust and a native executable. It infers types from how functions are called, specializes each function per type combination, and runs whatever it can't compile in an embedded CPython at reported boundaries.">
+<meta property="og:title" content="pyrock">
+<meta property="og:description" content="Compile ordinary Python into a native executable, through Rust you can read.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3 28 10v12L16 29 4 22V10z' fill='%23C99A1E'/%3E%3Cpath d='M16 3 28 10 16 17 4 10z' fill='%23E9C25A'/%3E%3Cpath d='M16 17v12L4 22V10z' fill='%23A27A10'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #ECEEE9;
+  --surface: #F8F9F6;
+  --ink: #1C2326;
+  --muted: #56626A;
+  --line: #C6CCC4;
+  --native: #0F6E57;
+  --native-soft: #D4EAE1;
+  --bridge: #8E6200;
+  --bridge-soft: #F4E6BE;
+  --pyrite: #C99A1E;
+  --py-pane: #FBFCF9;
+  --rs-pane: #1F282C;
+  --rs-ink: #E4E8E2;
+  --rs-muted: #8E9BA1;
+  --rs-key: #9FCBE0;
+  --rs-str: #B9DB9A;
+  --rs-num: #E6B57E;
+  --py-key: #2C55A0;
+  --py-str: #3D7A26;
+  --py-num: #A0521A;
+  --py-com: #6E7A80;
+  --s1: #F3F4F0; --s2: #E0E4DD; --s3: #CBD1C8; --s4: #66727A; --s5: #3B474D; --s6: #1C2326;
+  --s-ink-dark: #1C2326; --s-ink-light: #EEF1EC;
+  --radius-pane: 10px;
+  --radius-small: 6px;
+  --measure: 68ch;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141A1C; --surface: #1B2326; --ink: #E3E7E1; --muted: #9AA6AB; --line: #34403F;
+    --native: #5CC9A2; --native-soft: #173A30; --bridge: #E7BE55; --bridge-soft: #3A3115;
+    --pyrite: #E2B93B;
+    --py-pane: #1E272A; --rs-pane: #0D1214; --rs-ink: #E4E8E2;
+    --py-key: #8DB4F0; --py-str: #A5D58A; --py-num: #EBB07A; --py-com: #8A979C;
+    --s1: #283236; --s2: #222B2F; --s3: #1D2528; --s4: #182022; --s5: #121A1C; --s6: #0B1012;
+    --s-ink-dark: #E3E7E1;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141A1C; --surface: #1B2326; --ink: #E3E7E1; --muted: #9AA6AB; --line: #34403F;
+  --native: #5CC9A2; --native-soft: #173A30; --bridge: #E7BE55; --bridge-soft: #3A3115;
+  --pyrite: #E2B93B;
+  --py-pane: #1E272A; --rs-pane: #0D1214; --rs-ink: #E4E8E2;
+  --py-key: #8DB4F0; --py-str: #A5D58A; --py-num: #EBB07A; --py-com: #8A979C;
+  --s1: #283236; --s2: #222B2F; --s3: #1D2528; --s4: #182022; --s5: #121A1C; --s6: #0B1012;
+  --s-ink-dark: #E3E7E1;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  overflow-x: hidden;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Bricolage Grotesque", system-ui, sans-serif;
+  font-size: 1.0625rem;
+  line-height: 1.55;
+  font-variation-settings: "wdth" 100;
+}
+a { color: var(--native); text-underline-offset: 0.18em; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 3px solid var(--pyrite); outline-offset: 2px; border-radius: 3px; }
+code, pre, kbd { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.86em; font-variant-ligatures: none; }
+p code, li code, td code { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 0.05em 0.3em; white-space: nowrap; }
+.stratum p code { background: transparent; border-color: currentColor; color: inherit; opacity: 0.9; }
+.wrap { max-width: 1160px; margin: 0 auto; padding: 0 24px; }
+.prose { max-width: var(--measure); }
+h1, h2, h3 { line-height: 1.1; margin: 0; font-weight: 750; letter-spacing: -0.015em; }
+h2 { font-size: clamp(1.9rem, 3.4vw, 2.6rem); font-variation-settings: "wdth" 85; margin-bottom: 0.6rem; }
+h3 { font-size: 1.25rem; font-weight: 700; margin-bottom: 0.35rem; }
+section { padding: 88px 0 0; }
+section > .wrap > .lede { color: var(--muted); font-size: 1.15rem; max-width: var(--measure); margin: 0 0 2rem; }
+
+/* Top bar */
+.top { display: flex; align-items: center; gap: 24px; padding-top: 18px; padding-bottom: 18px; }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 800; font-size: 1.35rem; letter-spacing: -0.02em; }
+.brand svg { width: 26px; height: 26px; }
+.top nav { display: flex; gap: 20px; overflow-x: auto; scrollbar-width: none; margin-left: auto; }
+.top nav a { color: var(--muted); text-decoration: none; white-space: nowrap; font-size: 0.97rem; }
+.top nav a:hover { color: var(--ink); }
+.theme { background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 999px; padding: 4px 12px; font: inherit; font-size: 0.9rem; cursor: pointer; }
+
+/* Hero */
+.hero { padding-top: 56px; }
+.hero h1 {
+  font-size: clamp(2.5rem, 6.4vw, 5.1rem);
+  font-weight: 800;
+  font-variation-settings: "wdth" 78;
+  letter-spacing: -0.03em;
+  max-width: 15ch;
+  line-height: 0.98;
+}
+.hero .sub { font-size: 1.2rem; color: var(--muted); max-width: 60ch; margin: 1.4rem 0 1.8rem; }
+.actions { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+.cmd {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--rs-pane); color: var(--rs-ink);
+  border-radius: var(--radius-small); padding: 10px 10px 10px 16px;
+  max-width: 100%;
+}
+.cmd code { font-size: 0.9rem; white-space: nowrap; overflow-x: auto; min-width: 0; }
+.cmd code::before { content: "$ "; color: var(--rs-muted); }
+.copy { font: inherit; font-size: 0.85rem; background: transparent; color: var(--rs-muted); border: 1px solid #45535A; border-radius: 4px; padding: 3px 10px; cursor: pointer; flex: none; }
+.copy:hover { color: var(--rs-ink); }
+.button { display: inline-block; padding: 10px 18px; border-radius: var(--radius-small); border: 1.5px solid var(--ink); color: var(--ink); text-decoration: none; font-weight: 600; }
+.button:hover { background: var(--ink); color: var(--bg); }
+.status { color: var(--muted); font-size: 0.95rem; margin-top: 1.1rem; }
+
+/* Python | Rust twin panes */
+.twin { margin-top: 56px; }
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+.tabs [role="tab"] {
+  font: inherit; font-size: 0.97rem; cursor: pointer;
+  background: transparent; color: var(--muted);
+  border: 1.5px solid var(--line); border-radius: 999px; padding: 6px 16px;
+}
+.tabs [role="tab"][aria-selected="true"] { color: var(--bg); background: var(--ink); border-color: var(--ink); }
+.panel { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); border-radius: var(--radius-pane); overflow: hidden; border: 1px solid var(--line); }
+.panel + .panel { margin-top: 28px; }
+.js .panel + .panel { margin-top: 0; }
+.panel[hidden] { display: none; }
+.side { min-width: 0; display: flex; flex-direction: column; }
+.side.py { background: var(--py-pane); }
+.side.rs { background: var(--rs-pane); color: var(--rs-ink); }
+.side .label { display: flex; justify-content: space-between; gap: 12px; padding: 12px 18px 0; font-size: 0.88rem; color: var(--muted); }
+.side.rs .label { color: var(--rs-muted); }
+.side pre { margin: 0; padding: 10px 18px 18px; overflow-x: auto; line-height: 1.6; font-size: 0.8rem; tab-size: 4; }
+.side pre + .label { border-top: 1px dashed var(--line); padding-top: 12px; }
+.side.rs pre + .label { border-top-color: #3A464C; }
+pre.term { background: var(--rs-pane); color: var(--rs-ink); }
+.side.rs pre.term { background: rgba(0,0,0,0.22); flex: 1; }
+.side.py .label.tl { padding-top: 14px; }
+.side.py pre.term { margin: 8px 12px 12px; border-radius: var(--radius-small); padding-top: 14px; flex: 1; }
+.caption { color: var(--muted); font-size: 0.95rem; max-width: var(--measure); margin: 14px 0 0; }
+
+.t-c { color: var(--py-com); font-style: italic; }
+.py .t-k, .file .t-k { color: var(--py-key); font-weight: 600; }
+.py .t-s, .file .t-s { color: var(--py-str); }
+.py .t-n, .file .t-n { color: var(--py-num); }
+.py .t-d { color: var(--bridge); }
+.rs .t-k { color: var(--rs-key); }
+.rs .t-s { color: var(--rs-str); }
+.rs .t-n { color: var(--rs-num); }
+.rs .t-m { color: var(--rs-key); }
+.rs .t-c { color: var(--rs-muted); }
+.t-spec { color: #1C2326; background: var(--pyrite); border-radius: 3px; padding: 0 2px; }
+.t-ok { color: #7FE0BB; }
+.t-br { color: #F0C762; }
+.t-prompt { color: var(--rs-muted); }
+.t-cmd { color: #FFFFFF; font-weight: 600; }
+.t-head { color: var(--rs-muted); }
+.file pre { margin: 0; }
+
+/* Strata */
+.strata { margin-top: 8px; }
+.stratum {
+  --tone: var(--s1); --fg: var(--s-ink-dark);
+  background: var(--tone); color: var(--fg);
+  display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); gap: 32px;
+  padding: 34px max(24px, calc((100vw - 1160px) / 2 + 24px)) 30px;
+  margin-top: -10px;
+  position: relative;
+}
+.stratum:nth-child(1) { --tone: var(--s1); clip-path: polygon(0 4px, 18% 0, 41% 6px, 63% 1px, 82% 7px, 100% 2px, 100% 100%, 0 100%); }
+.stratum:nth-child(2) { --tone: var(--s2); clip-path: polygon(0 7px, 14% 2px, 36% 9px, 58% 3px, 77% 10px, 100% 4px, 100% 100%, 0 100%); }
+.stratum:nth-child(3) { --tone: var(--s3); clip-path: polygon(0 3px, 22% 9px, 47% 2px, 69% 8px, 88% 1px, 100% 6px, 100% 100%, 0 100%); }
+.stratum:nth-child(4) { --tone: var(--s4); --fg: var(--s-ink-light); clip-path: polygon(0 9px, 17% 3px, 39% 10px, 60% 2px, 84% 8px, 100% 1px, 100% 100%, 0 100%); }
+.stratum:nth-child(5) { --tone: var(--s5); --fg: var(--s-ink-light); clip-path: polygon(0 2px, 25% 8px, 44% 1px, 66% 9px, 87% 3px, 100% 8px, 100% 100%, 0 100%); }
+.stratum:nth-child(6) { --tone: var(--s6); --fg: var(--s-ink-light); clip-path: polygon(0 6px, 20% 1px, 38% 8px, 61% 3px, 80% 9px, 100% 2px, 100% 100%, 0 100%); padding-bottom: 44px; }
+.stratum .stage { display: flex; gap: 16px; align-items: baseline; }
+.stratum .num { font-family: "JetBrains Mono", monospace; font-size: 0.85rem; opacity: 0.7; flex: none; }
+.stratum h3 { font-size: 1.3rem; }
+.stratum p { margin: 0.2rem 0 0; opacity: 0.85; max-width: 46ch; font-size: 0.98rem; }
+.stratum pre { margin: 0; font-size: 0.78rem; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; align-self: center; }
+.stratum .where { font-size: 0.85rem; opacity: 0.7; margin-top: 0.6rem; }
+.stratum .where code { background: transparent; border: 0; padding: 0; }
+
+/* Install */
+.three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; }
+.way { border-top: 3px solid var(--ink); padding-top: 14px; }
+.way.first { border-top-color: var(--pyrite); }
+.way pre { background: var(--rs-pane); color: var(--rs-ink); border-radius: var(--radius-small); padding: 12px 14px; overflow-x: auto; font-size: 0.78rem; line-height: 1.6; }
+.way p { margin: 0.3rem 0 0.8rem; color: var(--muted); font-size: 0.97rem; }
+.needs { margin-top: 36px; max-width: var(--measure); }
+.needs ul { padding-left: 1.2rem; }
+.needs li { margin: 0.3rem 0; }
+
+/* Usage */
+.steps { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 24px; counter-reset: step; }
+.steps li { counter-increment: step; }
+.steps li::before { content: counter(step); display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; border: 1.5px solid var(--ink); font-weight: 700; margin-bottom: 10px; }
+.steps code.big { display: block; font-size: 0.85rem; margin-bottom: 6px; font-weight: 600; background: none; border: 0; padding: 0; }
+.steps p { margin: 0; color: var(--muted); font-size: 0.97rem; }
+.modes { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin-top: 44px; border: 1px solid var(--line); border-radius: var(--radius-pane); overflow: hidden; }
+.mode { padding: 22px 24px; }
+.mode.hybrid { background: var(--bridge-soft); }
+.mode.native { background: var(--native-soft); }
+.mode p { margin: 0.3rem 0 0; font-size: 0.98rem; }
+.mode ul { margin: 0.6rem 0 0; padding-left: 1.1rem; font-size: 0.97rem; }
+.opts { width: 100%; border-collapse: collapse; margin-top: 36px; font-size: 0.97rem; }
+.opts th, .opts td { text-align: left; padding: 10px 12px 10px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.opts th { font-weight: 650; color: var(--muted); }
+.opts td:first-child { white-space: nowrap; }
+
+/* Speed */
+.bars { display: grid; gap: 18px; max-width: 900px; }
+.bar { display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); gap: 20px; align-items: center; }
+.bar .what { font-size: 0.97rem; }
+.bar .what small { display: block; color: var(--muted); font-size: 0.85rem; }
+.bar .track { position: relative; height: 34px; }
+.bar .fill { height: 100%; width: calc(var(--x) / 52 * 100%); min-width: 3.4rem; background: var(--native); border-radius: 0 var(--radius-small) var(--radius-small) 0; display: flex; align-items: center; justify-content: flex-end; padding-right: 10px; color: var(--bg); font-weight: 750; font-variant-numeric: tabular-nums; }
+.bar .times { font-size: 0.85rem; color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
+.speed-notes { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; margin-top: 44px; }
+.speed-notes p { margin: 0.3rem 0 0; color: var(--muted); }
+
+/* Compare */
+.table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-pane); background: var(--surface); }
+.compare { border-collapse: collapse; width: 100%; min-width: 860px; font-size: 0.95rem; }
+.compare th, .compare td { text-align: left; vertical-align: top; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.compare thead th { color: var(--muted); font-weight: 650; }
+.compare tbody th { font-weight: 700; white-space: nowrap; }
+.compare tr.us { background: var(--bridge-soft); }
+.compare tr:last-child th, .compare tr:last-child td { border-bottom: 0; }
+.fair { color: var(--muted); font-size: 0.92rem; margin-top: 12px; max-width: var(--measure); }
+.pros { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; margin-top: 40px; }
+.pros ul { padding-left: 1.1rem; margin: 0.5rem 0 0; }
+.pros li { margin: 0.45rem 0; }
+
+/* Examples */
+.ex-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr); gap: 48px; align-items: start; }
+.ex-list { list-style: none; padding: 0; margin: 0; }
+.ex-list li { padding: 14px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 11.5rem minmax(0, 1fr); gap: 16px; }
+.ex-list li:first-child { padding-top: 0; }
+.ex-list a { font-weight: 650; }
+.ex-list p { margin: 0; color: var(--muted); font-size: 0.97rem; }
+.ex-list .tag { display: inline-block; font-size: 0.8rem; padding: 0 8px; border-radius: 999px; margin-left: 4px; }
+.tag.native { background: var(--native-soft); color: var(--native); }
+.tag.hybrid { background: var(--bridge-soft); color: var(--bridge); }
+figure.mandel { margin: 0; background: var(--rs-pane); border-radius: var(--radius-pane); padding: 18px; position: sticky; top: 16px; }
+figure.mandel pre { margin: 0; color: var(--pyrite); font-size: clamp(0.42rem, 0.95vw, 0.7rem); line-height: 1.15; overflow-x: auto; }
+figure.mandel figcaption { color: var(--rs-muted); font-size: 0.85rem; margin-top: 12px; }
+figure.mandel figcaption code { background: transparent; border: 0; color: var(--rs-ink); }
+
+/* Roadmap */
+.road { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 48px; }
+.phases { list-style: none; padding: 0; margin: 0; position: relative; }
+.phases::before { content: ""; position: absolute; left: 9px; top: 8px; bottom: 8px; width: 2px; background: var(--native); }
+.phases li { position: relative; padding: 0 0 18px 34px; }
+.phases li::before { content: ""; position: absolute; left: 2px; top: 6px; width: 16px; height: 16px; border-radius: 50%; background: var(--native); border: 3px solid var(--bg); }
+.phases strong { display: block; }
+.phases span { color: var(--muted); font-size: 0.96rem; }
+.open { list-style: none; padding: 0; margin: 0; }
+.open li { padding: 9px 0 9px 28px; border-bottom: 1px solid var(--line); position: relative; font-size: 0.98rem; }
+.open li::before { content: ""; position: absolute; left: 2px; top: 15px; width: 12px; height: 12px; border: 2px solid var(--bridge); border-radius: 50%; }
+.open li.done::before { background: var(--native); border-color: var(--native); }
+
+.limits { margin-top: 56px; max-width: var(--measure); }
+.limits ul { padding-left: 1.1rem; }
+.limits li { margin: 0.4rem 0; }
+
+footer { margin-top: 96px; padding: 36px 0 48px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.95rem; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 32px; justify-content: space-between; }
+footer nav { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+
+@media (max-width: 900px) {
+  .panel { grid-template-columns: minmax(0, 1fr); }
+  .stratum { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .three, .steps { grid-template-columns: 1fr 1fr; }
+  .ex-grid, .road, .pros, .speed-notes, .modes { grid-template-columns: minmax(0, 1fr); }
+  figure.mandel { position: static; }
+}
+@media (max-width: 600px) {
+  .wrap { padding-left: 16px; padding-right: 16px; }
+  .hero { padding-top: 32px; }
+  .stratum { padding-left: 16px; padding-right: 16px; }
+  .three, .steps { grid-template-columns: minmax(0, 1fr); }
+  .top { flex-wrap: wrap; gap: 10px 16px; }
+  .top nav { order: 3; width: 100%; margin-left: 0; }
+  .theme { margin-left: auto; }
+  .bar { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .ex-list li { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  section { padding-top: 64px; }
+  .opts thead { display: none; }
+  .opts tr { display: block; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .opts td { display: block; border: 0; padding: 2px 0; }
+}
+</style>
+</head>
+<body>
+<header class="wrap top">
+  <a class="brand" href="#">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 28 10v12L16 29 4 22V10z" fill="#C99A1E"/><path d="M16 3 28 10 16 17 4 10z" fill="#E9C25A"/><path d="M16 17v12L4 22V10z" fill="#A27A10"/></svg>
+    pyrock
+  </a>
+  <nav aria-label="Sections">
+    <a href="#how">How it works</a>
+    <a href="#install">Install</a>
+    <a href="#usage">Usage</a>
+    <a href="#speed">Speed</a>
+    <a href="#compare">Comparison</a>
+    <a href="#examples">Examples</a>
+    <a href="#roadmap">Roadmap</a>
+    <a href="https://github.com/Abstrkshen/pyrock">GitHub</a>
+  </nav>
+  <button class="theme" type="button" id="theme" aria-label="Switch colour theme">Theme</button>
+</header>
+
+<main>
+<div class="wrap hero">
+  <h1>Compile ordinary Python into a native program, through Rust you can read.</h1>
+  <p class="sub">pyrock works out the types of unannotated Python from how each function is
+  called, writes one Rust function per combination of types, and builds the result with
+  Cargo. Code it can't compile keeps running in an embedded CPython, and pyrock lists every
+  line where that happens.</p>
+  <div class="actions">
+    <div class="cmd"><code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/Abstrkshen/pyrock/main/install.sh | sh</code><button class="copy" type="button" data-copy="install-cmd">Copy</button></div>
+    <a class="button" href="https://github.com/Abstrkshen/pyrock">Source on GitHub</a>
+  </div>
+  <p class="status">Version 0.1.0, a prototype. Developed and tested on Linux;
+  prebuilt binaries for Linux (x86-64 and arm64) and macOS (Apple silicon). Licensed MIT or Apache-2.0.</p>
+
+  <div class="twin hero-twin" data-tabs>
+    <div class="tabs" role="tablist" aria-label="Examples">
+      <button role="tab" id="tab-gen" aria-controls="p-gen" aria-selected="true">One function, three types</button>
+      <button role="tab" id="tab-cls" aria-controls="p-cls" aria-selected="false" tabindex="-1">Classes and lists</button>
+      <button role="tab" id="tab-ffi" aria-controls="p-ffi" aria-selected="false" tabindex="-1">Rust and C files</button>
+      <button role="tab" id="tab-hyb" aria-controls="p-hyb" aria-selected="false" tabindex="-1">Python packages</button>
+    </div>
+
+    <div class="panel" role="tabpanel" id="p-gen" aria-labelledby="tab-gen">
+      <div class="side py">
+        <div class="label"><span>main.py</span><span>you write</span></div>
+<pre><code><span class="t-k">def</span> add(a, b):
+    <span class="t-k">return</span> a + b
+
+<span class="t-k">def</span> fib(n):
+    <span class="t-k">return</span> n <span class="t-k">if</span> n &lt; <span class="t-n">2</span> <span class="t-k">else</span> fib(n - <span class="t-n">1</span>) + fib(n - <span class="t-n">2</span>)
+
+print(add(<span class="t-n">1</span>, <span class="t-n">2</span>), add(<span class="t-n">1.5</span>, <span class="t-n">2.25</span>), add(<span class="t-s">&quot;py&quot;</span>, <span class="t-s">&quot;rock&quot;</span>))
+print(fib(<span class="t-n">30</span>))</code></pre>
+        <div class="label tl"><span>terminal</span></div>
+<pre class="term"><code><span class="t-prompt">$ </span><span class="t-cmd">pyrock run main.py</span>
+3 3.75 pyrock
+832040
+<span class="t-prompt">$ </span><span class="t-cmd">pyrock explain main.py</span>
+<span class="t-head">Inferred generic signatures</span>
+  add(A, B) -&gt; R where Add(A, B, R)
+  fib(A) -&gt; A where Lt(A, int), Sub(A, int, A), Add(A, A, A)
+
+<span class="t-head">Specializations (reachable from module entry)</span>
+  add(a: int, b: int) -&gt; int        <span class="t-ok">native</span>  <span class="t-spec">add__int_int</span>
+  add(a: float, b: float) -&gt; float  <span class="t-ok">native</span>  <span class="t-spec">add__float_float</span>
+  add(a: str, b: str) -&gt; str        <span class="t-ok">native</span>  <span class="t-spec">add__str_str</span>
+  fib(n: int) -&gt; int                <span class="t-ok">native</span>  <span class="t-spec">fib__int</span></code></pre>
+      </div>
+      <div class="side rs">
+        <div class="label"><span>.pyrock/main/src/main.rs</span><span>pyrock writes</span></div>
+<pre><code><span class="t-c">/// `add(a: int, b: int) -&gt; int`, specialized from main.py:1</span>
+<span class="t-k">fn</span> <span class="t-spec">add__int_int</span>(<span class="t-k">mut</span> a: i64, <span class="t-k">mut</span> b: i64) -&gt; PyResult&lt;i64&gt; {
+    <span class="t-k">return</span> rt::int::add(a, b);
+}
+
+<span class="t-c">/// `add(a: float, b: float) -&gt; float`, specialized from main.py:1</span>
+<span class="t-k">fn</span> <span class="t-spec">add__float_float</span>(<span class="t-k">mut</span> a: f64, <span class="t-k">mut</span> b: f64) -&gt; PyResult&lt;f64&gt; {
+    <span class="t-k">return</span> Ok((a + b));
+}
+
+<span class="t-c">/// `add(a: str, b: str) -&gt; str`, specialized from main.py:1</span>
+<span class="t-k">fn</span> <span class="t-spec">add__str_str</span>(<span class="t-k">mut</span> a: rt::Str, <span class="t-k">mut</span> b: rt::Str) -&gt; PyResult&lt;rt::Str&gt; {
+    <span class="t-k">return</span> Ok(rt::string::concat(&amp;a, &amp;b));
+}
+
+<span class="t-c">/// `fib(n: int) -&gt; int`, specialized from main.py:4</span>
+<span class="t-k">fn</span> <span class="t-spec">fib__int</span>(<span class="t-k">mut</span> n: i64) -&gt; PyResult&lt;i64&gt; {
+    <span class="t-k">let</span> _frame = rt::enter()?; <span class="t-c">// recursive: enforce the recursion limit</span>
+    <span class="t-k">return</span> Ok((<span class="t-k">if</span> (n &lt; <span class="t-n">2_i64</span>) { n } <span class="t-k">else</span> { rt::int::add(<span class="t-spec">fib__int</span>(rt::int::sub(n, <span class="t-n">1_i64</span>)?)?, <span class="t-spec">fib__int</span>(rt::int::sub(n, <span class="t-n">2_i64</span>)?)?)? }));
+}</code></pre>
+      </div>
+    </div>
+
+    <div class="panel" role="tabpanel" id="p-cls" aria-labelledby="tab-cls">
+      <div class="side py">
+        <div class="label"><span>main.py</span><span>you write</span></div>
+<pre><code><span class="t-k">from</span> dataclasses <span class="t-k">import</span> dataclass
+
+<span class="t-d">@dataclass</span>
+<span class="t-k">class</span> Body:
+    x: float
+    v: float
+
+    <span class="t-k">def</span> step(self, dt):
+        self.x += self.v * dt
+
+<span class="t-k">def</span> simulate(bodies, steps):
+    <span class="t-k">for</span> _ <span class="t-k">in</span> range(steps):
+        <span class="t-k">for</span> b <span class="t-k">in</span> bodies:
+            b.step(<span class="t-n">0.01</span>)
+    <span class="t-k">return</span> sum(b.x <span class="t-k">for</span> b <span class="t-k">in</span> bodies)
+
+bodies = [Body(float(i), <span class="t-n">1.0</span> + i / <span class="t-n">10</span>) <span class="t-k">for</span> i <span class="t-k">in</span> range(<span class="t-n">100</span>)]
+print(round(simulate(bodies, <span class="t-n">1000</span>), <span class="t-n">3</span>))</code></pre>
+        <div class="label tl"><span>terminal</span></div>
+<pre class="term"><code><span class="t-prompt">$ </span><span class="t-cmd">pyrock run main.py --mode native-only</span>
+10900.0
+<span class="t-prompt">$ </span><span class="t-cmd">python3 main.py</span>
+10900.0</code></pre>
+      </div>
+      <div class="side rs">
+        <div class="label"><span>main.rs, one of its functions</span><span>pyrock writes</span></div>
+<pre><code><span class="t-k">fn</span> <span class="t-spec">simulate__list_Body_int</span>(<span class="t-k">mut</span> bodies: rt::List&lt;Body&gt;, <span class="t-k">mut</span> steps: i64) -&gt; PyResult&lt;f64&gt; {
+    <span class="t-k">let</span> <span class="t-k">mut</span> py__: i64;
+    <span class="t-k">let</span> <span class="t-k">mut</span> b: Body;
+    <span class="t-k">for</span> __py__ <span class="t-k">in</span> <span class="t-n">0</span>..steps {
+        py__ = __py__;
+        <span class="t-k">let</span> __c__t1 = bodies.clone();
+        <span class="t-k">let</span> <span class="t-k">mut</span> __i__t1 = <span class="t-n">0usize</span>;
+        <span class="t-k">while</span> <span class="t-k">let</span> Some(__v) = { <span class="t-k">let</span> __x = __c__t1.at(__i__t1); __i__t1 += <span class="t-n">1</span>; __x } {
+            b = __v;
+            <span class="t-spec">Body_step__Body_float</span>(b.clone(), <span class="t-n">0.01_f64</span>)?;
+        }
+    }
+    <span class="t-k">return</span> Ok(rt::coll::sum_float(<span class="t-spec">genexpr_f3__fn3__list_Body</span>(rt::Env(()), bodies.clone())?.to_vec()?, <span class="t-n">0.0</span>));
+}</code></pre>
+      </div>
+    </div>
+
+    <div class="panel" role="tabpanel" id="p-ffi" aria-labelledby="tab-ffi">
+      <div class="side py">
+        <div class="label"><span>main.py</span><span>you write</span></div>
+<pre><code><span class="t-k">import</span> stats   <span class="t-c"># stats.rs</span>
+<span class="t-k">import</span> fastc   <span class="t-c"># fastc.c</span>
+
+xs = [<span class="t-n">3.0</span>, <span class="t-n">1.5</span>, <span class="t-n">4.0</span>, <span class="t-n">1.0</span>, <span class="t-n">5.5</span>]
+print(stats.mean(xs), stats.clamp_all(xs, <span class="t-n">2.0</span>, <span class="t-n">4.0</span>))
+print(fastc.gcd(<span class="t-n">1071</span>, <span class="t-n">462</span>))</code></pre>
+        <div class="label"><span>stats.rs, plain Rust, no bindings</span></div>
+<pre class="file"><code><span class="t-k">pub</span> <span class="t-k">fn</span> mean(xs: &amp;[f64]) -&gt; f64 {
+    xs.iter().sum::&lt;f64&gt;() / xs.len() <span class="t-k">as</span> f64
+}
+
+<span class="t-k">pub</span> <span class="t-k">fn</span> clamp_all(xs: &amp;[f64], lo: f64, hi: f64) -&gt; Vec&lt;f64&gt; {
+    xs.iter().map(|x| x.clamp(lo, hi)).collect()
+}</code></pre>
+        <div class="label"><span>fastc.c</span></div>
+<pre class="file"><code><span class="t-k">int</span> gcd(<span class="t-k">int</span> a, <span class="t-k">int</span> b) {
+    <span class="t-k">while</span> (b) { <span class="t-k">int</span> t = a % b; a = b; b = t; }
+    <span class="t-k">return</span> a;
+}</code></pre>
+      </div>
+      <div class="side rs">
+        <div class="label"><span>terminal</span><span>signatures read from the source</span></div>
+<pre class="term"><code><span class="t-prompt">$ </span><span class="t-cmd">pyrock explain main.py</span>
+<span class="t-head">Imports</span>
+  stats  -&gt; rust  stats.rs  (2 function(s))
+  fastc  -&gt; c  fastc.c  (1 function(s))
+      stats.mean(&amp;[f64]) -&gt; f64
+      stats.clamp_all(&amp;[f64], f64, f64) -&gt; Vec&lt;f64&gt;
+      fastc.gcd(std::ffi::c_int, std::ffi::c_int) -&gt; std::ffi::c_int
+Runtime: <span class="t-ok">no CPython needed</span>
+<span class="t-prompt">$ </span><span class="t-cmd">pyrock run main.py --mode native-only</span>
+3.0 [3.0, 2.0, 4.0, 2.0, 4.0]
+21</code></pre>
+      </div>
+    </div>
+
+    <div class="panel" role="tabpanel" id="p-hyb" aria-labelledby="tab-hyb">
+      <div class="side py">
+        <div class="label"><span>main.py</span><span>you write</span></div>
+<pre><code><span class="t-k">import</span> json
+
+<span class="t-k">def</span> total(prices):
+    s = <span class="t-n">0.0</span>
+    <span class="t-k">for</span> p <span class="t-k">in</span> prices:
+        s += p
+    <span class="t-k">return</span> s
+
+order = json.loads(<span class="t-s">&#x27;{&quot;items&quot;: [{&quot;price&quot;: 9.5}, {&quot;price&quot;: 3.25}]}&#x27;</span>)
+prices = [float(item[<span class="t-s">&quot;price&quot;</span>]) <span class="t-k">for</span> item <span class="t-k">in</span> order[<span class="t-s">&quot;items&quot;</span>]]
+print(total(prices))</code></pre>
+        <div class="label tl"><span>terminal</span><span>every boundary is listed</span></div>
+<pre class="term"><code><span class="t-prompt">$ </span><span class="t-cmd">pyrock explain main.py</span>
+<span class="t-head">Specializations (reachable from module entry)</span>
+  total(prices: list[float]) -&gt; float  <span class="t-ok">native</span>  <span class="t-spec">total__list_float</span>
+
+<span class="t-head">CPython boundaries</span>
+  main.py:1:1  <span class="t-br">P200</span>  runtime import of `json`
+  main.py:9:9  <span class="t-br">P210</span>  json.loads(...)
+  main.py:10:17  <span class="t-br">P212</span>  subscript
+  main.py:10:44  <span class="t-br">P212</span>  subscript
+Runtime: <span class="t-br">embeds CPython</span> (libpython) for the boundaries above
+<span class="t-prompt">$ </span><span class="t-cmd">pyrock run main.py</span>
+12.75
+<span class="t-prompt">$ </span><span class="t-cmd">pyrock check main.py --mode native-only</span>
+main.py:1:1  <span class="t-br">P200</span>  <span class="t-br">error</span>: runtime import of `json` in &lt;module&gt;
+    <span class="t-ok">native</span>-only: compilation <span class="t-br">error</span> (use --mode hybrid to bridge through CPython)</code></pre>
+      </div>
+      <div class="side rs">
+        <div class="label"><span>main.rs, the native part</span><span>pyrock writes</span></div>
+<pre><code><span class="t-k">fn</span> <span class="t-spec">total__list_float</span>(<span class="t-k">mut</span> prices: rt::List&lt;f64&gt;) -&gt; PyResult&lt;f64&gt; {
+    <span class="t-k">let</span> <span class="t-k">mut</span> s: f64;
+    <span class="t-k">let</span> <span class="t-k">mut</span> p: f64;
+    s = <span class="t-n">0.0_f64</span>;
+    <span class="t-k">let</span> __c__t1 = prices.clone();
+    <span class="t-k">let</span> <span class="t-k">mut</span> __i__t1 = <span class="t-n">0usize</span>;
+    <span class="t-k">while</span> <span class="t-k">let</span> Some(__v) = { <span class="t-k">let</span> __x = __c__t1.at(__i__t1); __i__t1 += <span class="t-n">1</span>; __x } {
+        p = __v;
+        s = (s + p);
+    }
+    <span class="t-k">return</span> Ok(s);
+}</code></pre>
+      </div>
+    </div>
+  </div>
+  <p class="caption">Real output of <code>pyrock</code> 0.1.0, trimmed to the interesting
+  functions and columns. Highlighted names are specializations: <code>add</code> is called
+  with ints, floats and strings, so it becomes three Rust functions.</p>
+</div>
+
+<section id="how">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p class="lede">A program goes down through six layers, from the Python you wrote to
+    machine code. Here is <code>fib</code> at each of them.</p>
+  </div>
+  <div class="strata">
+    <div class="stratum">
+      <div>
+        <div class="stage"><span class="num">1</span><h3>Python source</h3></div>
+        <p>Plain Python: no annotations, no decorators, no special syntax. Imports next to
+        the file can be <code>.py</code>, <code>.rs</code> or <code>.c</code>.</p>
+      </div>
+<pre>def fib(n):
+    return n if n &lt; 2 else fib(n - 1) + fib(n - 2)
+
+print(fib(30))</pre>
+    </div>
+    <div class="stratum">
+      <div>
+        <div class="stage"><span class="num">2</span><h3>CPython's parser</h3></div>
+        <p>pyrock asks your own <code>python3</code> for the syntax tree, so parsing matches
+        the language exactly, then resolves names and imports into its own IR.</p>
+        <p class="where">crates/frontend</p>
+      </div>
+<pre>{"_t": "FunctionDef", "name": "fib", ...
+ "body": [{"_t": "Return", "value": {"_t": "IfExp",
+   "test": {"_t": "Compare", "ops": [{"_t": "Lt"}], ...</pre>
+    </div>
+    <div class="stratum">
+      <div>
+        <div class="stage"><span class="num">3</span><h3>Generic signatures</h3></div>
+        <p>Each function gets a signature with constraints instead of types: <code>fib</code>
+        works for any <code>A</code> that supports <code>&lt;</code>, <code>-</code> and
+        <code>+</code> the way it uses them.</p>
+        <p class="where">crates/infer</p>
+      </div>
+<pre>fib(A) -> A where Lt(A, int), Sub(A, int, A), Add(A, A, A)</pre>
+    </div>
+    <div class="stratum">
+      <div>
+        <div class="stage"><span class="num">4</span><h3>Specialization</h3></div>
+        <p>Starting from the module body, pyrock follows the actual calls with concrete types
+        until nothing changes, then decides for each piece: native, or through CPython.</p>
+        <p class="where">crates/infer, crates/analysis</p>
+      </div>
+<pre>fib(n: int) -> int   native  fib__int
+    effects: may_raise  recursive
+Runtime: no CPython needed</pre>
+    </div>
+    <div class="stratum">
+      <div>
+        <div class="stage"><span class="num">5</span><h3>Rust</h3></div>
+        <p>One Rust function per specialization, with Python's semantics kept: checked
+        integer overflow, the recursion limit, exceptions as <code>Result</code>.</p>
+        <p class="where">crates/codegen-rust, crates/runtime</p>
+      </div>
+<pre>fn fib__int(mut n: i64) -> PyResult&lt;i64&gt; {
+    let _frame = rt::enter()?;
+    return Ok((if (n &lt; 2_i64) { n } else {
+        rt::int::add(fib__int(rt::int::sub(n, 1_i64)?)?,
+                     fib__int(rt::int::sub(n, 2_i64)?)?)? }));
+}</pre>
+    </div>
+    <div class="stratum">
+      <div>
+        <div class="stage"><span class="num">6</span><h3>A native executable</h3></div>
+        <p>Cargo and rustc do the rest. A program with no boundaries doesn't link libpython at
+        all; one with boundaries embeds CPython for exactly those lines.</p>
+        <p class="where">crates/driver</p>
+      </div>
+<pre>$ pyrock run fib.py --release
+832040
+$ ls .pyrock/fib/
+Cargo.toml  fib  pyrock-report.json  pyrock.sourcemap.json  src</pre>
+    </div>
+  </div>
+  <div class="wrap">
+    <p class="caption">Correctness is checked by running every test program under both
+    CPython and pyrock and comparing standard output, exit status and the final exception
+    line. Details: <a href="https://github.com/Abstrkshen/pyrock/blob/main/docs/how-it-works.md">docs/how-it-works.md</a>.</p>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2>Install</h2>
+    <p class="lede">pyrock is a single binary. It writes Rust and builds it with Cargo, so
+    your machine also needs a Rust toolchain.</p>
+    <div class="three">
+      <div class="way first">
+        <h3>Install script</h3>
+        <p>Downloads the right binary from the releases, checks its SHA-256 and puts it in
+        <code>~/.local/bin</code>.</p>
+<pre>curl -fsSL https://raw.githubusercontent.com/\
+Abstrkshen/pyrock/main/install.sh | sh
+pyrock --version</pre>
+        <p><code>PYROCK_INSTALL_DIR</code> changes the folder, <code>PYROCK_VERSION=v0.1.0</code> picks a release.</p>
+      </div>
+      <div class="way">
+        <h3>Release archive</h3>
+        <p>Download <code>pyrock-&lt;target&gt;.tar.gz</code> from the
+        <a href="https://github.com/Abstrkshen/pyrock/releases/latest">latest release</a>,
+        compare it with <code>SHA256SUMS</code>, and put <code>pyrock</code> on your
+        <code>PATH</code>.</p>
+        <p>Targets: <code>x86_64-unknown-linux-musl</code>, <code>aarch64-unknown-linux-musl</code> (static, any distribution) and <code>aarch64-apple-darwin</code>.</p>
+      </div>
+      <div class="way">
+        <h3>From source</h3>
+        <p>Any platform with Rust. The binary carries its runtime, so the clone isn't
+        needed afterwards.</p>
+<pre>cargo install --git \
+  https://github.com/Abstrkshen/pyrock pyrock</pre>
+      </div>
+    </div>
+    <div class="needs">
+      <h3>What else it needs</h3>
+      <ul>
+        <li><strong>Rust</strong>, from <a href="https://rustup.rs">rustup.rs</a> (tested with 1.96). The first build of any program compiles the runtime into <code>~/.cache/pyrock/target</code> in a minute or two; later builds take seconds.</li>
+        <li><strong>Python 3</strong> (tested with 3.12). pyrock parses with it, and programs that use Python packages embed it, which needs the shared <code>libpython</code> (on Debian and Ubuntu: <code>sudo apt install python3-dev</code>).</li>
+        <li><strong>A C compiler</strong>, only if your programs import <code>.c</code> files.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="usage">
+  <div class="wrap">
+    <h2>Usage</h2>
+    <p class="lede">Point pyrock at your program's entry file. Everything it imports from
+    the same folder is compiled into one executable.</p>
+    <ol class="steps">
+      <li><code class="big">pyrock check main.py</code><p>Reports what won't compile, each problem with a code, a line and a reason. Builds nothing, so it's quick.</p></li>
+      <li><code class="big">pyrock explain main.py</code><p>Shows how imports resolved, the types inferred for each function, and every line that goes through CPython.</p></li>
+      <li><code class="big">pyrock run main.py</code><p>Builds and runs. Arguments after <code>--</code> go to your program. Output and exit status match <code>python3</code>.</p></li>
+      <li><code class="big">pyrock bench main.py</code><p>Times a <code>--release</code> build against CPython and checks that both print the same thing.</p></li>
+    </ol>
+
+    <div class="modes">
+      <div class="mode hybrid">
+        <h3>Hybrid mode, the default</h3>
+        <p>Anything pyrock can't compile natively runs in an embedded CPython: imported
+        packages such as <code>json</code>, <code>numpy</code> or <code>langchain</code>, and
+        values that don't have a single type.</p>
+        <ul>
+          <li>Every such line is a reported boundary, listed by <code>explain</code>.</li>
+          <li>Native functions and objects can be passed to Python and called back.</li>
+          <li>The executable needs the Python it was built with.</li>
+        </ul>
+      </div>
+      <div class="mode native">
+        <h3><code>--mode native-only</code></h3>
+        <p>Every boundary becomes a compile error, so what you get is pure Rust.</p>
+        <ul>
+          <li>The executable doesn't link libpython and runs without Python installed.</li>
+          <li>Rust and C files are still imported natively.</li>
+          <li>Use <code>pyrock check --mode native-only</code> to keep a program that way.</li>
+        </ul>
+      </div>
+    </div>
+
+    <table class="opts">
+      <thead><tr><th scope="col">Command or option</th><th scope="col">What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>build main.py [--out DIR]</code></td><td>Builds and prints the executable's path (default <code>.pyrock/main/main</code>)</td></tr>
+        <tr><td><code>emit main.py --out DIR</code></td><td>Writes the Cargo project (<code>Cargo.toml</code>, <code>src/main.rs</code>, a source map and a JSON report) without building</td></tr>
+        <tr><td><code>--release</code></td><td>Optimized build; use it whenever you measure speed</td></tr>
+        <tr><td><code>--python PATH</code></td><td>The interpreter to parse with and embed, and whose packages the program sees. Pass a virtualenv's <code>python</code> to use its packages</td></tr>
+        <tr><td><code>explain --format json</code></td><td>The same report as JSON, for editors and scripts</td></tr>
+        <tr><td><code>PYROCK_TARGET_DIR</code></td><td>Where the shared Cargo build cache lives (default <code>~/.cache/pyrock/target</code>)</td></tr>
+      </tbody>
+    </table>
+    <p class="caption">Diagnostic codes: <code>P1xx</code> unsupported constructs and name
+    problems, <code>P2xx</code> CPython boundaries, <code>P3xx</code> types. The full list is in
+    <a href="https://github.com/Abstrkshen/pyrock/blob/main/docs/subset.md#rejected-at-compile-time-diagnostic-codes">docs/subset.md</a>.</p>
+  </div>
+</section>
+
+<section id="speed">
+  <div class="wrap">
+    <h2>Speed</h2>
+    <p class="lede">Measured with <code>--release</code> on an Intel Core 7 240H against
+    CPython 3.12.3. Wall-clock time including process start, with identical output in every
+    run.</p>
+    <div class="bars">
+      <div class="bar"><div class="what"><code>numeric_loop.py</code><small>int and float loops, recursion</small></div><div><div class="track"><div class="fill" style="--x:48">48x</div></div><div class="times">CPython 626 ms, pyrock 13 ms</div></div></div>
+      <div class="bar"><div class="what">Game state in dicts<small>200k frames of record dicts</small></div><div><div class="track"><div class="fill" style="--x:18.8">18.8x</div></div><div class="times">CPython 0.58 s, pyrock 31 ms</div></div></div>
+      <div class="bar"><div class="what"><code>demos/gui/headless.py</code><small>300 balls, pairwise collisions</small></div><div><div class="track"><div class="fill" style="--x:16.7">16.7x</div></div><div class="times">CPython 3.3 s, pyrock 0.2 s</div></div></div>
+      <div class="bar"><div class="what">The same game state in classes<small>200k frames</small></div><div><div class="track"><div class="fill" style="--x:10">10x</div></div><div class="times">CPython 0.47 s, pyrock 46 ms</div></div></div>
+      <div class="bar"><div class="what"><code>demos/ai/bench_bpe.py</code><small>training a BPE tokenizer, string-heavy</small></div><div><div class="track"><div class="fill" style="--x:2.7">2.7x</div></div><div class="times">CPython 0.40 s, pyrock 0.15 s</div></div></div>
+    </div>
+    <div class="speed-notes">
+      <div>
+        <h3>Where it helps</h3>
+        <p>Loops over numbers, strings, lists, dicts and your own classes: simulation, game
+        logic, parsers, tokenizers, request handling. These become plain Rust with no
+        object boxing and no interpreter.</p>
+      </div>
+      <div>
+        <h3>Where it doesn't</h3>
+        <p>Code that spends its time inside Python packages (numpy, OpenCV, an HTTP
+        framework) runs at the same speed, because that work still happens in CPython. Each
+        crossing into CPython costs about 15&nbsp;ns, so keep hot loops on native values.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="wrap">
+    <h2>Compared with other tools</h2>
+    <p class="lede">Several projects make Python faster. They differ in what you have to
+    write, what you get, and how much of Python they keep.</p>
+    <div class="table-scroll">
+      <table class="compare">
+        <thead><tr><th scope="col"></th><th scope="col">You write</th><th scope="col">You get</th><th scope="col">Where types come from</th><th scope="col">Python packages</th></tr></thead>
+        <tbody>
+          <tr class="us"><th scope="row">pyrock</th><td>Unannotated Python (a large subset natively)</td><td>A native executable, through readable Rust</td><td>Inferred from how each function is called; one copy per type combination</td><td>Run in an embedded CPython at reported boundaries; none in native-only mode</td></tr>
+          <tr><th scope="row">CPython</th><td>Python</td><td>Bytecode, run by the interpreter</td><td>Checked at run time</td><td>All</td></tr>
+          <tr><th scope="row">PyPy</th><td>Python</td><td>An interpreter with a tracing JIT</td><td>Observed at run time</td><td>Pure-Python packages; C extensions through a compatibility layer</td></tr>
+          <tr><th scope="row">Cython</th><td>Python, or Cython with C type declarations for speed</td><td>A C extension module</td><td>Your declarations</td><td>All (it runs inside CPython)</td></tr>
+          <tr><th scope="row">mypyc</th><td>Python with type annotations</td><td>A C extension module</td><td>Your annotations, checked at run time</td><td>All (it runs inside CPython)</td></tr>
+          <tr><th scope="row">Nuitka</th><td>Python</td><td>A standalone executable or extension, through C</td><td>Mostly dynamic: the C code uses CPython's object model</td><td>All</td></tr>
+          <tr><th scope="row">Numba</th><td>Numeric functions marked <code>@jit</code></td><td>Machine code, compiled at run time</td><td>Inferred per call signature</td><td>Called from CPython; inside the function, a numeric subset</td></tr>
+          <tr><th scope="row">Codon</th><td>Python-like code (a statically typed dialect)</td><td>A native executable, through LLVM</td><td>Inferred at compile time</td><td>Through an explicit Python interop layer</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="fair">Summarized from each project's own documentation. If something here is
+    out of date, please <a href="https://github.com/Abstrkshen/pyrock/issues">open an issue</a>.</p>
+    <div class="pros">
+      <div>
+        <h3>What pyrock does differently</h3>
+        <ul>
+          <li>No annotations needed: types come from the calls, and one function can become several specialized ones.</li>
+          <li>You can read what it produced. The Rust has a comment on every function pointing at its Python line, and <code>explain</code> lists every decision.</li>
+          <li>The boundary with CPython is explicit, per line, and can be turned into errors.</li>
+          <li><code>import stats</code> loads <code>stats.rs</code> or <code>stats.c</code> directly. No bindings, no build files.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>What to know before you try it</h3>
+        <ul>
+          <li>It's a prototype, developed and tested on Linux.</li>
+          <li>Integers are 64-bit: results beyond that raise <code>OverflowError</code> where CPython would grow the number.</li>
+          <li>Compiling needs Rust, and a first build takes a minute or two.</li>
+          <li>Tracebacks show only the final line, and some Python (<code>match</code>, metaclasses, classes based on <code>dict</code> or <code>pydantic</code>) isn't supported yet.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="examples">
+  <div class="wrap">
+    <h2>Examples and demos</h2>
+    <p class="lede">Each one has a README with commands you can run as written. CI runs
+    them all, except the ones that need a camera, a local model server or extra packages.</p>
+    <div class="ex-grid">
+      <ul class="ex-list">
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/raylib-breakout">raylib-breakout</a><span class="tag hybrid">hybrid</span></div><p>A platformer with SVG sprites. The game logic is 63 native functions; drawing is the C raylib library.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/ollama-agents">ollama-agents</a><span class="tag native">native</span></div><p>An AI-agent HTTP server: agent logic in Python, HTTP and JSON in a Rust file, tool calls through a local Ollama model. No CPython at run time.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/opencv-yolo">opencv-yolo</a><span class="tag native">native</span></div><p>Live YOLO detection, segmentation and pose from a webcam: OpenCV, ONNX Runtime and raylib in C and C++.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/demos/ai">demos/ai</a><span class="tag native">native</span></div><p>A BPE tokenizer in Python, a bigram model in Rust and sampling in C, in one executable.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/demos/backend">demos/backend</a><span class="tag hybrid">hybrid</span></div><p>A JSON API on asyncio: native store, routing and validation; sockets and <code>json</code> through CPython.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/demos/gui">demos/gui</a><span class="tag hybrid">hybrid</span></div><p>300 colliding balls drawn with raylib; the physics runs 17 times faster than in CPython.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/langchain">langchain</a>, <a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/huggingface">huggingface</a><span class="tag hybrid">hybrid</span></div><p>Real packages through CPython, with native callbacks passed into them.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples">and ten more</a></div><p>From <code>hello</code> to a Rust HTTP server, C++ through <code>ctypes</code>, and every kind of import in one program.</p></li>
+      </ul>
+      <figure class="mandel">
+<pre aria-label="An ASCII-art Mandelbrot set">
+                                .                     
+                                 ...                  
+                                .+#.                  
+                               .####.                 
+                          .  ...####..    .           
+                         .#+############...+          
+                        ..################.           
+             .         .##################...         
+             .#........+###################.          
+            ..+######..####################+          
+          ...+########+####################           
+#########################################..           
+          ...+########+####################           
+            ..+######..####################+          
+             .#........+###################.          
+             .         .##################...         
+                        ..################.           
+                         .#+############...+          
+                          .  ...####..    .           
+                               .####.                 
+                                .+#.                  
+                                 ...                  
+                                .</pre>
+        <figcaption>Output of <code>examples/native-mandelbrot</code>, compiled with
+        <code>--mode native-only</code>.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="roadmap">
+  <div class="wrap">
+    <h2>Roadmap</h2>
+    <p class="lede">The goal is to compile enough of the Python that backend, AI and GUI apps
+    actually use, and to make existing C and Rust code easy to call. Each step is logged with
+    how it was verified in <a href="https://github.com/Abstrkshen/pyrock/blob/main/docs/roadmap.md">docs/roadmap.md</a>.</p>
+    <div class="road">
+      <div>
+        <h3>Done</h3>
+        <ol class="phases">
+          <li><strong>Phase 1: types and everyday syntax</strong><span>Parametric types, exceptions, <code>with</code>, defaults and keywords, <code>Optional</code>, module globals.</span></li>
+          <li><strong>Phase 2: native collections</strong><span>Lists, dicts, sets and tuples with CPython's aliasing, comprehensions, unpacking, formatting.</span></li>
+          <li><strong>Phase 3: classes</strong><span>Methods, properties, dataclasses, inheritance, user exceptions, polymorphism.</span></li>
+          <li><strong>Phase 4: closures and callbacks</strong><span>Lambdas, nested functions, decorators, native functions callable from Python.</span></li>
+          <li><strong>Phase 5: Rust and C interop</strong><span>Slices, buffers, structs, handles with methods, callbacks, Cargo dependencies.</span></li>
+          <li><strong>Phase 6: async and generators</strong><span><code>async</code>/<code>await</code> on asyncio, generators, async generators, finalization.</span></li>
+          <li><strong>Phase 7: faster mixed code</strong><span>A cheaper CPython bridge, threads, record dicts as structs, native <code>math</code>.</span></li>
+        </ol>
+      </div>
+      <div>
+        <h3>Phase 8, in progress</h3>
+        <ul class="open">
+          <li class="done">Packages, relative imports, imports inside functions</li>
+          <li class="done">Enums, ABCs, dataclass options, <code>NamedTuple</code>, multiple inheritance</li>
+          <li class="done"><code>Protocol</code>, <code>Generic</code>, <code>TypedDict</code>, <code>cached_property</code></li>
+          <li><code>match</code> statements</li>
+          <li>Arbitrary-precision integers</li>
+          <li>Classes based on CPython classes (<code>dict</code>, <code>pydantic.BaseModel</code>)</li>
+          <li>Full tracebacks through the source map</li>
+          <li>Releasing the GIL during long native computations</li>
+          <li>macOS in CI, and benchmarks of compile time, memory and binary size</li>
+        </ul>
+      </div>
+    </div>
+    <div class="limits">
+      <h3>How much of Python compiles today</h3>
+      <p>52 of Python 3.12's 55 statement and expression kinds. Measured on code as it is,
+      64% of the standard library's functions and methods are accepted, and 83%, 75% and 50%
+      of those in <code>requests</code>, <code>huggingface_hub</code> and
+      <code>langchain_core</code>. See <a href="https://github.com/Abstrkshen/pyrock/blob/main/docs/coverage.md">docs/coverage.md</a>
+      and the <a href="https://github.com/Abstrkshen/pyrock/blob/main/docs/subset.md">supported subset</a>.</p>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>pyrock, MIT or Apache-2.0.</span>
+    <nav aria-label="Documentation">
+      <a href="https://github.com/Abstrkshen/pyrock#readme">README</a>
+      <a href="https://github.com/Abstrkshen/pyrock/blob/main/docs/status.md">Current state</a>
+      <a href="https://github.com/Abstrkshen/pyrock/blob/main/docs/imports.md">Imports</a>
+      <a href="https://github.com/Abstrkshen/pyrock/blob/main/docs/how-it-works.md">How it works</a>
+      <a href="https://github.com/Abstrkshen/pyrock/releases">Releases</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  root.classList.add("js");
+
+  // Theme: follows the system until the visitor picks one.
+  var btn = document.getElementById("theme");
+  try { var saved = localStorage.getItem("pyrock-theme"); if (saved) root.dataset.theme = saved; } catch (e) {}
+  btn.addEventListener("click", function () {
+    var dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem("pyrock-theme", root.dataset.theme); } catch (e) {}
+  });
+
+  // Copy buttons.
+  document.querySelectorAll("[data-copy]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var text = document.getElementById(b.dataset.copy).textContent;
+      navigator.clipboard.writeText(text).then(function () {
+        b.textContent = "Copied";
+        setTimeout(function () { b.textContent = "Copy"; }, 1600);
+      });
+    });
+  });
+
+  // Tabs (all panels stay visible without JavaScript).
+  document.querySelectorAll("[data-tabs]").forEach(function (box) {
+    var tabs = Array.prototype.slice.call(box.querySelectorAll('[role="tab"]'));
+    function select(tab, focus) {
+      tabs.forEach(function (t) {
+        var on = t === tab;
+        t.setAttribute("aria-selected", on);
+        t.tabIndex = on ? 0 : -1;
+        document.getElementById(t.getAttribute("aria-controls")).hidden = !on;
+      });
+      if (focus) tab.focus();
+    }
+    tabs.forEach(function (t, i) {
+      t.addEventListener("click", function () { select(t); });
+      t.addEventListener("keydown", function (e) {
+        var j = e.key === "ArrowRight" ? i + 1 : e.key === "ArrowLeft" ? i - 1 : e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1 : null;
+        if (j === null) return;
+        e.preventDefault();
+        select(tabs[(j + tabs.length) % tabs.length], true);
+      });
+    });
+    select(tabs[0]);
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,91 @@
+name: release
+
+# Push a tag such as v0.1.0 to build, smoke-test and publish the binaries.
+# Each binary is published only if its smoke test passes (scripts/release_smoke.sh).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux binaries are static (musl), so they run on any distribution.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Python with a shared libpython (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-dev
+      - name: Python (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: cargo build --release --locked -p pyrock --target ${{ matrix.target }}
+      - name: Smoke test (native, CPython, Rust and C imports)
+        run: bash scripts/release_smoke.sh target/${{ matrix.target }}/release/pyrock
+      - name: Package
+        run: |
+          name=pyrock-${{ matrix.target }}
+          mkdir -p dist/$name
+          cp target/${{ matrix.target }}/release/pyrock dist/$name/
+          strip dist/$name/pyrock
+          cp README.md LICENSE-MIT LICENSE-APACHE dist/$name/
+          tar -C dist -czf dist/$name.tar.gz $name
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pyrock-${{ matrix.target }}
+          path: dist/pyrock-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    # Publish whichever targets passed their smoke test.
+    if: always() && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          body: |
+            Prebuilt `pyrock` binaries. Install the latest one with:
+
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/Abstrkshen/pyrock/main/install.sh | sh
+            ```
+
+            or download the archive for your platform below, check it against `SHA256SUMS`,
+            and put `pyrock` on your `PATH`.
+
+            pyrock builds your programs with Cargo, so it also needs a Rust toolchain
+            ([rustup](https://rustup.rs)) and Python 3 (with the shared `libpython` for programs
+            that use Python packages). See the README's Installation and Usage sections.
+
+            Linux binaries are static (musl) and run on any distribution. Every binary was
+            smoke-tested on its platform before it was published (native code, a CPython
+            import, and Rust and C imports).

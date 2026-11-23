@@ -95,7 +95,10 @@ with the GUI demo under a virtual display.
 
 ## Installation
 
-`cargo install --path crates/driver` installs the `pyrock` command (see the README's
+Prebuilt binaries for Linux (x86-64 and arm64, static) and macOS (Apple silicon) are
+published on GitHub releases by `.github/workflows/release.yml`, each smoke-tested on its
+platform first (`scripts/release_smoke.sh`); `install.sh` downloads and checks one. From
+source, `cargo install --path crates/driver` installs the same command (see the README's
 Installation section; `commands.perch` has the maintainer's shortcuts). The binary carries
 its runtime crate and unpacks it into `~/.cache/pyrock/runtime/<hash>/` on first use, so it
 does not depend on the repository's location. Generated projects go in `.pyrock/<name>/`
