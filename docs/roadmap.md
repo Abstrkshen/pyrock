@@ -1222,3 +1222,10 @@ From `.ignore/gaps/TO-PYROCK-DEV.md`, written while making the first video.
   `PYTHONFRAMEWORKPREFIX` by the driver; `pyo3_build_config::get()` in the generated
   `build.rs` failed, since it needs a direct dependency on `pyo3` (caught by the new
   macOS CI job).
+
+### Release v0.1.2 (2026-11-23)
+
+* Version 0.1.2: the launch fixes, `isinstance` narrowing and the two inference collapses
+  since v0.1.1, plus the playground and examples work. `CHANGELOG.md` lists the changes;
+  the release workflow puts the tag's section at the top of the GitHub release notes and
+  fails if there is none.

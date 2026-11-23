@@ -61,31 +61,40 @@ jobs:
     if: always() && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - name: Release notes (the tag's CHANGELOG.md section, then installation)
+        run: |
+          awk -v v="## ${GITHUB_REF_NAME} " 'index($0, v) == 1 { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "::error::CHANGELOG.md has no section for ${GITHUB_REF_NAME}"; exit 1; }
+          printf '\n## Install\n\n' >> notes.md
+          cat >> notes.md <<'EOF'
+          Prebuilt `pyrock` binaries. Install the latest one with:
+
+          ```sh
+          curl -fsSL https://raw.githubusercontent.com/Abstrkshen/pyrock/main/install.sh | sh
+          ```
+
+          or download the archive for your platform below, check it against `SHA256SUMS`,
+          and put `pyrock` on your `PATH`.
+
+          pyrock builds your programs with Cargo, so it also needs a Rust toolchain
+          ([rustup](https://rustup.rs)) and Python 3 (with the shared `libpython` for programs
+          that use Python packages). See the README's Installation and Usage sections.
+
+          Linux binaries are static (musl) and run on any distribution. Every binary was
+          smoke-tested on its platform before it was published (native code, a CPython
+          import, and Rust and C imports).
+          EOF
+          cat notes.md
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
             dist/SHA256SUMS
-          body: |
-            Prebuilt `pyrock` binaries. Install the latest one with:
-
-            ```sh
-            curl -fsSL https://raw.githubusercontent.com/Abstrkshen/pyrock/main/install.sh | sh
-            ```
-
-            or download the archive for your platform below, check it against `SHA256SUMS`,
-            and put `pyrock` on your `PATH`.
-
-            pyrock builds your programs with Cargo, so it also needs a Rust toolchain
-            ([rustup](https://rustup.rs)) and Python 3 (with the shared `libpython` for programs
-            that use Python packages). See the README's Installation and Usage sections.
-
-            Linux binaries are static (musl) and run on any distribution. Every binary was
-            smoke-tested on its platform before it was published (native code, a CPython
-            import, and Rust and C imports).
+          body_path: notes.md
