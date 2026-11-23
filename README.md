@@ -23,6 +23,7 @@ A plain `import x` (or `from x import f`) is resolved next to the importing file
 | `x.py` | Compiled natively as part of the same binary (functions, classes, module variables). Its module body runs once, at the first import. If it uses unsupported syntax, hybrid mode imports it through CPython instead and warns (P220). |
 | `x.rs` | Linked into the binary with `#[path] mod`. `pub fn` with scalars, strings, `Vec`/slices (`&mut` written back), `Option`, tuples, `HashMap`, callbacks (`impl Fn`), `pub struct` handles with methods, and `Result` (errors raise). Crates via `// pyfast: dep`. |
 | `x.c` | Compiled with the system C compiler (`cc` crate). Signatures come from `x.h` when it exists, otherwise from the non-static definitions in `x.c`. Scalars, strings, pointer+length arrays, `typedef struct` values and function pointers cross the boundary; `// pyfast: link` / `pkg-config` add libraries. |
+| `x/__init__.py` | A package: its modules compile natively, with `import x.y`, `from x import y` and relative imports (`from .y import f`) inside it. |
 | nothing | A CPython import at runtime: the stdlib, site-packages and C-extension packages (numpy, ...). The build interpreter's `sys.path` is embedded, so a venv works. |
 
 ```python

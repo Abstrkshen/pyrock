@@ -727,6 +727,26 @@ pub struct ClassDef {
     /// Class attributes (stored as global cells named `Class.attr`).
     pub class_vars: Vec<String>,
     pub dataclass: bool,
+    /// Methods this class declares `@abstractmethod` (an ABC).
+    pub abstracts: Vec<String>,
+    /// `@dataclass(...)` options.
+    pub dc: DataclassOpts,
+}
+
+/// The options of `@dataclass(eq=, order=, frozen=, repr=, kw_only=)`.
+#[derive(Clone, Copy, Debug)]
+pub struct DataclassOpts {
+    pub eq: bool,
+    pub order: bool,
+    pub frozen: bool,
+    pub repr: bool,
+    pub kw_only: bool,
+}
+
+impl Default for DataclassOpts {
+    fn default() -> Self {
+        DataclassOpts { eq: true, order: false, frozen: false, repr: true, kw_only: false }
+    }
 }
 
 impl Module {
@@ -735,6 +755,27 @@ impl Module {
     }
 
     /// Classes from `c` up its base chain.
+    /// Abstract methods with no concrete implementation in `c` or its bases,
+    /// sorted (instantiating `c` then raises TypeError, as in CPython).
+    pub fn unimplemented_abstracts(&self, c: ClassId) -> Vec<String> {
+        let mut done: Vec<&str> = Vec::new();
+        let mut out: Vec<String> = Vec::new();
+        for k in self.mro(c) {
+            let cd = self.class(k);
+            for m in &cd.methods {
+                if done.contains(&m.name.as_str()) {
+                    continue;
+                }
+                done.push(&m.name);
+                if cd.abstracts.contains(&m.name) {
+                    out.push(m.name.clone());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     pub fn mro(&self, c: ClassId) -> Vec<ClassId> {
         let mut out = vec![c];
         let mut cur = c;

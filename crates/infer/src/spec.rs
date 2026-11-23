@@ -592,7 +592,7 @@ pub fn env_offset(f: &Function) -> usize {
 fn add_spec(prog: &mut Program, key: SpecKey) {
     let f = &prog.module.funcs[key.func];
     let mangled = if f.is_module {
-        if f.unit == 0 { "module_body".to_string() } else { format!("init_{}", prog.module.units[f.unit].name) }
+        if f.unit == 0 { "module_body".to_string() } else { format!("init_{}", prog.module.units[f.unit].name.replace('.', "_")) }
     } else if key.args.is_empty() {
         format!("{}__", f.rust_base())
     } else {
@@ -1931,6 +1931,10 @@ impl Ctx<'_, '_> {
                     return;
                 }
                 if op == CmpOp::NotEq && self.dunder(e, a, "__eq__", &[be]).is_some() {
+                    return;
+                }
+                // `@dataclass(order=True)`: compared field by field.
+                if a == b && a.class_id().is_some_and(|c| self.prog.module.class(c).dataclass && self.prog.module.class(c).dc.order) {
                     return;
                 }
                 if !matches!(op, CmpOp::Eq | CmpOp::NotEq) {

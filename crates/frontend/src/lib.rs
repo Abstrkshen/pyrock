@@ -59,6 +59,9 @@ pub fn parse_file(path: &str, python: &str, mode: Mode) -> Result<ParseOutput, S
         func_parent: HashMap::new(),
         func_captures: HashMap::new(),
         func_cells: HashMap::new(),
+        unit_subs: vec![],
+        unit_bindings: vec![],
+        entry_dir: std::path::absolute(&entry).ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from(".")),
     };
     let (unit, diags) = ld.load_unit(&entry, "__main__", path);
     let Some(unit) = unit else {
@@ -119,6 +122,13 @@ struct Loader {
     func_parent: HashMap<FuncId, FuncId>,
     func_captures: HashMap<FuncId, Vec<String>>,
     func_cells: HashMap<FuncId, Vec<String>>,
+    /// Per unit: its submodules that have been imported (`pkg.sub` sets `sub` on `pkg`).
+    unit_subs: Vec<HashMap<String, usize>>,
+    /// Directory of the entry file: the root for package imports, as on `sys.path`.
+    entry_dir: PathBuf,
+    /// Per unit: its module-level bindings once its imports are resolved, so
+    /// names it imported can be re-exported (`from .compat import urlparse`).
+    unit_bindings: Vec<HashMap<String, Binding>>,
 }
 
 /// How arguments bind to a native function's parameters.
@@ -242,6 +252,8 @@ impl Loader {
         self.unit_funcs.push(HashMap::new());
         self.unit_globals.push(HashSet::new());
         self.unit_classes.push(HashMap::new());
+        self.unit_subs.push(HashMap::new());
+        self.unit_bindings.push(HashMap::new());
         self.unit_by_path.insert(canon.clone(), uid);
         let at = |line: u32, col: u32| Span { line, col, end_line: line, end_col: col, unit: uid as u32 };
         let json = match self.dump(path) {
@@ -335,11 +347,17 @@ struct Lowerer<'l> {
     /// defaults once, at definition time).
     pending_defaults: HashMap<FuncId, Vec<(String, Value)>>,
     hidden_globals: HashSet<String>,
+    /// Names a function binds by importing a native module inside its body:
+    /// bindings for that function only, not local variables.
+    native_imported: HashSet<String>,
+    /// Imports of package modules that don't exist (`try: from ._speedups
+    /// import f`): they raise ModuleNotFoundError where they run.
+    missing_imports: HashMap<Span, String>,
     diags: Vec<Diagnostic>,
 }
 
 /// Modules whose imports only matter to type checkers.
-const ANNOTATION_ONLY_MODULES: &[&str] = &["typing", "typing_extensions", "__future__", "dataclasses"];
+const ANNOTATION_ONLY_MODULES: &[&str] = &["typing", "typing_extensions", "__future__", "dataclasses", "abc"];
 
 /// Map an annotation to a type pyfast can use. Anything else (generics,
 /// unions, user classes) is accepted but does not constrain the value.
@@ -686,6 +704,8 @@ impl<'l> Lowerer<'l> {
             used_slots: HashSet::new(),
             pending_defaults: HashMap::new(),
             hidden_globals: HashSet::new(),
+            native_imported: HashSet::new(),
+            missing_imports: HashMap::new(),
             diags: vec![],
         }
     }
@@ -740,12 +760,6 @@ impl<'l> Lowerer<'l> {
                 }
             }
         }
-        // Pass 1a': discover classes (in order: bases must be defined earlier).
-        for st in body {
-            if ty(st) == "ClassDef" {
-                self.declare_class(st);
-            }
-        }
         // Pass 1b: resolve top-level imports (they are visible inside
         // functions). Imports in blocks and functions are lowered in place
         // (`lower_nested_import`).
@@ -754,8 +768,69 @@ impl<'l> Lowerer<'l> {
                 self.resolve_import(st);
             }
         }
+        // Native imports inside module-level blocks (`if TYPE_CHECKING:`,
+        // `try: from .speedups import f`): module-wide bindings like the
+        // top-level ones; CPython imports there assign variables instead.
+        fn block_imports<'v>(stmts: &'v [Value], out: &mut Vec<&'v Value>) {
+            for st in stmts {
+                match ty(st) {
+                    "Import" | "ImportFrom" => out.push(st),
+                    "If" | "Try" | "With" | "For" | "While" => {
+                        for key in ["body", "orelse", "finalbody"] {
+                            block_imports(arr(st, key), out);
+                        }
+                        for h in arr(st, "handlers") {
+                            block_imports(arr(h, "body"), out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut nested = Vec::new();
+        for st in body.iter().filter(|st| !matches!(ty(st), "Import" | "ImportFrom" | "FunctionDef" | "AsyncFunctionDef" | "ClassDef")) {
+            block_imports(std::slice::from_ref(st), &mut nested);
+        }
+        let mut block_bound: HashSet<String> = HashSet::new();
+        for st in nested {
+            if self.native_import_target(st) {
+                self.resolve_import(st);
+                block_bound.extend(import_names(st));
+            }
+        }
+        // Pass 1c: discover classes (in order: bases must be defined earlier),
+        // once imports are bound (`class C(mod.Base)`, `ABC`, `@abstractmethod`).
+        for st in body {
+            if ty(st) == "ClassDef" {
+                self.declare_class(st);
+            }
+        }
+        self.ld.unit_bindings[self.unit] = self.bindings.clone();
         let mut module_locals = Vec::new();
         collect_bindings(body, &mut module_locals, true);
+        // A name bound only by a native import in a block is a binding, not a
+        // variable; one also assigned elsewhere stays a variable (and then
+        // conflicts with the binding: P141).
+        if !block_bound.is_empty() {
+            fn strip_imports(v: &mut Value) {
+                if let Value::Object(m) = v {
+                    for key in ["body", "orelse", "finalbody"] {
+                        if let Some(Value::Array(stmts)) = m.get_mut(key) {
+                            stmts.retain(|st| !matches!(ty(st), "Import" | "ImportFrom"));
+                            stmts.iter_mut().for_each(strip_imports);
+                        }
+                    }
+                    if let Some(Value::Array(hs)) = m.get_mut("handlers") {
+                        hs.iter_mut().for_each(strip_imports);
+                    }
+                }
+            }
+            let mut stripped: Vec<Value> = body.iter().filter(|st| !matches!(ty(st), "Import" | "ImportFrom")).cloned().collect();
+            stripped.iter_mut().for_each(strip_imports);
+            let mut others = Vec::new();
+            collect_bindings(&stripped, &mut others, true);
+            module_locals.retain(|n| !block_bound.contains(n) || others.contains(n));
+        }
         for name in &module_locals {
             if self.bindings.contains_key(name) && !self.decorated.contains(name) {
                 let sp = self.func_ids.get(name).map(|x| x.1).unwrap_or_default();
@@ -1005,6 +1080,20 @@ impl<'l> Lowerer<'l> {
                 let module = sstr(alias, "name").to_string();
                 let asname = alias["asname"].as_str().map(String::from);
                 let bind = asname.clone().unwrap_or_else(|| module.split('.').next().unwrap_or("").to_string());
+                // A package next to the program (`import app.db` with
+                // `app/__init__.py`): every package on the path runs, in order;
+                // the name binds the top package (or, with `as`, the module).
+                let parts: Vec<String> = module.split('.').map(String::from).collect();
+                if module.contains('.') || self.is_package(&parts[0]) {
+                    if let Some(chain) = self.resolve_chain(&parts, 0, sp) {
+                        for &u in &chain {
+                            actions.push(ImportAction::Unit(self.ld.units[u].init));
+                        }
+                        let b = if asname.is_some() { *chain.last().unwrap() } else { chain[0] };
+                        self.bindings.insert(bind, Binding::Unit(b));
+                        continue;
+                    }
+                }
                 match self.resolve_local(&module, sp) {
                     Some(b) => {
                         if let Binding::Unit(u) = b {
@@ -1021,15 +1110,43 @@ impl<'l> Lowerer<'l> {
                 }
             }
         } else {
-            if st["level"].as_u64().unwrap_or(0) > 0 {
-                self.unsupported(sp, "relative import", "use an absolute import next to the entry file");
-                return;
-            }
-            let module = sstr(st, "module").to_string();
-            let target = self.resolve_local(&module, sp);
-            if let Some(Binding::Unit(u)) = target {
-                actions.push(ImportAction::Unit(self.ld.units[u].init));
-            }
+            let level = st["level"].as_u64().unwrap_or(0) as usize;
+            let module = st["module"].as_str().unwrap_or("").to_string();
+            let parts: Vec<String> = if module.is_empty() { vec![] } else { module.split('.').map(String::from).collect() };
+            let target = if level > 0 || module.contains('.') || parts.first().is_some_and(|p| self.is_package(p)) {
+                match self.resolve_chain(&parts, level, sp) {
+                    Some(chain) => {
+                        for &u in &chain {
+                            actions.push(ImportAction::Unit(self.ld.units[u].init));
+                        }
+                        Some(Binding::Unit(*chain.last().unwrap()))
+                    }
+                    None if level > 0 && self.relative_missing(&parts, level) => {
+                        // Raises at runtime, as in CPython (often inside `try`).
+                        let pkg = self.own_package().map(|p| p.1).unwrap_or_default();
+                        let mut base = pkg;
+                        for _ in 1..level {
+                            base = base.rsplit_once('.').map(|x| x.0.to_string()).unwrap_or_default();
+                        }
+                        let full = if parts.is_empty() { base } else { format!("{base}.{}", parts.join(".")) };
+                        self.missing_imports.insert(sp, full);
+                        self.import_actions.insert(sp, vec![]);
+                        return;
+                    }
+                    None if level > 0 => {
+                        self.unsupported(sp, "relative import of a module that isn't compiled natively", "the package's modules must be next to each other as .py files");
+                        return;
+                    }
+                    None => None,
+                }
+            } else {
+                let t = self.resolve_local(&module, sp);
+                if let Some(Binding::Unit(u)) = t {
+                    actions.push(ImportAction::Unit(self.ld.units[u].init));
+                }
+                t
+            };
+            let module = if module.is_empty() { ".".repeat(level) } else { module };
             for alias in arr(st, "names") {
                 let attr = sstr(alias, "name").to_string();
                 let bind = alias["asname"].as_str().unwrap_or(&attr).to_string();
@@ -1038,7 +1155,7 @@ impl<'l> Lowerer<'l> {
                     continue;
                 }
                 match target {
-                    Some(Binding::Unit(u)) => match self.ld.unit_funcs[u].get(&attr) {
+                    Some(Binding::Unit(u)) => match self.ld.unit_funcs[u].get(&attr).copied().as_ref() {
                         Some(&fid) => {
                             self.bindings.insert(bind, Binding::Func(fid));
                         }
@@ -1048,6 +1165,20 @@ impl<'l> Lowerer<'l> {
                         }
                         None if self.ld.unit_globals[u].contains(&attr) => {
                             self.var_imports.entry(sp).or_default().push((bind, u, attr.clone()));
+                        }
+                        // A name the module itself imported (a re-export).
+                        None if self.ld.unit_bindings[u].contains_key(&attr) => {
+                            let b = self.ld.unit_bindings[u][&attr].clone();
+                            if let Binding::Slot(s) = b {
+                                self.used_slots.insert(s);
+                            }
+                            self.bindings.insert(bind, b);
+                        }
+                        // `from pkg import sub`: a submodule of the package.
+                        None if self.submodule(u, &attr, sp).is_some() => {
+                            let s = self.submodule(u, &attr, sp).unwrap();
+                            actions.push(ImportAction::Unit(self.ld.units[s].init));
+                            self.bindings.insert(bind, Binding::Unit(s));
                         }
                         None => self.err("P140", sp, format!("`{module}` has no function, class or module-level variable `{attr}`")),
                     },
@@ -1086,6 +1217,23 @@ impl<'l> Lowerer<'l> {
     /// where their functions are bound for direct calls.
     fn lower_nested_import(&mut self, st: &Value) -> Option<Stmt> {
         let sp = self.span(st);
+        // A natively compiled module (or package) imported inside a function:
+        // resolved like a top-level import; the names it binds are bindings of
+        // this function (calls stay direct), not local variables.
+        if self.native_import_target(st) && self.cur_fid.is_some() && (ty(st) == "ImportFrom" || arr(st, "names").len() == 1) {
+            self.resolve_import(st);
+            if !self.import_actions.contains_key(&sp) {
+                return None;
+            }
+            let var_names: HashSet<String> = self.var_imports.get(&sp).map(|v| v.iter().map(|x| x.0.clone()).collect()).unwrap_or_default();
+            for n in import_names(st) {
+                if !var_names.contains(&n) && self.bindings.contains_key(&n) {
+                    self.locals.remove(&n);
+                    self.native_imported.insert(n);
+                }
+            }
+            return self.lower_stmt(st);
+        }
         let mut stmts = Vec::new();
         let native = |me: &mut Self, module: &str| -> bool {
             if module.contains('.') || !["py", "rs", "c"].iter().any(|ext| me.dir.join(format!("{module}.{ext}")).exists()) {
@@ -1220,6 +1368,184 @@ impl<'l> Lowerer<'l> {
         }
     }
 
+    /// A relative import whose module file doesn't exist in the package.
+    fn relative_missing(&self, parts: &[String], level: usize) -> bool {
+        let Some((mut dir, _)) = self.own_package() else { return false };
+        for _ in 1..level {
+            match dir.parent() {
+                Some(p) => dir = p.to_path_buf(),
+                None => return false,
+            }
+        }
+        for (i, part) in parts.iter().enumerate() {
+            let pkg = dir.join(part);
+            if pkg.join("__init__.py").exists() {
+                dir = pkg;
+                continue;
+            }
+            return !(i + 1 == parts.len() && dir.join(format!("{part}.py")).exists());
+        }
+        false
+    }
+
+    /// Whether an import statement names a natively compiled module: relative,
+    /// a package next to the program, or a `.py`/`.rs`/`.c` file next to it.
+    fn native_import_target(&self, st: &Value) -> bool {
+        let level = st["level"].as_u64().unwrap_or(0) as usize;
+        let modname = if ty(st) == "ImportFrom" { st["module"].as_str().unwrap_or("").to_string() } else { arr(st, "names").first().map(|a| sstr(a, "name").to_string()).unwrap_or_default() };
+        let first = modname.split('.').next().unwrap_or("").to_string();
+        level > 0 || self.is_package(&first) || (!modname.contains('.') && ["py", "rs", "c"].iter().any(|ext| self.dir.join(format!("{first}.{ext}")).exists()))
+    }
+
+    /// `name` from the `abc` module: `ABC` / `abc.ABC` (with `from abc import
+    /// ABC` / `import abc`).
+    fn is_abc_name(&self, v: &Value, name: &str) -> bool {
+        let slot_is = |b: Option<&Binding>, f: &dyn Fn(&SlotKind) -> bool| matches!(b, Some(Binding::Slot(s)) if f(&self.ld.slots[*s].kind));
+        match ty(v) {
+            "Name" => sstr(v, "id") == name && slot_is(self.bindings.get(name), &|k| matches!(k, SlotKind::From { module, attr } if module == "abc" && attr == name)),
+            "Attribute" => {
+                sstr(v, "attr") == name
+                    && ty(&v["value"]) == "Name"
+                    && slot_is(self.bindings.get(sstr(&v["value"], "id")), &|k| matches!(k, SlotKind::Import { module, .. } if module == "abc"))
+            }
+            _ => false,
+        }
+    }
+
+    /// A hidden name bound to what module `u` binds as `attr` (an import it
+    /// re-exports, or a submodule), as a `Name` node to lower in its place.
+    fn reexport_name(&mut self, u: usize, attr: &str, loc: &Value) -> Value {
+        let hidden = format!("__reexport_{u}_{attr}");
+        let b = self.ld.unit_subs[u].get(attr).map(|&s| Binding::Unit(s)).unwrap_or_else(|| self.ld.unit_bindings[u][attr].clone());
+        if let Binding::Slot(s) = b {
+            self.used_slots.insert(s);
+        }
+        self.bindings.insert(hidden.clone(), b);
+        serde_json::json!({"_t": "Name", "id": hidden, "ctx": {"_t": "Load"}, "_loc": loc})
+    }
+
+    /// Directories a top-level (absolute) import is looked up in: next to the
+    /// importing file, then the entry file's directory (`sys.path[0]`).
+    fn import_bases(&self) -> Vec<PathBuf> {
+        let mut v = vec![self.dir.clone()];
+        let e = self.ld.entry_dir.clone();
+        if e.canonicalize().ok() != self.dir.canonicalize().ok() {
+            v.push(e);
+        }
+        v
+    }
+
+    /// Whether `name` is a package directory (with `__init__.py`) on the import path.
+    fn is_package(&self, name: &str) -> bool {
+        self.import_bases().iter().any(|b| b.join(name).join("__init__.py").exists())
+    }
+
+    /// The package this unit belongs to (for relative imports): its directory
+    /// and dotted name. `None` for a top-level module or the entry file.
+    fn own_package(&self) -> Option<(PathBuf, String)> {
+        let u = &self.ld.units[self.unit];
+        let is_init = u.path.ends_with("__init__.py");
+        let name = if is_init { Some(u.name.clone()) } else { u.name.rsplit_once('.').map(|(a, _)| a.to_string()) };
+        name.map(|n| (self.dir.clone(), n))
+    }
+
+    /// The unit of a package's or module's file, loading it if needed
+    /// (`None`: imported through CPython instead, P220).
+    fn module_unit(&mut self, path: &Path, qual: &str, sp: Span) -> Option<usize> {
+        let canon = path.canonicalize().unwrap_or(path.to_path_buf());
+        if let Some(&u) = self.ld.unit_by_path.get(&canon) {
+            // Still loading: a package whose `__init__` imports its own
+            // submodules is already (partly) initialised, as in CPython.
+            return Some(u);
+        }
+        let display = path.display().to_string();
+        let (uid, diags) = self.ld.load_unit(path, qual, &display);
+        let failed = uid.is_none() || diags.iter().any(|d| d.severity == Severity::Error);
+        if failed && self.ld.mode == Mode::Hybrid {
+            let first = diags.iter().find(|d| d.severity == Severity::Error).map(|d| d.render(&display)).unwrap_or_default();
+            self.diags.push(
+                Diagnostic::warning("P220", sp, format!("`{qual}` cannot be compiled natively; importing it through CPython"))
+                    .note(format!("first blocker: {first}")),
+            );
+            self.record(qual, "python (CPython fallback)", Some(path), Some(first));
+            return None;
+        }
+        self.diags.extend(diags);
+        self.record(qual, "python (native)", Some(path), None);
+        uid
+    }
+
+    /// The units of `a`, `a.b`, `a.b.c` for an import of `a.b.c` (relative
+    /// with `level` dots). `None` when the module isn't a `.py` file next to
+    /// the program (a CPython import) or can't be compiled.
+    fn resolve_chain(&mut self, parts: &[String], level: usize, sp: Span) -> Option<Vec<usize>> {
+        let mut chain = Vec::new();
+        let (mut dir, mut prefix) = if level == 0 {
+            let first = parts.first()?;
+            let base = self.import_bases().into_iter().find(|b| b.join(first).join("__init__.py").exists() || b.join(format!("{first}.py")).exists())?;
+            (base, None)
+        } else {
+            let Some((mut dir, mut name)) = self.own_package() else {
+                self.unsupported(sp, "relative import outside a package", "CPython raises ImportError: attempted relative import with no known parent package");
+                return None;
+            };
+            for _ in 1..level {
+                dir = dir.parent()?.to_path_buf();
+                name = name.rsplit_once('.')?.0.to_string();
+            }
+            let init = dir.join("__init__.py");
+            if init.exists() {
+                chain.push(self.module_unit(&init, &name, sp)?);
+            }
+            (dir, Some(name))
+        };
+        for (i, part) in parts.iter().enumerate() {
+            let qual = match &prefix {
+                Some(p) => format!("{p}.{part}"),
+                None => part.clone(),
+            };
+            let init = dir.join(part).join("__init__.py");
+            let file = dir.join(format!("{part}.py"));
+            let (path, is_pkg) = if init.exists() {
+                (init, true)
+            } else if file.exists() {
+                (file, false)
+            } else {
+                return None;
+            };
+            if !is_pkg && i + 1 < parts.len() {
+                return None;
+            }
+            let u = self.module_unit(&path, &qual, sp)?;
+            if let Some(&parent) = chain.last() {
+                self.ld.unit_subs[parent].insert(part.clone(), u);
+            }
+            chain.push(u);
+            dir = dir.join(part);
+            prefix = Some(qual);
+        }
+        Some(chain)
+    }
+
+    /// `pkg.attr` as a submodule of the package unit `u` (loaded if needed).
+    fn submodule(&mut self, u: usize, attr: &str, sp: Span) -> Option<usize> {
+        if let Some(&s) = self.ld.unit_subs[u].get(attr) {
+            return Some(s);
+        }
+        let unit = &self.ld.units[u];
+        if !unit.path.ends_with("__init__.py") {
+            return None;
+        }
+        let dir = Path::new(&unit.path).parent()?.to_path_buf();
+        let qual = format!("{}.{attr}", unit.name);
+        let init = dir.join(attr).join("__init__.py");
+        let file = dir.join(format!("{attr}.py"));
+        let path = if init.exists() { init } else if file.exists() { file } else { return None };
+        let s = self.module_unit(&path, &qual, sp)?;
+        self.ld.unit_subs[u].insert(attr.to_string(), s);
+        Some(s)
+    }
+
     fn extern_missing(&mut self, e: usize, attr: &str, sp: Span) {
         let m = &self.ld.externs[e];
         let why = m.skipped.iter().find(|(n, _)| n == attr).map(|(_, w)| w.clone());
@@ -1262,7 +1588,12 @@ impl<'l> Lowerer<'l> {
         self.in_module = false;
         let (param_ann, ret_ann) = self.ld.func_anns.get(&id).cloned().unwrap_or_default();
         self.ret_ann = ret_ann;
+        let saved_bindings = self.bindings.clone();
+        let saved_native = std::mem::take(&mut self.native_imported);
         let body = self.lower_block(arr(st, "body"));
+        locals.retain(|n| !self.native_imported.contains(n));
+        self.bindings = saved_bindings;
+        self.native_imported = saved_native;
         self.ret_ann = None;
         self.fn_globals.clear();
         locals.extend(std::mem::take(&mut self.extra_locals));
@@ -1431,12 +1762,19 @@ impl<'l> Lowerer<'l> {
             "Import" | "ImportFrom" if !self.import_actions.contains_key(&sp) && !self.var_imports.contains_key(&sp) => {
                 return self.lower_nested_import(st);
             }
+            "Import" | "ImportFrom" if self.missing_imports.contains_key(&sp) => {
+                let name = self.missing_imports.remove(&sp).unwrap();
+                self.import_actions.remove(&sp);
+                let msg = Expr { kind: ExprKind::Str(format!("No module named '{name}'")), span: sp };
+                let exc = Expr { kind: ExprKind::NewExc { kind: "ModuleNotFoundError".into(), args: vec![msg] }, span: sp };
+                StmtKind::Raise(Some(exc))
+            }
             "Import" | "ImportFrom" => {
                 let actions = self.import_actions.remove(&sp).unwrap_or_default();
                 let mut stmts: Vec<Stmt> = actions.into_iter().map(|a| Stmt { kind: StmtKind::Import(a), span: sp }).collect();
                 for (bind, u, name) in self.var_imports.remove(&sp).unwrap_or_default() {
                     let value = Expr { kind: ExprKind::Global { unit: u, name }, span: sp };
-                    stmts.push(Stmt { kind: StmtKind::AssignGlobal { unit: self.unit, name: bind, value }, span: sp });
+                    stmts.push(Stmt { kind: self.bind_target(bind, value), span: sp });
                 }
                 return match stmts.len() {
                     0 => None,
@@ -1897,6 +2235,10 @@ impl<'l> Lowerer<'l> {
                     if let Some(&f) = self.ld.unit_funcs[u].get(attr) {
                         return Some(Expr { kind: ExprKind::MakeClosure { func: f, captures: vec![], defaults: vec![] }, span: sp });
                     }
+                    if self.ld.unit_bindings[u].contains_key(attr) && !matches!(self.ld.unit_bindings[u][attr], Binding::Unit(_) | Binding::Extern(_)) {
+                        let n = self.reexport_name(u, attr, &e["_loc"]);
+                        return self.lower_expr(&n);
+                    }
                 }
                 if let Some(b) = self.module_binding(&e["value"]) {
                     let what = match b {
@@ -2097,24 +2439,42 @@ impl<'l> Lowerer<'l> {
         }
         let cid = self.ld.classes.len() as ClassId;
         let mut dataclass = false;
+        let mut dc = DataclassOpts::default();
         for d in arr(st, "decorator_list") {
             let target = if ty(d) == "Call" { &d["func"] } else { d };
             let dname = if ty(target) == "Name" { sstr(target, "id") } else { sstr(target, "attr") };
             if dname == "dataclass" {
                 dataclass = true;
-                if ty(d) == "Call" && !arr(d, "keywords").is_empty() {
-                    let dsp = self.span(d);
-                    self.unsupported(dsp, "`@dataclass(...)` options", "use plain `@dataclass`");
+                for k in arr(d, "keywords") {
+                    let v = &k["value"];
+                    let b = (ty(v) == "Constant" && v["value"]["kind"] == "bool").then(|| v["value"]["value"].as_bool().unwrap_or(false));
+                    match (sstr(k, "arg"), b) {
+                        ("eq", Some(b)) => dc.eq = b,
+                        ("order", Some(b)) => dc.order = b,
+                        ("frozen", Some(b)) => dc.frozen = b,
+                        ("repr", Some(b)) => dc.repr = b,
+                        ("kw_only", Some(b)) => dc.kw_only = b,
+                        // No observable effect on a native class.
+                        ("slots" | "init" | "match_args" | "weakref_slot", Some(true)) | ("slots" | "weakref_slot", Some(false)) => {}
+                        (o, _) => {
+                            let dsp = self.span(d);
+                            self.unsupported(dsp, &format!("`@dataclass({o}=...)`"), "eq, order, frozen, repr, kw_only and slots take a literal True/False");
+                        }
+                    }
                 }
             } else {
                 let dsp = self.span(d);
                 self.unsupported(dsp, &format!("class decorator `{dname}`"), "only @dataclass is compiled natively");
             }
         }
-        if !arr(st, "keywords").is_empty() {
+        // `metaclass=ABCMeta` only makes `@abstractmethod` effective.
+        let keywords: Vec<&Value> = arr(st, "keywords").iter().filter(|k| !(k["arg"] == "metaclass" && self.is_abc_name(&k["value"], "ABCMeta"))).collect();
+        if !keywords.is_empty() {
             self.unsupported(sp, "class keywords (e.g. `metaclass=`)", "dynamic class creation keeps CPython; put the class in a module that falls back");
         }
-        let bases = arr(st, "bases");
+        // `ABC` as a base adds nothing but abstract-method checking.
+        let bases: Vec<Value> = arr(st, "bases").iter().filter(|b| !self.is_abc_name(b, "ABC")).cloned().collect();
+        let bases = bases.as_slice();
         let base = match bases {
             [] => None,
             [b] if ty(b) == "Name" && sstr(b, "id") == "object" => None,
@@ -2136,6 +2496,7 @@ impl<'l> Lowerer<'l> {
         let mut methods = Vec::new();
         let mut class_vars: Vec<String> = Vec::new();
         let mut fields: Vec<String> = Vec::new();
+        let mut abstracts: Vec<String> = Vec::new();
         for item in arr(st, "body") {
             let isp = self.span(item);
             match ty(item) {
@@ -2143,6 +2504,10 @@ impl<'l> Lowerer<'l> {
                     let mname = sstr(item, "name").to_string();
                     let mut kind = MethodKind::Instance;
                     for d in arr(item, "decorator_list") {
+                        if self.is_abc_name(d, "abstractmethod") {
+                            abstracts.push(mname.clone());
+                            continue;
+                        }
                         match (ty(d), sstr(d, "id"), sstr(d, "attr")) {
                             ("Name", "staticmethod", _) => kind = MethodKind::Static,
                             ("Name", "classmethod", _) => kind = MethodKind::Class,
@@ -2196,11 +2561,11 @@ impl<'l> Lowerer<'l> {
                 other => self.unsupported(isp, &format!("`{other}` in a class body"), "classes may contain methods and class attributes"),
             }
         }
-        let unit_prefix = if self.unit == 0 { String::new() } else { format!("{}_", self.ld.units[self.unit].name) };
+        let unit_prefix = if self.unit == 0 { String::new() } else { format!("{}_", self.ld.units[self.unit].name.replace('.', "_")) };
         const RESERVED: &[&str] = &["Box", "Vec", "String", "Option", "Result", "Some", "None", "Ok", "Err", "Rc", "RefCell", "Default", "Clone", "Copy", "Self", "Str"];
         let rust = if RESERVED.contains(&name.as_str()) { format!("{unit_prefix}Py{name}") } else { format!("{unit_prefix}{name}") };
         let qual = if self.unit == 0 { name.clone() } else { format!("{}.{name}", self.ld.units[self.unit].name) };
-        self.ld.classes.push(ClassDef { id: cid, name: qual, rust, unit: self.unit, span: sp, base, methods, fields, class_vars, dataclass });
+        self.ld.classes.push(ClassDef { id: cid, name: qual, rust, unit: self.unit, span: sp, base, methods, fields, class_vars, dataclass, abstracts, dc });
         self.class_ids.insert(name.clone(), (cid, sp));
         self.bindings.insert(name.clone(), Binding::Class(cid));
         self.ld.unit_classes[self.unit].insert(name, cid);
@@ -2315,7 +2680,9 @@ impl<'l> Lowerer<'l> {
         params.extend(names.iter().cloned());
         let mut sig_defaults = vec![None];
         sig_defaults.extend(defaults);
-        let sig = CallSig { names: params.clone(), n_posonly: 0, n_pos: params.len(), defaults: sig_defaults, vararg: None, kwarg: None };
+        // `@dataclass(kw_only=True)`: every field is keyword-only.
+        let n_pos = if self.ld.classes[cid as usize].dc.kw_only { 1 } else { params.len() };
+        let sig = CallSig { names: params.clone(), n_posonly: 0, n_pos, defaults: sig_defaults, vararg: None, kwarg: None };
         let local = |n: &str| Expr { kind: ExprKind::Local(n.to_string()), span: sp };
         let mut body: Vec<Stmt> = names
             .iter()
@@ -2734,6 +3101,15 @@ impl<'l> Lowerer<'l> {
 
     /// If `v` names a natively compiled module or extern, return its binding.
     fn module_binding(&self, v: &Value) -> Option<Binding> {
+        // `pkg.sub` once `pkg.sub` has been imported.
+        if ty(v) == "Attribute" {
+            if let Some(Binding::Unit(u)) = self.module_binding(&v["value"]) {
+                if let Some(&s) = self.ld.unit_subs[u].get(sstr(v, "attr")) {
+                    return Some(Binding::Unit(s));
+                }
+            }
+            return None;
+        }
         if ty(v) != "Name" || self.locals.contains(sstr(v, "id")) {
             return None;
         }
@@ -2985,6 +3361,11 @@ impl<'l> Lowerer<'l> {
                             let (args, order) = self.bind_args(fid, &format!("{modname}.{attr}"), args, kwargs, sp)?;
                             let args = self.annotate_args(fid, args);
                             return Some(Expr { kind: ExprKind::Call { callee: Callee::Func(fid), args, order }, span: sp });
+                        }
+                        None if self.ld.unit_bindings[u].contains_key(attr) || self.ld.unit_subs[u].contains_key(attr) => {
+                            // Re-exported: call it as if the name were bound here.
+                            let call = serde_json::json!({"_t": "Call", "func": self.reexport_name(u, attr, &f["_loc"]), "args": e["args"], "keywords": e["keywords"], "_loc": e["_loc"]});
+                            return self.lower_call(&call);
                         }
                         None => {
                             self.err("P140", sp, format!("`{modname}.{attr}` is not a function of the natively compiled module `{modname}`"));

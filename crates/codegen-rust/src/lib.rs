@@ -67,7 +67,7 @@ pub fn emit(prog: &Program, plan: &Plan, file_name: &str, py_paths: &[String]) -
     for s in prog.specs.iter().filter(|s| plan.is_reachable(s.id)) {
         let f = &m.funcs[s.key.func];
         if f.is_module && f.unit != 0 {
-            writeln!(out, "static INIT_{}: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);", m.units[f.unit].name).unwrap();
+            writeln!(out, "static INIT_{}: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);", m.units[f.unit].name.replace('.', "_")).unwrap();
         }
     }
 
@@ -440,7 +440,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 writeln!(out, "/// Module body of {file}.").unwrap();
                 writeln!(out, "fn module_body() -> PyResult<()> {{").unwrap();
             } else {
-                let name = &self.prog.module.units[f.unit].name;
+                let name = self.prog.module.units[f.unit].name.replace('.', "_");
                 writeln!(out, "/// Module body of {file} (runs once, at its first import).").unwrap();
                 writeln!(out, "fn {}() -> PyResult<()> {{", s.mangled).unwrap();
                 writeln!(out, "    if !rt::first_import(&INIT_{name}) {{\n        return Ok(());\n    }}").unwrap();
@@ -1695,6 +1695,16 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     if let Some(code) = self.dunder(lv.clone(), "__eq__", vec![rv.clone()]) {
                         return format!("!{}", truthy_of(code, self, "__eq__", lt, rt));
                     }
+                }
+                // `@dataclass(order=True)`: its PyOrd (fields compared like tuples).
+                if lt == rt && !matches!(op, CmpOp::Eq | CmpOp::NotEq) && lt.class_id().is_some_and(|c| self.prog.module.class(c).dataclass && self.prog.module.class(c).dc.order) {
+                    let want = match op {
+                        CmpOp::Lt => "== std::cmp::Ordering::Less",
+                        CmpOp::LtE => "!= std::cmp::Ordering::Greater",
+                        CmpOp::Gt => "== std::cmp::Ordering::Greater",
+                        _ => "!= std::cmp::Ordering::Less",
+                    };
+                    return format!("(rt::coll::PyOrd::py_cmp(&{}, &{})? {want})", borrow(l), borrow(r));
                 }
                 // Default: identity (field-wise for dataclasses, via PyEq).
                 let same = if lt == rt { format!("rt::coll::eq(&{}, &{})", borrow(l), borrow(r)) } else { format!("{{ let _ = {l}; let _ = {r}; false }}") };

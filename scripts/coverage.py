@@ -5,7 +5,9 @@ Usage: python3 scripts/coverage.py [DIR] [--pyfast PATH] [--jobs N]
 
 DIR defaults to the running interpreter's standard library. Each top-level `.py` file of
 DIR is copied alone into a scratch directory (so its imports go to CPython instead of
-compiling its siblings) and checked with `pyfast check` in hybrid mode. A function or
+compiling its siblings) and checked with `pyfast check` in hybrid mode. When DIR is a
+package (it has `__init__.py`), every module in it is checked in place instead, imported
+by a driver file, so relative imports resolve; CPython boundaries are not counted. A function or
 method counts as accepted when no error is reported inside it and its class (if any) has
 no class-level error. Prints totals and the most common blockers; see docs/coverage.md.
 
@@ -27,7 +29,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
-ERR = re.compile(r"\s*\S+?:(\d+):\d+\s+(P\d+)\s+error: (.*)")
+ERR = re.compile(r"\s*(\S+?):(\d+):\d+\s+(P\d+)\s+error: (.*)")
 
 
 def check(pyfast, src, scratch):
@@ -44,8 +46,32 @@ def check(pyfast, src, scratch):
     errs = []
     for line in out.splitlines():
         m = ERR.match(line)
-        if m:
-            errs.append((int(m[1]), m[2], m[3]))
+        if m and m[1].endswith(name + ".py"):
+            errs.append((int(m[2]), m[3], m[4]))
+    return src, errs
+
+
+def check_in_package(pyfast, src, pkg_root, pkg):
+    """A module of a package, imported by a driver next to the package (so
+    relative imports resolve). Native-only lists every error of the module;
+    CPython boundaries (P2xx) are not blockers and are dropped."""
+    rel = os.path.relpath(src, os.path.join(pkg_root, pkg))
+    mod = rel[:-3].replace(os.sep, ".")
+    dotted = pkg if mod == "__init__" else f"{pkg}." + mod.removesuffix(".__init__")
+    driver = os.path.join(pkg_root, "_cov_" + dotted.replace(".", "_") + ".py")
+    with open(driver, "w") as f:
+        f.write(f"import {dotted}\n")
+    try:
+        r = subprocess.run([pyfast, "check", "--mode", "native-only", driver], capture_output=True, text=True, timeout=120)
+        out = r.stdout + r.stderr
+    except subprocess.TimeoutExpired:
+        out = ""
+    target = os.path.join(pkg, rel)
+    errs = []
+    for line in out.splitlines():
+        m = ERR.match(line)
+        if m and m[1].endswith(target) and not m[3].startswith("P2"):
+            errs.append((int(m[2]), m[3], m[4]))
     return src, errs
 
 
@@ -56,18 +82,27 @@ def main():
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     a = ap.parse_args()
 
-    files = sorted(os.path.join(a.dir, f) for f in os.listdir(a.dir) if f.endswith(".py"))
     scratch = tempfile.mkdtemp(prefix="pyfast-coverage-")
-    with ThreadPoolExecutor(a.jobs) as ex:
-        results = list(ex.map(lambda f: check(a.pyfast, f, scratch), files))
+    if os.path.exists(os.path.join(a.dir, "__init__.py")):
+        # A package: every module, checked in place (relative imports work).
+        pkg = os.path.basename(os.path.normpath(a.dir))
+        shutil.copytree(a.dir, os.path.join(scratch, pkg), ignore=shutil.ignore_patterns("__pycache__"))
+        files = sorted(os.path.join(d, f) for d, _, fs in os.walk(os.path.join(scratch, pkg)) for f in fs if f.endswith(".py"))
+        with ThreadPoolExecutor(a.jobs) as ex:
+            results = list(ex.map(lambda f: check_in_package(a.pyfast, f, scratch, pkg), files))
+    else:
+        files = sorted(os.path.join(a.dir, f) for f in os.listdir(a.dir) if f.endswith(".py"))
+        with ThreadPoolExecutor(a.jobs) as ex:
+            results = list(ex.map(lambda f: check(a.pyfast, f, scratch), files))
+    parsed = [(src, errs, open(src, encoding="utf-8", errors="replace").read()) for src, errs in results]
     shutil.rmtree(scratch, ignore_errors=True)
 
     n_files = clean_files = 0
     n_funcs = ok_funcs = lines = ok_lines = 0
     blockers = collections.Counter()
-    for src, errs in results:
+    for src, errs, text in parsed:
         try:
-            tree = ast.parse(open(src, encoding="utf-8").read())
+            tree = ast.parse(text)
         except (SyntaxError, UnicodeDecodeError):
             continue
         n_files += 1

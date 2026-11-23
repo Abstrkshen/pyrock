@@ -118,11 +118,14 @@ Language coverage (ordered by how much code each one blocks in the standard libr
 - [x] Imports inside functions and in `try`/`if` blocks (452 stdlib sites)
 - [x] Non-literal default values of top-level functions, evaluated once at definition (233)
 - [x] Functions defined inside module-level `if`/`try` blocks
-- [ ] `@abstractmethod`, `@functools.cached_property`, `@lru_cache` on methods, `@contextmanager` (152)
+- [x] `@abstractmethod` with `ABC` / `metaclass=ABCMeta`
+- [x] `@dataclass(...)` options (frozen, order, eq, repr, kw_only, slots)
+- [ ] `@functools.cached_property`, `@lru_cache` on methods, `@contextmanager`
 - [x] `del name`, `for`/`while ... else`, `:=`, `[*a, *b]`, `{**d}`, `...` placeholders
 - [ ] Computed class-body assignments, `del` of a function or import name, `class` inside a function or block
 - [ ] `Enum`, `NamedTuple` and `TypedDict` classes; multiple inheritance (mixins)
-- [ ] Relative imports (the main blocker in packages), `match`
+- [x] Packages next to the program, relative imports, re-exported names
+- [ ] `match`
 - [ ] Arbitrary-precision integers (`Project.md` §6 and M4; today results beyond i64 raise `OverflowError`)
 
 `Project.md` items not implemented:
@@ -858,3 +861,58 @@ runnable ones print the same as CPython.
 * Tests: `tests/differential/loop_else_unpacking.py`, `walrus.py`, `del_names.py` (all
   native-only where they don't use CPython). `cargo test --workspace`, samples 21/21,
   demos 3/3.
+
+### Phase 8: packages (2026-11-23)
+
+* A directory with `__init__.py` next to the importing file or the entry file is a package,
+  and its modules are native units named by their dotted path (`app.services.billing`;
+  Rust identifiers use `_`). `import a.b.c` runs each package's `__init__` once, in order,
+  and binds `a`; `a.b.c.f()` resolves through the submodule map (`Loader::unit_subs`) to a
+  direct call; `import a.b as x` binds the module; `from a import b` imports a submodule
+  when `a` has no such name.
+* Relative imports resolve against the importing unit's package (its own directory; an
+  `__init__.py` is its package). A package still initialising (an `__init__` importing its
+  own submodules) is referenced, not re-run, as CPython does. A relative import of a module
+  file that doesn't exist raises `ModuleNotFoundError` where it runs (so `try: from
+  ._speedups import f` / `except ImportError:` works).
+* Re-exports: each unit's module-level bindings are recorded after its imports resolve
+  (`Loader::unit_bindings`), so `from .compat import urlparse` and `compat.urlparse(...)`
+  work when `compat` itself imported `urlparse` (a CPython slot, a native function, a class
+  or a submodule).
+* Native imports inside functions bind their names for that function (direct calls, not
+  variables); native imports inside module-level blocks are resolved with the top-level
+  ones.
+* `scripts/coverage.py DIR` measures a package in place (each module imported by a driver,
+  native-only errors minus CPython boundaries): `requests` 68.2% of functions (79.7% of
+  lines), `huggingface_hub` 72.1%.
+* Test: `tests/differential/packages.py` with `_pkgapp/` (nested packages, `.`/`..`
+  imports, re-exports, a lazy relative import in a function, `try`/`if` imports in
+  `__init__`, a missing optional module); fully native except the `json` re-export.
+  `cargo test --workspace`, samples 21/21, demos 3/3.
+
+### Phase 8: abstract base classes (2026-11-23)
+
+* `class C(ABC)`, `class C(abc.ABC)` and `class C(metaclass=ABCMeta)` compile as plain native
+  classes (`ABC` may be combined with a native base); `@abstractmethod` / `@abc.abstractmethod`
+  (also under `@property`, `@staticmethod`, `@classmethod`) marks a method abstract, and its
+  body stays callable through `super()`.
+* Creating an instance of a class whose MRO leaves abstract methods unimplemented raises
+  CPython's `TypeError: Can't instantiate abstract class C without an implementation for
+  abstract method(s) 'a', 'b'` at that point; classes are closed, so this is decided at compile
+  time (`Module::unimplemented_abstracts`).
+* `abc` joined the modules whose imports are dropped when only used this way, so such
+  programs need no CPython. Classes are now declared after imports are bound (needed to
+  recognise `ABC`; also lets a base class come from an imported module's re-export).
+* Test: `tests/differential/abstract_classes.py` (native-only).
+
+### Phase 8: dataclass options (2026-11-23)
+
+* `@dataclass(frozen=, order=, eq=, repr=, kw_only=, slots=)` with literal booleans
+  (`slots`, `init`, `match_args`, `weakref_slot` have no observable effect natively).
+  `frozen=True`: assigning a field outside the generated `__init__` raises
+  `dataclasses.FrozenInstanceError` (an `AttributeError`), and with `eq` instances hash by
+  their hashable fields, so equal frozen instances are the same dict key or set member.
+  `order=True`: `<`, `<=`, `>`, `>=`, `sorted` and `min`/`max` compare the fields in order,
+  like tuples. `eq=False` / `repr=False` keep identity equality and the default repr.
+  `kw_only=True` makes every field keyword-only.
+* Test: `tests/differential/dataclass_options.py` (native-only).

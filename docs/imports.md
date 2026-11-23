@@ -35,8 +35,10 @@ Imports
       vecmath.checked_div(i64, i64) -> i64  [Result: errors raise RuntimeError]
 ```
 
-Supported forms: `import x`, `import x as y`, `from x import f`, `from x import f as g`.
-A dotted name (`import os.path`, `import xml.etree.ElementTree`) always goes to CPython.
+Supported forms: `import x`, `import x as y`, `from x import f`, `from x import f as g`,
+dotted and relative imports of packages (below), and imports inside functions and blocks.
+A dotted name that isn't a package next to the program (`import os.path`,
+`import xml.etree.ElementTree`) goes to CPython.
 
 ## Importing Python files
 
@@ -67,9 +69,50 @@ Limits of native Python modules:
 * Its functions, classes and module-level variables are all usable: `geometry.Point(1, 2)`,
   `from geometry import Point`, `geometry.PI`, `from geometry import PI` (copied at import,
   as Python does), `geometry.PI = 3.0` (a typed global cell).
-* Circular imports between native modules are rejected (P145).
-* Relative imports (`from . import x`) and `from x import *` aren't supported.
-* Imports must be at module level, not inside a function.
+* Circular imports between native modules are rejected (P145), except a package's
+  `__init__.py` importing its own submodules (as CPython allows).
+* `from x import *` isn't supported.
+* Imports can be inside functions and blocks. A CPython import there assigns a variable
+  (`try: import numpy as np` / `except ImportError: np = None` works). A native module
+  imported inside a function binds its names for that function, with direct calls.
+
+## Packages
+
+A directory with an `__init__.py` next to the program (or next to the entry file, which is
+`sys.path[0]` in CPython) is a package, and its modules compile natively too:
+
+```
+main.py
+app/
+  __init__.py          # from . import models
+  models.py
+  services/
+    __init__.py
+    billing.py         # from ..models import Item; from . import rules
+    rules.py
+```
+
+```python
+# main.py
+import app.services.billing
+from app import models
+from app.services.billing import total
+import app.services.rules as rules
+```
+
+* `import a.b.c` runs `a/__init__.py`, `a/b/__init__.py` and `a/b/c.py` once each, in
+  that order, and binds `a`; `a.b.c.f()` is then a direct call. `import a.b as x` binds the
+  module itself.
+* `from a import b` imports the submodule `b` when `a` has no function, class or variable
+  of that name.
+* Relative imports (`from . import x`, `from .x import f`, `from ..models import Item`)
+  resolve against the importing module's package. A relative import of a module that
+  doesn't exist raises `ModuleNotFoundError` where it runs, so `try: from ._speedups import
+  f` / `except ImportError:` works.
+* Names a module imported are importable from it (`from .compat import urlparse`, where
+  `compat` did `from urllib.parse import urlparse`), and callable as `compat.urlparse(...)`.
+* A package module that can't be compiled is imported through CPython (P220), as for a
+  single `.py` file.
 
 **Fallback.** If an imported `.py` uses something pyfast can't compile, such as a class with
 a metaclass or a CPython base class, hybrid mode imports that file through CPython instead and
@@ -241,5 +284,6 @@ A program with no CPython imports and no boundaries doesn't link libpython at al
 | `import m` | `m.rs` | Rust `pub fn`s called directly |
 | `import m` | `m.c` (+ `m.h`) | C functions called directly through FFI |
 | `import m` | nothing | CPython runtime import |
-| `import a.b` | anything | CPython runtime import |
-| `from . import m` | anything | Rejected (relative import) |
+| `import a.b` | `a/__init__.py`, `a/b.py` | Native package modules |
+| `import a.b` | nothing | CPython runtime import |
+| `from . import m` / `from .m import f` | in a package | Native, relative to the package |

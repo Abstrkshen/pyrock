@@ -72,7 +72,7 @@ pub(crate) fn emit_classes(prog: &Program, plan: &Plan, out: &mut String) {
         let default_repr = format!("rt::Str::from(format!(\"<{module_name}.{short} object at {{:#x}}>\", std::rc::Rc::as_ptr(&self.0) as usize))");
         let repr = match m.find_method(c, "__repr__").and_then(|f| spec_name(prog, plan, f.func, vec![t])) {
             Some(f) => format!("{f}(self.clone()).unwrap_or_else(|e| rt::Str::from(format!(\"<repr raised {{e}}>\")))"),
-            None if cd.dataclass => dataclass_repr(prog, c, short),
+            None if cd.dataclass && cd.dc.repr => dataclass_repr(prog, c, short),
             None => default_repr,
         };
         let str_ = match m.find_method(c, "__str__").and_then(|f| spec_name(prog, plan, f.func, vec![t])) {
@@ -92,7 +92,7 @@ pub(crate) fn emit_classes(prog: &Program, plan: &Plan, out: &mut String) {
                 let res = crate::truthy("__r", rt_ty.unwrap_or(Ty::Bool));
                 format!("match {f}(self.clone(), o.clone()) {{ Ok(__r) => {res}, Err(_) => false }}")
             }
-            None if cd.dataclass => {
+            None if cd.dataclass && cd.dc.eq => {
                 let parts: Vec<String> = fields(prog, c).iter().map(|(f, _)| format!("rt::coll::eq(&a.{0}, &b.{0})", field_ident(f))).collect();
                 if parts.is_empty() {
                     "true".into()
@@ -114,6 +114,14 @@ pub(crate) fn emit_classes(prog: &Program, plan: &Plan, out: &mut String) {
                 let lt = |a: &str, b: &str| format!("{{ let __r = {f}({a}.clone(), {b}.clone())?; {} }}", crate::truthy("__r", rt_ty.unwrap_or(Ty::Bool)));
                 format!("if {} {{ Ok(std::cmp::Ordering::Less) }} else if {} {{ Ok(std::cmp::Ordering::Greater) }} else {{ Ok(std::cmp::Ordering::Equal) }}", lt("self", "o"), lt("o", "self"))
             }
+            // `@dataclass(order=True)`: the fields compared like tuples.
+            None if cd.dataclass && cd.dc.order => {
+                let steps: String = fields(prog, c)
+                    .iter()
+                    .map(|(f, _)| format!("let __o = rt::coll::PyOrd::py_cmp(&a.{0}, &b.{0})?; if __o != std::cmp::Ordering::Equal {{ return Ok(__o); }} ", field_ident(f)))
+                    .collect();
+                format!("{{ let (a, b) = (self.0.borrow(), o.0.borrow()); {steps}Ok(std::cmp::Ordering::Equal) }}")
+            }
             None => format!("Err(rt::Exc::new(\"TypeError\", \"'<' not supported between instances of '{short}' and '{short}'\"))"),
         };
         writeln!(out, "impl rt::coll::PyOrd for {r} {{\n    fn py_cmp(&self, o: &Self) -> rt::PyResult<std::cmp::Ordering> {{\n        {ord}\n    }}\n}}\n").unwrap();
@@ -131,6 +139,16 @@ pub(crate) fn emit_classes(prog: &Program, plan: &Plan, out: &mut String) {
         // hashing (dict keys / set members): identity unless __hash__
         let hash = match m.find_method(c, "__hash__").and_then(|f| spec_name(prog, plan, f.func, vec![t])) {
             Some(f) => format!("std::hash::Hash::hash(&{f}(self.clone()).unwrap_or(0), h)"),
+            // A frozen dataclass hashes like the tuple of its fields (the
+            // hashable ones: equal instances still hash alike).
+            None if cd.dataclass && cd.dc.frozen && cd.dc.eq => {
+                let parts: String = fields(prog, c)
+                    .iter()
+                    .filter(|(_, t)| matches!(t, Ty::Int | Ty::Str | Ty::Bool | Ty::None) || t.is_num())
+                    .map(|(f, _)| format!("std::hash::Hash::hash(&a.{}, h); ", field_ident(f)))
+                    .collect();
+                format!("let a = self.0.borrow(); {parts}")
+            }
             None => "std::hash::Hash::hash(&(std::rc::Rc::as_ptr(&self.0) as usize), h)".to_string(),
         };
         writeln!(out, "impl PartialEq for {r} {{\n    fn eq(&self, o: &Self) -> bool {{\n        rt::coll::PyEq::py_eq(self, o)\n    }}\n}}\nimpl Eq for {r} {{}}").unwrap();
@@ -300,6 +318,15 @@ impl FnEmitter<'_, '_> {
 
     /// `Point(...)`
     pub(crate) fn new_instance(&mut self, e: &Expr, c: ClassId, args: &[Expr], kwargs: &[(String, Expr)]) -> String {
+        // An abstract class with unimplemented `@abstractmethod`s: CPython
+        // raises TypeError before evaluating the arguments.
+        let missing = self.prog.module.unimplemented_abstracts(c);
+        if !missing.is_empty() {
+            let cname = self.prog.module.class(c).name.rsplit('.').next().unwrap_or("").to_string();
+            let list = missing.iter().map(|m| format!("'{m}'")).collect::<Vec<_>>().join(", ");
+            let msg = format!("Can't instantiate abstract class {cname} without an implementation for abstract method{} {list}", if missing.len() > 1 { "s" } else { "" });
+            return format!("{{ return Err(rt::Exc::new(\"TypeError\", {msg:?})); }}");
+        }
         let t = self.class_ty(c);
         let rust = t.rust();
         match self.prog.module.find_method(c, "__init__").cloned() {
@@ -520,6 +547,14 @@ impl FnEmitter<'_, '_> {
             let key = SpecKey { func: st.func, args: vec![ot, vt] };
             let callee = self.prog.spec(&key).expect("property setter").mangled.clone();
             return format!("{ind}{{\n{ind}    let __v = {v};\n{ind}    {callee}({o}, __v)?;\n{ind}}}");
+        }
+        // A frozen dataclass: only its generated `__init__` sets fields.
+        let cd = m.class(c);
+        let in_init = m.find_method(c, "__init__").is_some_and(|f| f.func == self.func.id);
+        if cd.dataclass && cd.dc.frozen && !in_init {
+            let (v, _) = self.expr(value);
+            let o = self.expr(obj).0;
+            return format!("{ind}{{\n{ind}    let _ = ({v}, {o});\n{ind}    return Err(rt::Exc::new(\"dataclasses.FrozenInstanceError\", \"cannot assign to field '{name}'\"));\n{ind}}}");
         }
         let ft = self.prog.fields.get(&(c, name.to_string())).and_then(|s| s.known()).unwrap_or_else(|| self.ty(value));
         // CPython evaluates the value before the target object.

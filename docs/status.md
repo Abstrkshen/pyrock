@@ -21,7 +21,7 @@ exception line.
 ones are `match`, `type X = ...` and `except*`. Measured on code as it is, 61% of the
 standard library's functions and methods are accepted, and 33–43% of those in `requests`,
 `huggingface_hub` and `langchain_core`. Library code leans on `abc`/`functools` decorators,
-`Enum`/`NamedTuple` classes, mixins and relative imports, which are the main gaps.
+`Enum`/`NamedTuple` classes and mixins, which are the main gaps.
 Details and the ranked blockers: [coverage.md](coverage.md).
 
 ## What compiles natively
@@ -118,7 +118,7 @@ next to the program; compiled dependencies are cached in `~/.cache/pyfast/target
   CPython instead, warning P220).
 * `match`, `type X = ...`, `except*`, complex numbers.
 * `f(*xs)` where `xs` is a list filling fixed parameters.
-* Relative imports, `import *`, a native module (`.py`/`.rs`/`.c`) imported inside a function.
+* `import *`.
 * Arbitrary-precision integers.
 * `globals()`, `locals()`, `vars()`/`dir()` without arguments, and `eval`/`exec` without an
   explicit namespace dict (compiled code has no Python frame; a module using them is imported

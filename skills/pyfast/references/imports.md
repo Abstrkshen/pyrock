@@ -11,8 +11,12 @@ happens in the **directory of the file that contains the import**. The first mat
 `pyfast explain file.py` prints an `Imports` section with the decision for each one, plus the
 callable and skipped Rust/C signatures.
 
-Rejected: `from . import x` (relative), `from x import *`, imports inside a function or block.
-A dotted name (`import a.b`) never resolves locally. It is always a CPython import.
+Packages: a directory with `__init__.py` next to the file (or the entry file) compiles
+natively: `import a.b.c` runs each `__init__.py` once, in order; `from a import b` imports the
+submodule; relative imports (`from . import x`, `from ..m import f`) resolve against the
+package; names a module imported are re-exported. A dotted name that isn't such a package
+is a CPython import. Imports inside functions and `try`/`if` blocks work. Rejected:
+`from x import *`.
 
 ## Native Python modules (`x.py`)
 
@@ -32,7 +36,8 @@ print(geometry.circle_area(2.0), area(1.0))
 * Only functions reachable from the entry program are compiled, each specialized for the
   argument types actually used.
 * The module body runs once, at the first import (`init_<name>` guarded by an `AtomicBool`).
-* Nested imports resolve relative to the importing module's own directory.
+* Nested imports resolve relative to the importing module's own directory, then the entry
+  file's directory.
 * Functions, classes and module-level variables are accessible: `geometry.circle_area(2.0)`,
   `geometry.Point(1, 2)`, `geometry.CONST`, `from geometry import CONST` (copied at import,
   as CPython does), `geometry.CONST = 3` (a typed global cell).

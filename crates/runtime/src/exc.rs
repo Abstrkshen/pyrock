@@ -82,6 +82,7 @@ pub const HIERARCHY: &[(&str, &str)] = &[
     ("ZeroDivisionError", "ArithmeticError"),
     ("AssertionError", "Exception"),
     ("AttributeError", "Exception"),
+    ("FrozenInstanceError", "AttributeError"),
     ("BufferError", "Exception"),
     ("EOFError", "Exception"),
     ("ExceptionGroup", "Exception"),

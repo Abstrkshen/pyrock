@@ -70,7 +70,8 @@ These constructs become plain Rust with no Python objects involved:
   (`__repr__`, `__str__`, `__eq__`/`__ne__`, `__lt__`/`__le__`/`__gt__`/`__ge__`, `__len__`,
   `__bool__`, `__hash__`, `__contains__`, `__getitem__`/`__setitem__`, `__iter__` returning a
   native iterable, `__add__`/`__radd__` and the other arithmetic dunders, `__neg__`, ...),
-  `@dataclass` (fields, literal defaults, `field(default_factory=list|dict|set)`,
+  abstract base classes (`ABC`, `metaclass=ABCMeta`, `@abstractmethod`, with CPython's
+  `TypeError` on instantiating one), `@dataclass` (fields, literal defaults, `field(default_factory=list|dict|set)`,
   `__post_init__`), single inheritance with `super()`, `isinstance` with classes, and user
   exception classes (`class NotFound(KeyError)`, `except NotFound as e: e.key`).
   Instances are `Rc<RefCell<..>>` newtypes, so identity and shared mutation match Python.
@@ -208,15 +209,14 @@ in `explain`. Calling one gives P150. A struct handle passed to CPython is P231.
 Not yet supported in either mode (P100; in an imported `.py`, hybrid mode imports the
 whole module through CPython instead, P220):
 
-* classes with a CPython base class, multiple inheritance, metaclasses and class keywords,
-  class decorators other than `@dataclass`, `@dataclass(...)` options, adding class
+* classes with a CPython base class, multiple inheritance, metaclasses other than `ABCMeta`,
+  class decorators other than `@dataclass`, `@dataclass(unsafe_hash=...)`, adding class
   attributes after the class statement;
 * `f(*xs)` where `xs` is a list (not a tuple of known length) filling fixed parameters, and
   `*`/`**` arguments to Rust/C functions;
 * `match`, `type X = ...`, `except*`, `...` as a value, complex numbers, `del` of a
   function or import name, `:=` inside generator expressions and lambdas;
-* relative imports, `from x import *`, a natively compiled module (`.py`/`.rs`/`.c` next to
-  the file) imported inside a function or block (CPython imports there are fine);
+* `from x import *`;
 * `globals()`, `locals()`, `vars()`/`dir()` without arguments, `eval`/`exec` without an
   explicit namespace (compiled code has no Python frame for them; `eval(src, ns)` works);
 * arbitrary-precision integers (results beyond i64 raise `OverflowError`).

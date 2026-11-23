@@ -10,16 +10,17 @@ covered.
 * **Language constructs:** 52 of the 55 statement and expression nodes in Python 3.12's
   `ast` module compile natively (table below). The 3 missing are `match`, `type X = ...`
   and `except*`. Some forms of supported nodes are missing too: `class` inside a function
-  or `if`, relative imports, complex numbers, `...` as a value, and classes with a CPython
-  base class (`Enum`, `NamedTuple`; `Exception` subclasses are fine), multiple bases or a
+  or `if`, `import *`, complex numbers, `...` as a value, and classes with a CPython base
+  class (`Enum`, `NamedTuple`; `Exception` subclasses are fine), multiple bases or a
   metaclass.
 * **Values:** everything a program builds itself (numbers, strings, lists, dicts, sets,
   tuples, classes, closures, generators, coroutines) is native. Values from CPython imports
   (numpy arrays, sockets, `re` matches, ...) stay Python objects; in hybrid mode they work
   through CPython at reported boundaries, and native-only mode rejects them.
 * **Real code, as it is:** 61% of the functions and methods in the standard library pass
-  (62% of their lines). Third-party packages pass at 33–43%. Whole modules pass much less
-  often (40 of 167 stdlib modules), because one blocker in a module stops that whole module.
+  (62% of their lines), and 68% / 72% of those in the `requests` / `huggingface_hub`
+  packages. Whole modules pass much less often (40 of 167 stdlib modules), because one
+  blocker in a module stops that whole module.
 * **Code written for pyfast:** the 21 samples, 3 demos and 14 user samples all compile; the
   fully native ones need no CPython at all.
 
@@ -37,7 +38,7 @@ All statement and expression nodes of Python 3.12's `ast` module.
 |---|---|---|
 | `FunctionDef` | native | parameters `/`, `*`, defaults (any expression, evaluated once at `def` time), `*args`, `**kwargs`, nested functions, functions defined in `if`/`try` blocks, decorators |
 | `AsyncFunctionDef` | native | run by asyncio; also async generators |
-| `ClassDef` | native, at module level | single inheritance; `@dataclass`; not inside a function or `if`, not with a CPython base class, several bases, `metaclass=` or other class decorators |
+| `ClassDef` | native, at module level | single inheritance; `@dataclass`; `ABC`/`ABCMeta` with `@abstractmethod`; not inside a function or `if`, not with a CPython base class, several bases, another metaclass or other class decorators |
 | `Return`, `Pass`, `Break`, `Continue`, `Expr` | native | |
 | `Assign`, `AugAssign`, `AnnAssign` | native | including unpacking targets, attributes and subscripts |
 | `Delete` | native | `del x[i]`, `del d[k]`, `del obj.attr`, `del name` (unbound afterwards) |
@@ -49,7 +50,7 @@ All statement and expression nodes of Python 3.12's `ast` module.
 | `Try` | native | `except`, `else`, `finally`, `except (A, B) as e` |
 | `TryStar` (`except*`) | not supported | |
 | `Assert` | native | |
-| `Import`, `ImportFrom` | native | `.py`/`.rs`/`.c` next to the file are compiled (imported at module level), everything else is a CPython import, also inside functions and `try`/`if` blocks. Relative imports, `import *` and a native module imported inside a function are P100 |
+| `Import`, `ImportFrom` | native | `.py`/`.rs`/`.c` files and packages next to the program are compiled, including relative imports; everything else is a CPython import. Also inside functions and `try`/`if` blocks. `import *` is P100 |
 | `Global`, `Nonlocal` | native | |
 | `Match` | not supported | |
 | `TypeAlias` (`type X = ...`) | not supported | |
@@ -69,21 +70,25 @@ All statement and expression nodes of Python 3.12's `ast` module.
 `python3 scripts/coverage.py [DIR]` copies each top-level `.py` file of a directory into a
 scratch directory **on its own**, runs `pyfast check` on it, and maps every error to the
 function or class it is in. A function or method counts as accepted when nothing inside it
-and nothing on its class is rejected.
+and nothing on its class is rejected. When DIR is a package (it has `__init__.py`), every
+module of the package is checked in place instead, imported by a driver file, so relative
+imports resolve; CPython boundaries don't count as errors there.
 
 Results (pyfast 0.1.0, CPython 3.12.3, 2026-11-23):
 
 | Corpus | Modules with no error | Functions + methods accepted |
 |---|---|---|
 | CPython standard library (top-level modules) | 40 / 167 (24%) | 4140 / 6823 (60.7%; 61.5% of lines) |
-| `requests` | 3 / 19 | 114 / 267 (42.7%) |
-| `huggingface_hub` | 0 / 35 | 367 / 877 (41.8%) |
-| `langchain_core` | 5 / 18 | 36 / 108 (33.3%) |
+| `requests` (all modules, in place) | 9 / 19 | 182 / 267 (68.2%; 79.7% of lines) |
+| `huggingface_hub` (all modules, in place) | 52 / 182 | 1517 / 2103 (72.1%) |
 
-Before phase 8 started (same day): stdlib 14 modules and 54.3% of functions; `requests`
-38.2%, `huggingface_hub` 37.5%, `langchain_core` 32.4%. Imports inside functions and
-blocks, non-literal defaults, functions defined in module-level blocks, `for`/`while ...
-else`, `:=`, `del name` and `*`/`**` in literals account for the difference.
+Before phase 8 started (same day): stdlib 14 modules and 54.3% of functions. The packages
+were then measured one top-level file at a time with relative imports rejected (`requests`
+38.2%, `huggingface_hub` 37.5%, `langchain_core` 32.4%), so their old and new numbers aren't
+comparable; package support is what lets them be measured in place at all. Imports inside
+functions and blocks, non-literal defaults, functions defined in module-level blocks,
+`for`/`while ... else`, `:=`, `del name` and `*`/`**` in literals account for the stdlib
+difference.
 
 What the measurement means:
 
@@ -116,8 +121,8 @@ left out because most of them follow from another blocker):
 | 22 | Adding class attributes after the class statement | `Cls.x = ...` at module level |
 | 20 | `del` of a function or import name | module cleanup: `del _f`, `del re` |
 
-In third-party packages, relative imports (`from . import utils`) lead, followed by method
-decorators.
+In third-party packages, CPython base classes (`pydantic.BaseModel`, `Enum`, ABCs) and method
+and class decorators lead.
 
 ## What this doesn't cover
 

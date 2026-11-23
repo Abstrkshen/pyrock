@@ -61,9 +61,10 @@ imports `.c` files.
 | `x.c` (+`x.h`) | Built with `cc`, called over FFI. Scalars, strings, pointer+length arrays, `typedef struct` values, function pointers; `// pyfast: link` / `pkg-config` |
 | nothing | CPython import at runtime (stdlib, site-packages, numpy, ...) |
 
-Dotted names (`import os.path`) always go to CPython. Imports inside functions and `try`/`if`
-blocks work for CPython modules (`try: import x` / `except ImportError: x = None`). Relative
-imports and `import *` are rejected. Full details and type tables are in [references/imports.md](references/imports.md).
+Packages next to the program (`app/__init__.py`) compile natively, including relative imports
+(`from .models import Item`); other dotted names (`import os.path`) go to CPython. Imports
+inside functions and `try`/`if` blocks work (`try: import x` / `except ImportError: x = None`).
+`import *` is rejected. Full details and type tables are in [references/imports.md](references/imports.md).
 
 ## What compiles natively (short version)
 
@@ -80,9 +81,9 @@ and variables or returns with mixed types (boxed).
 
 Not supported in either mode: classes with a CPython base class or a metaclass (keep them in
 an imported `.py`, which falls back to CPython),
-relative imports, `import *`.
+`import *`.
 
-Not supported either: `match`, a native module imported inside a function, `Enum`/`NamedTuple` subclasses,
+Not supported either: `match`, `Enum`/`NamedTuple` subclasses,
 multiple inheritance, method decorators other than `@property`/`@staticmethod`/`@classmethod`.
 On the standard library as it is, 61% of functions are accepted (`docs/coverage.md` in the repo).
 
