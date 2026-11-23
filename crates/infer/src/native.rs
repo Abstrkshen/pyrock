@@ -4,7 +4,7 @@
 //! they cannot disagree about what runs natively. `None` from a lookup
 //! means "not native": the operation goes through CPython (hybrid mode).
 
-use pyfast_ir::{Comp, Field, Ty};
+use pyrock_ir::{Comp, Field, Ty};
 
 /// Join two types for one storage location. Mutable containers join their
 /// element types (`list[int] ⊔ list[str] = list[object]` when boxing), so a
@@ -522,15 +522,15 @@ pub fn method(recv: Ty, name: &str, args: &[Ty], kwargs: &[(String, Ty)], boxing
                 }
                 "keys" => {
                     check!(arity(0, 0));
-                    m(Ty::comp(Comp::View(pyfast_ir::ViewKind::Keys, k, v)))
+                    m(Ty::comp(Comp::View(pyrock_ir::ViewKind::Keys, k, v)))
                 }
                 "values" => {
                     check!(arity(0, 0));
-                    m(Ty::comp(Comp::View(pyfast_ir::ViewKind::Values, k, v)))
+                    m(Ty::comp(Comp::View(pyrock_ir::ViewKind::Values, k, v)))
                 }
                 "items" => {
                     check!(arity(0, 0));
-                    m(Ty::comp(Comp::View(pyfast_ir::ViewKind::Items, k, v)))
+                    m(Ty::comp(Comp::View(pyrock_ir::ViewKind::Items, k, v)))
                 }
                 "popitem" => {
                     check!(arity(0, 0));
@@ -780,8 +780,8 @@ pub fn isinstance_static(v: Ty, cls: &str) -> Option<bool> {
 
 /// Binary operators on native collections: `list + list`, `list * int`,
 /// `tuple + tuple`, set algebra, `dict | dict`.
-pub fn coll_binop(op: pyfast_ir::BinOp, l: Ty, r: Ty, boxing: bool) -> Option<Ty> {
-    use pyfast_ir::BinOp::*;
+pub fn coll_binop(op: pyrock_ir::BinOp, l: Ty, r: Ty, boxing: bool) -> Option<Ty> {
+    use pyrock_ir::BinOp::*;
     let (lc, rc) = (l.as_comp(), r.as_comp());
     match (op, &lc, &rc) {
         (Add, Some(Comp::List(_)), Some(Comp::List(_))) => ty_join(l, r, boxing),
@@ -828,7 +828,7 @@ pub const READ_ONLY_CALLS: &[&str] = &[
 ];
 
 /// A native `math` function for these argument types (`None`: not native,
-/// e.g. a Python object argument or a function pyfast does not implement).
+/// e.g. a Python object argument or a function pyrock does not implement).
 pub fn math_call(name: &str, args: &[Ty], kwargs: &[(String, Ty)]) -> Option<Result<Ty, String>> {
     let num = |t: Ty| t.is_number();
     let int = |t: Ty| matches!(t, Ty::Int | Ty::Bool);

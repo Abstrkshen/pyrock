@@ -6,9 +6,9 @@ drawing calls go through CPython. Create the virtualenv once:
 `python3 -m venv .venv && .venv/bin/pip install raylib`.
 
 ```sh
-pyfast run headless.py -- 300
-pyfast bench headless.py --release --runs 3
-pyfast run main.py --python .venv/bin/python -- --frames 120
+pyrock run headless.py -- 300
+pyrock bench headless.py --release --runs 3
+pyrock run main.py --python .venv/bin/python -- --frames 120
 ```
 
 `headless.py` runs the simulation without a window: about 17x faster than CPython.

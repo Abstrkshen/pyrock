@@ -1,8 +1,8 @@
 //! Code generation for native collections, strings and builtins.
 
 use crate::{borrow, boxed, FnEmitter};
-use pyfast_infer::native;
-use pyfast_ir::*;
+use pyrock_infer::native;
+use pyrock_ir::*;
 
 /// Rust code converting a value of type `from` to type `to`. Mutable
 /// containers are copied here; inference widens places so that this only
@@ -651,7 +651,7 @@ impl FnEmitter<'_, '_> {
         let vals: Vec<(String, Ty)> = vals
             .into_iter()
             .map(|(c, vt)| match native::record_dict(vt, true) {
-                Some(d) if !pyfast_infer::spec::RECORD_BUILTINS.contains(&name) => (convert(&c, vt, d), d),
+                Some(d) if !pyrock_infer::spec::RECORD_BUILTINS.contains(&name) => (convert(&c, vt, d), d),
                 _ => (c, vt),
             })
             .collect();

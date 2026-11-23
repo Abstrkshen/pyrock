@@ -1,7 +1,7 @@
 //! Test suites from design section 12:
 //! - differential: CPython vs generated binary (stdout, exit status, exception line)
 //! - golden: snapshot of generated Rust and the explain report
-//! - diagnostics: snapshot of `pyfast check` output for rejected programs
+//! - diagnostics: snapshot of `pyrock check` output for rejected programs
 //!   (a first line `# mode: native-only` selects that mode)
 //! - interop: programs importing Rust/C modules (CPython cannot run them),
 //!   checked against `expected.stdout` / `expected.stderr` (last line)
@@ -15,14 +15,14 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
 }
 
-fn pyfast() -> Command {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_pyfast"));
-    c.env("PYFAST_TARGET_DIR", root().join("target/pyfast-tests/target"));
+fn pyrock() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_pyrock"));
+    c.env("PYROCK_TARGET_DIR", root().join("target/pyrock-tests/target"));
     c
 }
 
 fn python() -> String {
-    std::env::var("PYFAST_TEST_PYTHON").unwrap_or_else(|_| "python3".into())
+    std::env::var("PYROCK_TEST_PYTHON").unwrap_or_else(|_| "python3".into())
 }
 
 fn cases(dir: &str) -> Vec<PathBuf> {
@@ -58,10 +58,10 @@ fn differential() {
     let mut failures = Vec::new();
     for case in cases("differential") {
         let name = case.file_stem().unwrap().to_str().unwrap().to_string();
-        let out_dir = root().join("target/pyfast-tests").join(&name);
-        let build = pyfast().arg("build").arg(&case).arg("--out").arg(&out_dir).output().unwrap();
+        let out_dir = root().join("target/pyrock-tests").join(&name);
+        let build = pyrock().arg("build").arg(&case).arg("--out").arg(&out_dir).output().unwrap();
         if !build.status.success() {
-            failures.push(format!("{name}: pyfast build failed\n{}", String::from_utf8_lossy(&build.stderr)));
+            failures.push(format!("{name}: pyrock build failed\n{}", String::from_utf8_lossy(&build.stderr)));
             continue;
         }
         let exe = String::from_utf8_lossy(&build.stdout).trim().to_string();
@@ -90,12 +90,12 @@ fn golden() {
     let mut failures = Vec::new();
     for case in cases("golden") {
         let name = case.file_stem().unwrap().to_str().unwrap().to_string();
-        let out_dir = root().join("target/pyfast-tests/golden").join(&name);
-        let emit = pyfast().arg("emit").arg(&case).arg("--out").arg(&out_dir).output().unwrap();
+        let out_dir = root().join("target/pyrock-tests/golden").join(&name);
+        let emit = pyrock().arg("emit").arg(&case).arg("--out").arg(&out_dir).output().unwrap();
         assert!(emit.status.success(), "{name}: emit failed: {}", String::from_utf8_lossy(&emit.stderr));
         let rs = std::fs::read_to_string(out_dir.join("src/main.rs")).unwrap();
         snapshot(case.with_extension("rs.golden"), &rs, &mut failures);
-        let explain = pyfast().current_dir(root()).arg("explain").arg(case.strip_prefix(root()).unwrap()).output().unwrap();
+        let explain = pyrock().current_dir(root()).arg("explain").arg(case.strip_prefix(root()).unwrap()).output().unwrap();
         snapshot(case.with_extension("explain.golden"), &String::from_utf8_lossy(&explain.stdout), &mut failures);
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
@@ -107,7 +107,7 @@ fn diagnostics() {
     for case in cases("diagnostics") {
         let rel = case.strip_prefix(root()).unwrap();
         let src = std::fs::read_to_string(&case).unwrap();
-        let mut cmd = pyfast();
+        let mut cmd = pyrock();
         cmd.current_dir(root()).arg("check").arg(rel);
         if src.starts_with("# mode: native-only") {
             cmd.args(["--mode", "native-only"]);
@@ -128,10 +128,10 @@ fn interop() {
     dirs.sort();
     for dir in dirs {
         let name = dir.file_name().unwrap().to_str().unwrap().to_string();
-        let out_dir = root().join("target/pyfast-tests/interop").join(&name);
-        let build = pyfast().arg("build").arg(dir.join("main.py")).arg("--out").arg(&out_dir).output().unwrap();
+        let out_dir = root().join("target/pyrock-tests/interop").join(&name);
+        let build = pyrock().arg("build").arg(dir.join("main.py")).arg("--out").arg(&out_dir).output().unwrap();
         if !build.status.success() {
-            failures.push(format!("{name}: pyfast build failed\n{}", String::from_utf8_lossy(&build.stderr)));
+            failures.push(format!("{name}: pyrock build failed\n{}", String::from_utf8_lossy(&build.stderr)));
             continue;
         }
         let exe = String::from_utf8_lossy(&build.stdout).trim().to_string();
@@ -162,10 +162,10 @@ fn relative_python_path() {
     let abs = String::from_utf8_lossy(&py.stdout).trim().to_string();
     let rel = abs.trim_start_matches('/');
     let case = root().join("tests/cli/fallback_imports/main.py");
-    let out_dir = root().join("target/pyfast-tests/relative-python");
-    let build = pyfast().current_dir("/").arg("build").arg(&case).arg("--python").arg(rel).arg("--out").arg(&out_dir).output().unwrap();
+    let out_dir = root().join("target/pyrock-tests/relative-python");
+    let build = pyrock().current_dir("/").arg("build").arg(&case).arg("--python").arg(rel).arg("--out").arg(&out_dir).output().unwrap();
     assert!(build.status.success(), "build with --python {rel} from / failed:\n{}", String::from_utf8_lossy(&build.stderr));
-    // Generated code must compile without warnings: `pyfast run` shows them above the program's output.
+    // Generated code must compile without warnings: `pyrock run` shows them above the program's output.
     let err = String::from_utf8_lossy(&build.stderr);
     assert!(!err.contains("warning"), "cargo warnings in generated code:\n{err}");
     let exe = String::from_utf8_lossy(&build.stdout).trim().to_string();

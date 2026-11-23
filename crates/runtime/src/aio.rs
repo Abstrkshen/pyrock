@@ -134,7 +134,7 @@ async def _drive(step):
     /// event loop has awaited `obj`.
     pub fn await_obj(o: Obj) -> PyResult<Obj> {
         let Some(target) = CUR.with(|c| c.borrow_mut().pop()) else {
-            return Err(Exc::new("RuntimeError", "pyfast: `await` of a Python object outside a coroutine run by an event loop"));
+            return Err(Exc::new("RuntimeError", "pyrock: `await` of a Python object outside a coroutine run by an event loop"));
         };
         crate::io::flush();
         let r = match target {
@@ -235,7 +235,7 @@ async def _drive(step):
                 if let Some(o) = d.borrow().as_ref() {
                     return Ok(o.clone());
                 }
-                let o = crate::py::run_module_attr(DRIVER_SRC, c"pyfast_aio.py", c"pyfast_aio", "_drive")?;
+                let o = crate::py::run_module_attr(DRIVER_SRC, c"pyrock_aio.py", c"pyrock_aio", "_drive")?;
                 *d.borrow_mut() = Some(o.clone());
                 Ok(o)
             })?;

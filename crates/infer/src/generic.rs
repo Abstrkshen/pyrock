@@ -8,7 +8,7 @@
 //! code generation is driven by the concrete specializations.
 
 use crate::ops;
-use pyfast_ir::*;
+use pyrock_ir::*;
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

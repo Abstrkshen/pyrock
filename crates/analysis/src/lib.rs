@@ -4,8 +4,8 @@
 //!
 //! In `native-only` mode each boundary becomes a compile error.
 
-use pyfast_infer::{CallClass, Program, Slot, Spec};
-use pyfast_ir::*;
+use pyrock_infer::{CallClass, Program, Slot, Spec};
+use pyrock_ir::*;
 use std::collections::{BTreeSet, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -79,7 +79,7 @@ fn spec_calls(prog: &Program, s: &Spec) -> BTreeSet<usize> {
         if let ExprKind::Call { callee: Callee::Func(fid), args, .. } = &e.kind {
             let tys: Option<Vec<Ty>> = args.iter().map(|a| prog.type_of(s, a)).collect();
             if let Some(args) = tys {
-                if let Some(c) = prog.spec(&prog.resolve_key(pyfast_infer::SpecKey { func: *fid, args })) {
+                if let Some(c) = prog.spec(&prog.resolve_key(pyrock_infer::SpecKey { func: *fid, args })) {
                     out.insert(c.id);
                 }
             }
@@ -93,7 +93,7 @@ fn spec_calls(prog: &Program, s: &Spec) -> BTreeSet<usize> {
     });
     walk_stmts(&f.body, &mut |st| {
         if let StmtKind::Import(ImportAction::Unit(fid)) = &st.kind {
-            if let Some(c) = prog.spec(&pyfast_infer::SpecKey { func: *fid, args: vec![] }) {
+            if let Some(c) = prog.spec(&pyrock_infer::SpecKey { func: *fid, args: vec![] }) {
                 out.insert(c.id);
             }
         }
@@ -120,7 +120,7 @@ fn spec_calls(prog: &Program, s: &Spec) -> BTreeSet<usize> {
         for &t in &prog.boxed_fns {
             let (fid, _) = t.as_closure().unwrap();
             let f = &prog.module.funcs[fid];
-            let mut args: Vec<Ty> = if pyfast_infer::spec::env_offset(f) == 1 { vec![t] } else { vec![] };
+            let mut args: Vec<Ty> = if pyrock_infer::spec::env_offset(f) == 1 { vec![t] } else { vec![] };
             args.extend(f.sig.names.iter().map(|_| Ty::Obj));
             if f.sig.vararg.is_some() {
                 args.push(Ty::tuple_var(Ty::Obj));
@@ -128,7 +128,7 @@ fn spec_calls(prog: &Program, s: &Spec) -> BTreeSet<usize> {
             if f.sig.kwarg.is_some() {
                 args.push(Ty::dict(Ty::Str, Ty::Obj));
             }
-            if let Some(sp) = prog.spec(&pyfast_infer::SpecKey { func: fid, args }) {
+            if let Some(sp) = prog.spec(&pyrock_infer::SpecKey { func: fid, args }) {
                 out.insert(sp.id);
             }
         }
@@ -136,7 +136,7 @@ fn spec_calls(prog: &Program, s: &Spec) -> BTreeSet<usize> {
             let t = Ty::class(c, &prog.module.class(c).rust);
             for (d, args) in [("__repr__", vec![t]), ("__str__", vec![t]), ("__len__", vec![t]), ("__bool__", vec![t]), ("__hash__", vec![t]), ("__eq__", vec![t, t]), ("__lt__", vec![t, t])] {
                 if let Some(m) = prog.module.find_method(c, d) {
-                    if let Some(sp) = prog.spec(&pyfast_infer::SpecKey { func: m.func, args }) {
+                    if let Some(sp) = prog.spec(&pyrock_infer::SpecKey { func: m.func, args }) {
                         out.insert(sp.id);
                     }
                 }
@@ -194,7 +194,7 @@ pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
             }
         });
         let before = boundaries.len();
-        let label = pyfast_infer::spec_label(prog, s);
+        let label = pyrock_infer::spec_label(prog, s);
         find_boundaries(prog, s, &label, &native_imports, &mut boundaries);
         if boundaries.len() > before {
             per_spec_bridge[s.id] = true;
@@ -242,7 +242,7 @@ pub fn plan(prog: &Program) -> (Plan, Vec<Diagnostic>) {
             spec_id: s.id,
             function: f.name.clone(),
             signature: if f.is_module {
-                pyfast_infer::spec_label(prog, s)
+                pyrock_infer::spec_label(prog, s)
             } else {
                 format!("{}{}({}) -> {ret}", if f.is_async { "async " } else { "" }, f.name, params.join(", "))
             },
@@ -372,7 +372,7 @@ fn find_boundaries(prog: &Program, s: &Spec, label: &str, native_imports: &BTree
         }
         // A receiver that cannot exist (an element of a list that never gets one).
         ExprKind::GetAttr { obj, .. } if ty(obj).is_some_and(|t| t.is_never()) => {}
-        ExprKind::GetAttr { name, obj } if ty(obj) == Some(Ty::Obj) || ty(obj).is_some_and(|t| !pyfast_infer::spec::class_like(t) && t.as_ext_struct().is_none() && !matches!(t.as_comp(), Some(Comp::Type(..)))) => {
+        ExprKind::GetAttr { name, obj } if ty(obj) == Some(Ty::Obj) || ty(obj).is_some_and(|t| !pyrock_infer::spec::class_like(t) && t.as_ext_struct().is_none() && !matches!(t.as_comp(), Some(Comp::Type(..)))) => {
             push("P210", e.span, format!("attribute `.{name}`"), "dynamic receiver: CPython attribute lookup")
         }
         ExprKind::Await(v) if ty(v) == Some(Ty::Obj) => push("P217", e.span, "`await` of a Python awaitable".into(), "suspends the coroutine until the asyncio event loop has awaited it"),
@@ -547,8 +547,8 @@ fn walk_expr_live(prog: &Program, s: &Spec, e: &Expr, f: &mut impl FnMut(&Expr))
             values[..n].iter().for_each(|v| walk_expr_live(prog, s, v, f));
         }
         // `type(x).__name__` of a native value is a plain string.
-        ExprKind::GetAttr { obj, name } if name == "__name__" && prog.type_of(s, e) == Some(Ty::Str) && pyfast_infer::spec::type_call_arg(obj).is_some() => {
-            walk_expr_live(prog, s, pyfast_infer::spec::type_call_arg(obj).unwrap(), f);
+        ExprKind::GetAttr { obj, name } if name == "__name__" && prog.type_of(s, e) == Some(Ty::Str) && pyrock_infer::spec::type_call_arg(obj).is_some() => {
+            walk_expr_live(prog, s, pyrock_infer::spec::type_call_arg(obj).unwrap(), f);
         }
         _ => {
             f(e);

@@ -1,5 +1,5 @@
 [package]
-name = "pyfast-runtime"
+name = "pyrock-runtime"
 version.workspace = true
 edition.workspace = true
 

@@ -10,7 +10,7 @@
 //! object) is *boxed*: it becomes a Python object instead of an error.
 
 use crate::{definite, native, ops};
-use pyfast_ir::*;
+use pyrock_ir::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub const MAX_SPECS_PER_FUNCTION: usize = 16;
@@ -228,13 +228,13 @@ impl<'m> Program<'m> {
                 _ => return None,
             },
             ExprKind::Slot(i) => match &self.module.slots[*i].kind {
-                SlotKind::From { module, attr } if module == "math" => return Some(pyfast_ir::types::intern_str(attr.as_str())),
+                SlotKind::From { module, attr } if module == "math" => return Some(pyrock_ir::types::intern_str(attr.as_str())),
                 _ => return None,
             },
             _ => return None,
         };
         match &self.module.slots[slot].kind {
-            SlotKind::Import { module, .. } if module == "math" => Some(pyfast_ir::types::intern_str(name)),
+            SlotKind::Import { module, .. } if module == "math" => Some(pyrock_ir::types::intern_str(name)),
             _ => None,
         }
     }
@@ -1847,7 +1847,7 @@ impl Ctx<'_, '_> {
                     let _ = &fs;
                     if name == "get" && (1..=2).contains(&args.len()) && kwargs.is_empty() {
                         if let ExprKind::Str(k) = &args[0].kind {
-                            return CallClass::RecordGet(pyfast_ir::types::intern_str(k));
+                            return CallClass::RecordGet(pyrock_ir::types::intern_str(k));
                         }
                     }
                     // Any other method: the record is a plain dict here.
@@ -2689,7 +2689,7 @@ impl Ctx<'_, '_> {
                 if let Some(ks) = skeys.filter(|ks| !ks.is_empty() && ks.iter().collect::<HashSet<_>>().len() == ks.len()) {
                     let vts: Vec<Ty> = pairs.iter().map(|(_, v)| self.expr(v)).collect::<Option<_>>()?;
                     if vts.iter().all(|t| native::record_field_ok(*t)) {
-                        return Some(Ty::record(ks.iter().zip(vts).map(|(k, t)| Field { key: pyfast_ir::types::intern_str(k), ty: t, optional: false }).collect()));
+                        return Some(Ty::record(ks.iter().zip(vts).map(|(k, t)| Field { key: pyrock_ir::types::intern_str(k), ty: t, optional: false }).collect()));
                     }
                 }
                 let keys: Vec<Expr> = pairs.iter().map(|(k, _)| k.clone()).collect();
@@ -3250,7 +3250,7 @@ fn record_with(fs: &[Field], k: &str, t: Ty) -> Option<Ty> {
     let mut out = fs.to_vec();
     match out.iter_mut().find(|f| f.key == k) {
         Some(f) => f.ty = t,
-        None => out.push(Field { key: pyfast_ir::types::intern_str(k), ty: t, optional: true }),
+        None => out.push(Field { key: pyrock_ir::types::intern_str(k), ty: t, optional: true }),
     }
     Some(Ty::record(out))
 }

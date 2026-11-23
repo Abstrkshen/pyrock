@@ -244,7 +244,7 @@ pub fn yield_<T: 'static, S: 'static>(v: T) -> PyResult<S> {
 
 pub(crate) fn yield_raw<T: 'static, S: 'static>(v: T) -> Resume<S> {
     let Some(p) = CUR.with(|c| c.borrow_mut().pop()) else {
-        panic!("pyfast: `yield` outside a running generator");
+        panic!("pyrock: `yield` outside a running generator");
     };
     // SAFETY: `p` is the yielder of the innermost running generator body,
     // which is the body executing this `yield` (bodies push their yielder on

@@ -3,8 +3,8 @@
 //! (`Rc<RefCell<..>>`).
 
 use crate::{boxed, coll::convert};
-use pyfast_infer::{native, Program};
-use pyfast_ir::*;
+use pyrock_infer::{native, Program};
+use pyrock_ir::*;
 use std::fmt::Write;
 
 /// Emit a struct for every record type the generated code mentions.

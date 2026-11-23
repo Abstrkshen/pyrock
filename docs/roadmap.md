@@ -17,7 +17,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 
 - [x] git repository with an initial commit
 - [x] Relative `--python` path works (regression test `relative_python_path`)
-- [x] Generated Rust compiles without warnings (`dead_code` was leaking into `pyfast run` output)
+- [x] Generated Rust compiles without warnings (`dead_code` was leaking into `pyrock run` output)
 - [x] `scripts/readme_check.sh`: runs every sample README's commands verbatim
 - [x] CI workflow: `cargo test`, `samples/run_all.sh`, `scripts/readme_check.sh`
 
@@ -155,7 +155,7 @@ Known bugs:
 
 ### Phase 0 (2026-11-22)
 
-* `git init`, `.gitignore` (target, `.pyfast/`, `__pycache__`, `.ignore/`, built `.so`).
+* `git init`, `.gitignore` (target, `.pyrock/`, `__pycache__`, `.ignore/`, built `.so`).
 * `--python` relative paths are made absolute (`std::path::absolute`, not `canonicalize`, so
   a venv interpreter keeps its site-packages). Test: `relative_python_path` builds
   `tests/cli/fallback_imports` from `/` with a relative interpreter path.
@@ -418,10 +418,10 @@ Known bugs:
   `Tuple`, `Map`, `Struct`, `Callback` (`impl Fn`/`&dyn Fn`), `CArray` (C pointer + length,
   expanded to two C arguments), `Bytes`, `CFn` (C function pointer).
 * Rust parsing (`frontend/src/externs.rs`): `pub struct` + `impl` methods (`S::name`, with
-  `Self` substituted), `// pyfast: dep` lines → `[dependencies]` in the generated
+  `Self` substituted), `// pyrock: dep` lines → `[dependencies]` in the generated
   `Cargo.toml`. C parsing: `typedef struct` (with a synthesized constructor), pointer+length
   pairs, function pointer parameters (parameter lists split at top-level commas),
-  `// pyfast: link` / `pkg-config` → `build.rs`.
+  `// pyrock: link` / `pkg-config` → `build.rs`.
 * Codegen (`codegen-rust/src/ext.rs`): conversions both ways (`ext_out` / `conv_in`); struct
   handles are `Rc<RefCell<_>>` newtypes with Python-style printing and identity; callbacks
   are Rust closures calling the native specialization, with exceptions stashed
@@ -501,9 +501,9 @@ Known bugs:
 
 * `crates/driver/build.rs` embeds every file of `crates/runtime` (`include_str!`, rerun on
   change) with a content hash. `runtime_path()` extracts them once into
-  `<cache>/pyfast/runtime/<hash>/` (write to a temporary directory, then rename, so
+  `<cache>/pyrock/runtime/<hash>/` (write to a temporary directory, then rename, so
   concurrent builds are safe) with a standalone `Cargo.toml` (no workspace inheritance).
-  `PYFAST_RUNTIME` still overrides it.
+  `PYROCK_RUNTIME` still overrides it.
 * Checked by copying the binary out of the repo and running a program with it; every test
   suite now builds against the extracted copy.
 
@@ -553,7 +553,7 @@ README command, verbatim) in CI:
 ### Phase 7.1: a cheaper bridge, and threads (2026-11-22)
 
 Measured on a breakout-style update loop (state in dicts with mixed values, so every
-operation goes through CPython; 200k frames): CPython 0.61 s, pyfast **13.2 s** before.
+operation goes through CPython; 200k frames): CPython 0.61 s, pyrock **13.2 s** before.
 Each bridged operation cost ~400 ns.
 
 * The program runs attached to the interpreter (`rt::py::attached` around the module
@@ -601,7 +601,7 @@ Each bridged operation cost ~400 ns.
   call graph uses the shared specialization past the limit, as codegen does; a request
   past the limit within one round falls back to the shared specialization.
 * Measured: the breakout-style update loop (200k frames) runs in 31 ms against CPython's
-  580 ms (18.8x); before this phase pyfast took 1.9 s. `raylib-breakout` goes from 3 to 43
+  580 ms (18.8x); before this phase pyrock took 1.9 s. `raylib-breakout` goes from 3 to 43
   native functions; CPython subscripts in it drop from 280 to 19, operators from 296 to
   131 (most of the rest come from `math.sin` results, which are Python floats).
 * Tests: `tests/differential/record_dicts.py`, `tests/differential/record_state_loop.py`.
@@ -725,7 +725,7 @@ Each bridged operation cost ~400 ns.
   functions is cleared in assignment order).
 * CPython's own order *among several modules with reference cycles* is not stable: it
   depends on the garbage collector's object lists and changes between the first run and
-  runs with cached `.pyc` files. pyfast uses the cached-run order.
+  runs with cached `.pyc` files. pyrock uses the cached-run order.
 * Test: `tests/differential/finalize_modules.py` (with `_fin_*.py`; also identical with
   `--release`).
 
@@ -802,9 +802,9 @@ Each bridged operation cost ~400 ns.
   in a dict literal that never receives a key (`lookup({}, "k")`) now raises `KeyError`, and
   a Python object passed to a native `str` method (`p.replace("/", os.sep)`) is unboxed with
   a checked `TypeError`.
-* `pyfast run` now replaces itself with the program (`exec` on Unix): `kill %1` or a
+* `pyrock run` now replaces itself with the program (`exec` on Unix): `kill %1` or a
   service manager's SIGTERM reaches the program, and its exit status is passed on. Before,
-  killing `pyfast run` left the program running.
+  killing `pyrock run` left the program running.
 * `scripts/readme_check.sh`: a README block that starts a background job runs as one shell
   session; a timed-out interactive program is killed with its whole process group (a
   leftover server kept the check waiting forever).
@@ -817,7 +817,7 @@ Each bridged operation cost ~400 ns.
 ### Phase 8: the ollama-agents findings (2026-11-23)
 
 `.ignore/samples/ollama-agents/FINDINGS.md` lists problems hit while writing a real app. All
-of its repros (`repro/r1.py` … `r21.py`) now pass `pyfast check --mode native-only`, and the
+of its repros (`repro/r1.py` … `r21.py`) now pass `pyrock check --mode native-only`, and the
 runnable ones print the same as CPython.
 
 * F-02, F-03 (and F-04, already fixed): one cause. In early inference rounds a list that

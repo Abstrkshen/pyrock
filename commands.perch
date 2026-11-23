@@ -1,13 +1,13 @@
 #!/usr/bin/env perch
-name    "pyfast"
-about   "pyfast — ahead-of-time Python → Rust compiler"
+name    "pyrock"
+about   "pyrock — ahead-of-time Python → Rust compiler"
 version "0.1.0"
 
 # Shared bindings are declared bare at top level (no globals block).
 verbose = false
 
 ROOT    = "${script_dir}"
-RELEASE = "${script_dir}/target/release/pyfast"
+RELEASE = "${script_dir}/target/release/pyrock"
 
 # The manifest is mandatory. An empty block means "pure ops only, spawns
 # nothing"; add bin/host/env/read/write lines as your commands need them.
@@ -20,19 +20,19 @@ requires
 end
 
 command install
-    description "Build pyfast in release mode and install it globally with bman"
+    description "Build pyrock in release mode and install it globally with bman"
     dir "${script_dir}"
     do
-        cargo build --release -p pyfast
+        cargo build --release -p pyrock
         bman add "${RELEASE}"
     end
 end
 
 command build
-    description "Build the release binary into target/release/pyfast (no install)"
+    description "Build the release binary into target/release/pyrock (no install)"
     dir "${script_dir}"
     do
-        cargo build --release -p pyfast
+        cargo build --release -p pyrock
     end
 end
 
@@ -45,7 +45,7 @@ command tests
 end
 
 command skill
-    description "Link skills/pyfast into the global skills dirs of Claude Code, Codex and Cursor"
+    description "Link skills/pyrock into the global skills dirs of Claude Code, Codex and Cursor"
     dir "${script_dir}"
     do
         bash skills/install.sh

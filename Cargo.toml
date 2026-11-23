@@ -10,8 +10,8 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-pyfast-frontend = { path = "crates/frontend" }
-pyfast-ir = { path = "crates/ir" }
-pyfast-infer = { path = "crates/infer" }
-pyfast-analysis = { path = "crates/analysis" }
-pyfast-codegen-rust = { path = "crates/codegen-rust" }
+pyrock-frontend = { path = "crates/frontend" }
+pyrock-ir = { path = "crates/ir" }
+pyrock-infer = { path = "crates/infer" }
+pyrock-analysis = { path = "crates/analysis" }
+pyrock-codegen-rust = { path = "crates/codegen-rust" }

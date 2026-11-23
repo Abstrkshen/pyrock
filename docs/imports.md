@@ -1,6 +1,6 @@
 # Imports
 
-pyfast programs import Python, Rust and C with the same plain `import` statement. You don't
+pyrock programs import Python, Rust and C with the same plain `import` statement. You don't
 write any binding code or configuration. The file you name decides what happens.
 
 ```python
@@ -11,11 +11,11 @@ import fastc       # fastc.c (+ fastc.h)           → compiled with the C compi
 ```
 
 The full working version is in [examples/imports/](../examples/imports/). Run it with
-`pyfast run examples/imports/main.py`.
+`pyrock run examples/imports/main.py`.
 
 ## How a name is resolved
 
-For `import x` or `from x import f`, pyfast looks in the **directory of the file containing the
+For `import x` or `from x import f`, pyrock looks in the **directory of the file containing the
 import**, and stops at the first match:
 
 1. `x.py`: a Python module, compiled natively
@@ -23,7 +23,7 @@ import**, and stops at the first match:
 3. `x.c`: a C module (with `x.h` if present)
 4. otherwise, a **CPython import** at runtime
 
-Run `pyfast explain main.py` to see the choice for every import:
+Run `pyrock explain main.py` to see the choice for every import:
 
 ```
 Imports
@@ -114,7 +114,7 @@ import app.services.rules as rules
 * A package module that can't be compiled is imported through CPython (P220), as for a
   single `.py` file.
 
-**Fallback.** If an imported `.py` uses something pyfast can't compile, such as a class with
+**Fallback.** If an imported `.py` uses something pyrock can't compile, such as a class with
 a metaclass or a CPython base class, hybrid mode imports that file through CPython instead and
 warns:
 
@@ -146,7 +146,7 @@ fn private_helper() {}   // not pub → not visible from Python
 ```python
 import vecmath
 print(vecmath.dot(1.5, 2.0, 3.0, 4.0))   # 11.0
-print(vecmath.greet("pyfast"))           # hello, pyfast, from Rust
+print(vecmath.greet("pyrock"))           # hello, pyrock, from Rust
 vecmath.checked_div(1, 0)                # RuntimeError: division by zero in Rust
 ```
 
@@ -169,7 +169,7 @@ vecmath.checked_div(1, 0)                # RuntimeError: division by zero in Rus
 
 ```rust
 // geo.rs
-// pyfast: dep itoa = "1"
+// pyrock: dep itoa = "1"
 pub fn scale_all(xs: &mut [f64], k: f64) { for x in xs.iter_mut() { *x *= k; } }
 pub fn apply(xs: Vec<i64>, f: impl Fn(i64) -> i64) -> Vec<i64> { xs.into_iter().map(f).collect() }
 
@@ -193,7 +193,7 @@ print(c.count)
 
 The file is compiled as a module of the generated crate (`#[path = "..."] mod rs_geo;`), so
 it can contain private helpers, structs and `use` lines. External crates are added with a
-`// pyfast: dep NAME = "VERSION"` comment (any Cargo dependency spec after the `=`).
+`// pyrock: dep NAME = "VERSION"` comment (any Cargo dependency spec after the `=`).
 Struct handles are shared by reference and must stay native: passing one to CPython is
 P231. Generic, `async` and `unsafe` functions are skipped; `explain` lists them with the
 reason, and calling one gives P150.
@@ -221,7 +221,7 @@ print(fastc.version())        # a Python str
   definitions in `x.c`.
 * The `.c` file is compiled with the system C compiler (through the `cc` crate) and linked
   in, along with `libm`.
-* Libraries: `// pyfast: link NAME` adds `-lNAME`; `// pyfast: pkg-config NAME` adds the
+* Libraries: `// pyrock: link NAME` adds `-lNAME`; `// pyrock: pkg-config NAME` adds the
   package's compile and link flags.
 
 | C type | Python side |
@@ -238,7 +238,7 @@ print(fastc.version())        # a Python str
 Unions, variadic functions (`...`) and `static` functions aren't callable; `explain` lists
 them as skipped.
 
-C strings returned from C are copied into a Python `str` immediately. pyfast doesn't free
+C strings returned from C are copied into a Python `str` immediately. pyrock doesn't free
 them, so return static or long-lived strings.
 
 ## Importing anything else (CPython)

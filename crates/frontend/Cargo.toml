@@ -1,9 +1,9 @@
 [package]
-name = "pyfast-frontend"
+name = "pyrock-frontend"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 serde_json.workspace = true
-pyfast-ir.workspace = true
+pyrock-ir.workspace = true
 syn = { version = "2", features = ["full"] }

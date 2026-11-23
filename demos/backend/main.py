@@ -1,8 +1,8 @@
 """A small JSON API on asyncio streams.
 
-`pyfast run main.py` starts the server on a free port, sends it a scripted
+`pyrock run main.py` starts the server on a free port, sends it a scripted
 set of requests (some concurrently), prints the responses and exits.
-`pyfast run main.py -- --serve 8080` keeps serving on port 8080.
+`pyrock run main.py -- --serve 8080` keeps serving on port 8080.
 """
 import asyncio
 import json

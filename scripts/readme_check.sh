@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Run every command in each project's README.md ```sh block verbatim, from that
 # project's directory, the way a user following the README would.
-# The `pyfast` on PATH is this repo's fresh debug build, not the installed one.
+# The `pyrock` on PATH is this repo's fresh debug build, not the installed one.
 #
 # usage: scripts/readme_check.sh [--bench] [DIR...]
 #   DIR defaults to every directory with a README.md under .ignore/samples/,
-#   examples/ and demos/. `pyfast bench` lines are skipped unless --bench is given.
+#   examples/ and demos/. `pyrock bench` lines are skipped unless --bench is given.
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export PATH="$HOME/.cargo/bin:$PATH"
-(cd "$ROOT" && cargo build -q -p pyfast) || exit 1
+(cd "$ROOT" && cargo build -q -p pyrock) || exit 1
 SHIM=$(mktemp -d)
 trap 'rm -rf "$SHIM"' EXIT
-ln -s "$ROOT/target/debug/pyfast" "$SHIM/pyfast"
+ln -s "$ROOT/target/debug/pyrock" "$SHIM/pyrock"
 export PATH="$SHIM:$PATH"
 
 bench=0
@@ -35,7 +35,7 @@ for d in "${dirs[@]}"; do
     # session: run it as a single script, in its own process group, and pass if
     # the session reaches its end successfully.
     if printf '%s\n' "${cmds[@]}" | grep -qE '&\s*$|kill %'; then
-        script=$(printf '%s\n' "${cmds[@]}" | grep -v "^pyfast bench" )
+        script=$(printf '%s\n' "${cmds[@]}" | grep -v "^pyrock bench" )
         [[ $bench -eq 1 ]] && script=$(printf '%s\n' "${cmds[@]}")
         # Give a background server time to come up before the next command.
         script=$(sed -E 's/&\s*$/\& sleep 5/' <<<"$script")
@@ -50,18 +50,18 @@ for d in "${dirs[@]}"; do
         continue
     fi
     for cmd in "${cmds[@]}"; do
-        [[ $bench -eq 0 && "$cmd" == pyfast\ bench* ]] && continue
-        if [[ "$cmd" == pyfast\ run* ]]; then
+        [[ $bench -eq 0 && "$cmd" == pyrock\ bench* ]] && continue
+        if [[ "$cmd" == pyrock\ run* ]]; then
             # Build first (slow on a cold cache), then run with a short limit:
             # an interactive program (a game, a server) that is still running
             # after it counts as working.
-            bcmd="pyfast build ${cmd#pyfast run }"
+            bcmd="pyrock build ${cmd#pyrock run }"
             bcmd="${bcmd%% -- *}"
             out=$(cd "$d" && timeout 600 bash -c "$bcmd" 2>&1 </dev/null); rc=$?
             if [[ $rc -eq 0 ]]; then
                 # `set -m` puts the command in its own process group, and the
                 # trap kills that whole group on timeout: a server started by
-                # `pyfast run` must not outlive the check (it would keep this
+                # `pyrock run` must not outlive the check (it would keep this
                 # command substitution's pipe open forever).
                 out=$(cd "$d" && timeout 30 bash -c "set -m; $cmd & p=\$!; trap 'kill -TERM -- -\$p 2>/dev/null; exit 124' TERM; wait \$p" 2>&1 </dev/null); rc=$?
                 if [[ $rc -eq 124 ]]; then
@@ -76,7 +76,7 @@ for d in "${dirs[@]}"; do
             ok=0
             printf "FAIL  %-20s rc=%d  %s\n" "$name" "$rc" "$cmd"
             echo "$out" | tail -8 | sed 's/^/      /'
-        elif [[ "$cmd" == pyfast\ run* ]] && grep -q '^warning' <<<"$out"; then
+        elif [[ "$cmd" == pyrock\ run* ]] && grep -q '^warning' <<<"$out"; then
             ok=0
             printf "FAIL  %-20s cargo warnings in output  %s\n" "$name" "$cmd"
         fi

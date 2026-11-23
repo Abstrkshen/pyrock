@@ -71,7 +71,7 @@ pub fn pow(a: f64, b: f64) -> PyResult<f64> {
     if a < 0.0 && a.is_finite() && b.is_finite() && b.fract() != 0.0 {
         return Err(Exc::new(
             "NotImplementedError",
-            "negative float ** fractional power produces a complex number (pyfast: complex is not supported)",
+            "negative float ** fractional power produces a complex number (pyrock: complex is not supported)",
         ));
     }
     let r = a.powf(b);

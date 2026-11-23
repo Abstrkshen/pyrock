@@ -91,7 +91,7 @@ pub struct ExternModule {
     pub skipped: Vec<(String, String)>,
     /// `pub struct`s (Rust) / `typedef struct` (C) usable from Python.
     pub structs: Vec<ExternStruct>,
-    /// Build settings from `pyfast:` comments: Cargo dependencies (`name = "1"`)
+    /// Build settings from `pyrock:` comments: Cargo dependencies (`name = "1"`)
     /// for Rust, libraries / pkg-config packages for C.
     pub deps: Vec<String>,
     pub link_libs: Vec<String>,
@@ -265,9 +265,9 @@ pub struct Function {
     pub is_module: bool,
     /// Index into `Module::units`.
     pub unit: usize,
-    /// Parameter annotations that name a type pyfast understands.
+    /// Parameter annotations that name a type pyrock understands.
     pub param_ann: Vec<Option<Ty>>,
-    /// Return annotation, if it names a type pyfast understands.
+    /// Return annotation, if it names a type pyrock understands.
     pub ret_ann: Option<Ty>,
     /// The class this function is a method of.
     pub class: Option<ClassId>,
@@ -597,7 +597,7 @@ impl BinOp {
         }
     }
 
-    /// Runtime helper name in `pyfast_runtime::ops`.
+    /// Runtime helper name in `pyrock_runtime::ops`.
     pub fn rt_fn(self) -> &'static str {
         match self {
             BinOp::Add => "add",
@@ -663,7 +663,7 @@ pub enum BoolOpKind {
 }
 
 /// Builtin exception classes (CPython 3.12+), including the `IOError` /
-/// `EnvironmentError` aliases. Kept in sync with `pyfast_runtime::exc::HIERARCHY`.
+/// `EnvironmentError` aliases. Kept in sync with `pyrock_runtime::exc::HIERARCHY`.
 pub const BUILTIN_EXCEPTIONS: &[&str] = &[
     "BaseException", "Exception", "BaseExceptionGroup", "GeneratorExit", "KeyboardInterrupt", "SystemExit",
     "ArithmeticError", "FloatingPointError", "OverflowError", "ZeroDivisionError", "AssertionError", "AttributeError",

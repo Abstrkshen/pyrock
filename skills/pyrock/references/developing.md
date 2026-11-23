@@ -1,6 +1,6 @@
-# Working on the pyfast repo
+# Working on the pyrock repo
 
-Repo: `~/Documents/projects/pyfast` (a Cargo workspace, not a git repo). Rust 1.96, PyO3 0.30,
+Repo: `~/Documents/projects/pyfast` (a Cargo workspace in git). Rust 1.96, PyO3 0.30,
 Python 3.12. In an agent shell, run `export PATH=$HOME/.cargo/bin:$PATH` first.
 
 ## Pipeline and crates
@@ -19,8 +19,8 @@ main.py → frontend (python3 -I dump_ast.py → JSON) → HIR (ir)
 | `crates/infer` | `ops.rs` (operator/builtin typing table), `spec.rs` (`specialize`, Program, Spec, mangling, P3xx), `definite.rs` (maybe-unbound), `generic.rs` (HM-style schemes) |
 | `crates/analysis` | `plan`: call graph, recursion, effects, Native/Bridge tier, boundary list (P2xx) |
 | `crates/codegen-rust` | `emit`: one fn per Spec, slots, unit inits, extern FFI, `rid()` keyword escaping |
-| `crates/runtime` | `pyfast-runtime`, linked into generated programs: `int.rs`, `float.rs`, `string.rs`, `conv.rs`, `exc.rs`, `io.rs`, `ext.rs`, `py.rs` (PyO3 bridge, `python` feature), `stackful.rs` (corosensei coroutines), `gen.rs` (generators), `aio.rs` (async) |
-| `crates/driver` | The `pyfast` CLI (`main.rs`): commands, Cargo.toml/build.rs generation, shared target dir, crate-name hashing, explain rendering |
+| `crates/runtime` | `pyrock-runtime`, linked into generated programs: `int.rs`, `float.rs`, `string.rs`, `conv.rs`, `exc.rs`, `io.rs`, `ext.rs`, `py.rs` (PyO3 bridge, `python` feature), `stackful.rs` (corosensei coroutines), `gen.rs` (generators), `aio.rs` (async) |
+| `crates/driver` | The `pyrock` CLI (`main.rs`): commands, Cargo.toml/build.rs generation, shared target dir, crate-name hashing, explain rendering |
 
 Docs: `README.md`, `docs/imports.md`, `docs/how-it-works.md`, `docs/subset.md`, `Project.md` (spec).
 
@@ -36,19 +36,19 @@ Docs: `README.md`, `docs/imports.md`, `docs/how-it-works.md`, `docs/subset.md`, 
 
 ```sh
 cargo test --workspace                                 # everything
-cargo test -p pyfast --test suites                     # integration suites only
-UPDATE_SNAPSHOTS=1 cargo test -p pyfast --test suites  # re-bless golden/diagnostic snapshots
+cargo test -p pyrock --test suites                     # integration suites only
+UPDATE_SNAPSHOTS=1 cargo test -p pyrock --test suites  # re-bless golden/diagnostic snapshots
 bash samples/run_all.sh [--release] [name-filter]      # every sample vs CPython / expected files
 ```
 
 * `tests/differential/*.py`: compiled output must equal `python3` on stdout, exit code and the
   last stderr line. Files starting with `_` are helper modules, not tests.
 * `tests/golden/*.py`: snapshots `.rs.golden` and `.explain.golden`.
-* `tests/diagnostics/*.py`: `.stderr` snapshot of `pyfast check`. A `# mode: native-only`
+* `tests/diagnostics/*.py`: `.stderr` snapshot of `pyrock check`. A `# mode: native-only`
   first line selects that mode.
 * `tests/interop/<name>/main.py`: Rust/C imports, compared with `expected.stdout` /
   `expected.stderr`.
-* Tests use `PYFAST_TARGET_DIR=target/pyfast-tests/target`.
+* Tests use `PYROCK_TARGET_DIR=target/pyrock-tests/target`.
 
 Review snapshot diffs before re-blessing. A changed golden is a behaviour change.
 
@@ -56,21 +56,21 @@ Review snapshot diffs before re-blessing. A changed golden is a behaviour change
 
 | Command | Action |
 |---|---|
-| `perch install` | `cargo build --release -p pyfast` + `bman add` → `~/Documents/bin/pyfast` |
+| `perch install` | `cargo build --release -p pyrock` + `bman add` → `~/Documents/bin/pyrock` |
 | `perch build` | release build only |
 | `perch tests` | `cargo test --workspace` |
 | `perch samples` | `bash samples/run_all.sh` |
 | `perch skill` | link this skill into `~/.claude/skills`, `~/.codex/skills` and `~/.cursor/skills` (`bash skills/install.sh --copy` / `--remove` for copies or uninstall) |
 
-After changing the compiler, run `perch install` so the global `pyfast` picks it up. (perch
+After changing the compiler, run `perch install` so the global `pyrock` picks it up. (perch
 reserves `test` and doesn't accept hyphens in command names.)
 
 ## Environment variables
 
 | Variable | Effect |
 |---|---|
-| `PYFAST_TARGET_DIR` | Cargo target dir (default `$XDG_CACHE_HOME/pyfast/target` or `~/.cache/pyfast/target`) |
-| `PYFAST_RUNTIME` | Path to a runtime crate (default: the copy embedded in the binary by `crates/driver/build.rs`, extracted to `<cache>/pyfast/runtime/<content hash>/`) |
+| `PYROCK_TARGET_DIR` | Cargo target dir (default `$XDG_CACHE_HOME/pyrock/target` or `~/.cache/pyrock/target`) |
+| `PYROCK_RUNTIME` | Path to a runtime crate (default: the copy embedded in the binary by `crates/driver/build.rs`, extracted to `<cache>/pyrock/runtime/<content hash>/`) |
 | `UPDATE_SNAPSHOTS=1` | Re-bless test snapshots |
 
 ## Where the project stands

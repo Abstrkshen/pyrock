@@ -1,4 +1,4 @@
-# The Python subset pyfast compiles
+# The Python subset pyrock compiles
 
 The full, authoritative list is `docs/subset.md` in the repo. This is the working summary.
 
@@ -59,7 +59,7 @@ class → `Rc<RefCell<..>>` newtype, several classes → generated enum, closure
 
 ## Divergences
 
-| Behaviour | CPython | pyfast |
+| Behaviour | CPython | pyrock |
 |---|---|---|
 | int beyond i64 | bigint | `OverflowError` |
 | `int ** negative non-literal int` | float | `NotImplementedError` |
@@ -74,7 +74,7 @@ class → `Rc<RefCell<..>>` newtype, several classes → generated enum, closure
 Anything involving a CPython object: imported Python modules (stdlib, site-packages),
 attribute access and method calls on their objects, `with` on Python context managers,
 `await` of Python awaitables, and values with no single native type (boxed, P215). These
-keep exact Python semantics. `pyfast explain` lists every such site; `--mode native-only`
+keep exact Python semantics. `pyrock explain` lists every such site; `--mode native-only`
 turns them into errors.
 
 ## Not supported in any mode → how to rewrite
@@ -90,9 +90,9 @@ turns them into errors.
 ## Making code fast
 
 * Keep hot loops native: loops over ints, floats, strs and native collections, calling
-  native or Rust/C functions. Check with `pyfast explain` that nothing in the loop is listed
+  native or Rust/C functions. Check with `pyrock explain` that nothing in the loop is listed
   under "CPython boundaries".
 * Keep one type per variable and per return; mixed types box the value (P215).
 * Move numeric kernels over arrays into a `.rs` file: slices (`&[f64]`, `&mut [f64]`) take
   lists, `array.array` or numpy arrays directly.
-* Use `--release` for benchmarks: `pyfast bench file.py --runs 5`.
+* Use `--release` for benchmarks: `pyrock bench file.py --runs 5`.

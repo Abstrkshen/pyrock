@@ -1,7 +1,7 @@
 [package]
-name = "pyfast-infer"
+name = "pyrock-infer"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-pyfast-ir.workspace = true
+pyrock-ir.workspace = true

@@ -4,16 +4,16 @@
 //! without guessing (integers, floats, bool, strings, unit) are exported;
 //! everything else is listed as skipped with a reason.
 
-use pyfast_ir::{ExtTy, ExternFn, ExternModule, ExternStruct, Lang, Pass};
+use pyrock_ir::{ExtTy, ExternFn, ExternModule, ExternStruct, Lang, Pass};
 use std::path::Path;
 
-/// `// pyfast: <key> <value>` build settings in a Rust/C file.
+/// `// pyrock: <key> <value>` build settings in a Rust/C file.
 pub(crate) fn directives(src: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in src.lines() {
         let l = line.trim();
         let body = l.strip_prefix("//!").or_else(|| l.strip_prefix("//")).or_else(|| l.strip_prefix("/*")).map(|b| b.trim().trim_end_matches("*/").trim());
-        if let Some(rest) = body.and_then(|b| b.strip_prefix("pyfast:")) {
+        if let Some(rest) = body.and_then(|b| b.strip_prefix("pyrock:")) {
             if let Some((k, v)) = rest.trim().split_once(char::is_whitespace) {
                 out.push((k.trim().to_string(), v.trim().to_string()));
             }

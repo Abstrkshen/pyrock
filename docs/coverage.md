@@ -1,4 +1,4 @@
-# How much of Python pyfast compiles
+# How much of Python pyrock compiles
 
 Two answers: which **language constructs** are compiled natively, and how much **real code**
 gets through as it is, measured on CPython's standard library and three popular packages.
@@ -21,13 +21,13 @@ covered.
   and 75% / 75% / 44% of those in the `requests` / `huggingface_hub` / `langchain_core`
   packages. Whole modules pass much less often (41 of 167 stdlib modules), because one
   blocker in a module stops that whole module.
-* **Code written for pyfast:** the 21 samples, 3 demos and 14 user samples all compile; the
+* **Code written for pyrock:** the 21 samples, 3 demos and 14 user samples all compile; the
   fully native ones need no CPython at all.
 
 Library code is the hardest case: it is full of decorators from `abc` and `functools`,
 `Enum`/`NamedTuple` classes, mixins and relative imports. Application code, especially
 hot loops, uses far fewer of these. In hybrid mode none of this stops a program: a module
-pyfast can't compile is imported through CPython instead (P220), and a CPython package is
+pyrock can't compile is imported through CPython instead (P220), and a CPython package is
 always usable.
 
 ## Syntax nodes
@@ -68,13 +68,13 @@ All statement and expression nodes of Python 3.12's `ast` module.
 ## Measured on real code
 
 `python3 scripts/coverage.py [DIR]` copies each top-level `.py` file of a directory into a
-scratch directory **on its own**, runs `pyfast check` on it, and maps every error to the
+scratch directory **on its own**, runs `pyrock check` on it, and maps every error to the
 function or class it is in. A function or method counts as accepted when nothing inside it
 and nothing on its class is rejected. When DIR is a package (it has `__init__.py`), every
 module of the package is checked in place instead, imported by a driver file, so relative
 imports resolve; CPython boundaries don't count as errors there.
 
-Results (pyfast 0.1.0, CPython 3.12.3, 2026-11-23):
+Results (pyrock 0.1.0, CPython 3.12.3, 2026-11-23):
 
 | Corpus | Modules with no error | Functions + methods accepted |
 |---|---|---|

@@ -169,7 +169,7 @@ pub fn init(script: &str, paths: &[&str]) {
         Ok(())
     });
     if let Err(e) = r {
-        eprintln!("pyfast: failed to initialise embedded CPython: {e}");
+        eprintln!("pyrock: failed to initialise embedded CPython: {e}");
         std::process::exit(1);
     }
 }
@@ -257,7 +257,7 @@ pub fn unbox_annotated<T: Unboxable>(o: &Obj, ann: &str) -> PyResult<T> {
         if !ok {
             let got = b.get_type().qualname().map(|s| s.to_string()).unwrap_or_default();
             return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                "annotation `{ann}` expects {ann}, got {got} (pyfast enforces annotations where it unboxes Python objects)"
+                "annotation `{ann}` expects {ann}, got {got} (pyrock enforces annotations where it unboxes Python objects)"
             )));
         }
         T::unbox(b)

@@ -1,17 +1,17 @@
 [package]
-name = "pyfast"
+name = "pyrock"
 version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "pyfast"
+name = "pyrock"
 path = "src/main.rs"
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-pyfast-frontend.workspace = true
-pyfast-ir.workspace = true
-pyfast-infer.workspace = true
-pyfast-analysis.workspace = true
-pyfast-codegen-rust.workspace = true
+pyrock-frontend.workspace = true
+pyrock-ir.workspace = true
+pyrock-infer.workspace = true
+pyrock-analysis.workspace = true
+pyrock-codegen-rust.workspace = true

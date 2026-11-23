@@ -1,4 +1,4 @@
-# pyfast imports reference
+# pyrock imports reference
 
 Resolution for `import x`, `import x as y`, `from x import f` and `from x import f as g`
 happens in the **directory of the file that contains the import**. The first match wins:
@@ -8,7 +8,7 @@ happens in the **directory of the file that contains the import**. The first mat
 3. `x.c`, with signatures from `x.h` if it exists: C module
 4. otherwise a CPython runtime import
 
-`pyfast explain file.py` prints an `Imports` section with the decision for each one, plus the
+`pyrock explain file.py` prints an `Imports` section with the decision for each one, plus the
 callable and skipped Rust/C signatures.
 
 Packages: a directory with `__init__.py` next to the file (or the entry file) compiles
@@ -61,8 +61,8 @@ pub fn checked_div(a: i64, b: i64) -> Result<i64, String> {
 
 * Included as `#[path = "/abs/x.rs"] mod rs_x;` in the generated crate, so it's compiled with
   the program and can contain private helpers, structs and `use std::...`.
-* External crates: add a `// pyfast: dep NAME = "VERSION"` comment line (any Cargo dependency
-  spec after the `=`, e.g. `// pyfast: dep serde = { version = "1", features = ["derive"] }`).
+* External crates: add a `// pyrock: dep NAME = "VERSION"` comment line (any Cargo dependency
+  spec after the `=`, e.g. `// pyrock: dep serde = { version = "1", features = ["derive"] }`).
   It is copied into the generated `Cargo.toml`.
 * Parsed with `syn`. Only `pub fn` at the top level of the file are exposed.
 
@@ -107,8 +107,8 @@ const char *version(void);
   literal.
 * The generated `build.rs` compiles `x.c` with the `cc` crate (the header directory is added
   to the include path) and links `libm`.
-* Libraries: `// pyfast: link NAME` adds `-lNAME`; `// pyfast: pkg-config NAME` adds the
-  package's compile and link flags (e.g. `// pyfast: pkg-config raylib`).
+* Libraries: `// pyrock: link NAME` adds `-lNAME`; `// pyrock: pkg-config NAME` adds the
+  package's compile and link flags (e.g. `// pyrock: pkg-config raylib`).
 
 | C type | Python value |
 |---|---|
@@ -150,8 +150,8 @@ project/
 ```
 
 ```sh
-pyfast explain project/main.py
-pyfast run project/main.py
+pyrock explain project/main.py
+pyrock run project/main.py
 ```
 
 Working examples in the repo: `examples/imports/`, `samples/18_local_modules/`,

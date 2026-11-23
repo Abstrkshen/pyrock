@@ -1,9 +1,9 @@
 [package]
-name = "pyfast-codegen-rust"
+name = "pyrock-codegen-rust"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-pyfast-ir.workspace = true
-pyfast-infer.workspace = true
-pyfast-analysis.workspace = true
+pyrock-ir.workspace = true
+pyrock-infer.workspace = true
+pyrock-analysis.workspace = true

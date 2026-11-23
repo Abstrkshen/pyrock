@@ -1,6 +1,6 @@
 # Sample programs
 
-Ordinary Python programs that pyfast compiles to native executables. Every one is checked
+Ordinary Python programs that pyrock compiles to native executables. Every one is checked
 by `run_all.sh`: the compiled binary must produce the same stdout, exit status and final
 exception line as CPython. The Rust/C samples can't run under CPython, so they are checked
 against `expected.txt` / `expected.err`.
@@ -8,9 +8,9 @@ against `expected.txt` / `expected.err`.
 ```console
 samples/run_all.sh                 # build + check everything (debug builds)
 samples/run_all.sh --release 08    # one sample, optimised
-target/debug/pyfast explain samples/06_generics.py
-target/debug/pyfast run samples/08_mandelbrot.py
-target/debug/pyfast bench samples/04_collatz.py --runs 3
+target/debug/pyrock explain samples/06_generics.py
+target/debug/pyrock run samples/08_mandelbrot.py
+target/debug/pyrock bench samples/04_collatz.py --runs 3
 ```
 
 | Sample | Shows | Runtime |
@@ -37,5 +37,5 @@ target/debug/pyfast bench samples/04_collatz.py --runs 3
 | [20_c_module/](20_c_module/) | `import clib` → `clib.c` + `clib.h`; `OverflowError` for a too-large C `int` | native only |
 | [21_everything/](21_everything/) | Python + Rust + C + CPython packages in one program | CPython for stdlib |
 
-"native only" means the binary doesn't link libpython at all. In `pyfast explain`, the
+"native only" means the binary doesn't link libpython at all. In `pyrock explain`, the
 "CPython boundaries" section lists every place a program crosses into Python, with the reason.

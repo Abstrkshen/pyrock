@@ -1,5 +1,5 @@
 """BPE training on a generated corpus: pure Python, so CPython can run it too
-(`pyfast bench bench_bpe.py --release` compares the two)."""
+(`pyrock bench bench_bpe.py --release` compares the two)."""
 from bpe import Tokenizer
 
 SYLLABLES = ["ka", "lo", "mi", "ra", "to", "ne", "su", "vi", "an", "or", "el", "is"]

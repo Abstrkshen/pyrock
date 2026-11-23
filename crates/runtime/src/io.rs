@@ -106,7 +106,7 @@ static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 
 fn print_traceback(file: &str, e: &crate::Exc) {
     eprintln!("Traceback (most recent call last):");
-    eprintln!("  File \"{file}\", in <module>  [native frames elided by pyfast]");
+    eprintln!("  File \"{file}\", in <module>  [native frames elided by pyrock]");
     eprintln!("{e}");
 }
 

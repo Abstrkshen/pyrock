@@ -1,7 +1,7 @@
-# pyfast diagnostics and how to fix them
+# pyrock diagnostics and how to fix them
 
 Format: `file.py:LINE:COL  CODE  error|warning: message`, followed by indented
-`reason:` / note lines. `pyfast check` exits non-zero if there is any error.
+`reason:` / note lines. `pyrock check` exits non-zero if there is any error.
 
 ## Frontend (P0xx–P1xx): the code can't be lowered
 
@@ -52,7 +52,7 @@ In hybrid mode these aren't printed by `check`. They're listed under "CPython bo
 | P306 | No return type could be inferred (e.g. infinite recursion with no base case) | Add a base-case return |
 | P307 | Warning: native value contradicts an annotation. It keeps its runtime type, like CPython | Fix the annotation or the call |
 | P310 | More than 16 specializations of one function. Hybrid mode then shares one all-`object` specialization (bridged) for the remaining calls; native-only reports it | Call it with fewer type combinations |
-| P311 | Inference didn't converge | Report it as a pyfast bug, with a minimal program |
+| P311 | Inference didn't converge | Report it as a pyrock bug, with a minimal program |
 
 ## Runtime errors
 
@@ -60,7 +60,7 @@ Uncaught exceptions print:
 
 ```
 Traceback (most recent call last):
-  File "main.py", in <module>  [native frames elided by pyfast]
+  File "main.py", in <module>  [native frames elided by pyrock]
 ZeroDivisionError: division by zero
 ```
 

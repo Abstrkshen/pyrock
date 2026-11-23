@@ -1,4 +1,4 @@
-# pyfast frontend protocol v1.
+# pyrock frontend protocol v1.
 # Parses a Python file with CPython's own `ast` module and writes a JSON tree
 # to stdout. Every node becomes {"_t": <class name>, <fields>..., "_loc": [...]}.
 # Constants are tagged so that big ints and float bit patterns survive JSON.
@@ -79,7 +79,7 @@ def enum_ref(node, names, modules):
 
 ENUM_TEMPLATE = """
 class {C}:
-    __pyfast_enum__ = "{K}"
+    __pyrock_enum__ = "{K}"
     def __init__(self, _name_, _value_):
         self._name_ = _name_
         self._value_ = _value_
@@ -94,14 +94,14 @@ class {C}:
     def __str__(self):
         return {STR}
     @classmethod
-    def _pyfast_lookup_(cls, value):
-        for m in {C}._pyfast_members_:
+    def _pyrock_lookup_(cls, value):
+        for m in {C}._pyrock_members_:
             if m._value_ == value:
                 return m
         raise ValueError(repr(value) + " is not a valid {C}")
     @classmethod
-    def _pyfast_by_name_(cls, name):
-        for m in {C}._pyfast_members_:
+    def _pyrock_by_name_(cls, name):
+        for m in {C}._pyrock_members_:
             if m._name_ == name:
                 return m
         raise KeyError(name)
@@ -169,7 +169,7 @@ def relocate(nodes, at):
 
 def rewrite_enum(cls, kind, names, modules):
     """`class C(Enum)` as a plain class: members are instances created in the
-    class body, plus the methods Enum provides. pyfast's frontend maps
+    class body, plus the methods Enum provides. pyrock's frontend maps
     `C(v)`, `C[name]`, `for m in C`, `len(C)` and `m in C` to the helpers."""
     c = cls.name
     str_expr = "self._value_" if kind == "StrEnum" else ("str(self._value_)" if kind == "IntEnum" else '"%s." + self._name_' % c)
@@ -210,7 +210,7 @@ def rewrite_enum(cls, kind, names, modules):
             value = ast.Call(ast.Name(c, ast.Load()), [ast.Constant(name), v], [])
         body.append(ast.Assign([ast.Name(name, ast.Store())], value))
     listed = [n for n, _, alias in members if not alias]
-    body.append(ast.parse(f"_pyfast_members_ = [{', '.join(f'{c}.{n}' for n in listed)}]").body[0])
+    body.append(ast.parse(f"_pyrock_members_ = [{', '.join(f'{c}.{n}' for n in listed)}]").body[0])
     cls.bases = []
     cls.keywords = []
     cls.body = relocate(body, cls)

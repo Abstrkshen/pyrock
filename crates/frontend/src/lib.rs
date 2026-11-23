@@ -13,7 +13,7 @@
 pub mod externs;
 
 mod desugar;
-use pyfast_ir::*;
+use pyrock_ir::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -213,7 +213,7 @@ fn call_sig(sig: &Sig, unit: usize) -> CallSig {
     }
 }
 
-/// Defaults are evaluated once, at `def` time, in CPython. pyfast inlines
+/// Defaults are evaluated once, at `def` time, in CPython. pyrock inlines
 /// them at each call, which is only equivalent for immutable literals.
 fn literal_default(v: &Value) -> bool {
     match ty(v) {
@@ -365,7 +365,7 @@ struct Lowerer<'l> {
 /// Modules whose imports only matter to type checkers.
 const ANNOTATION_ONLY_MODULES: &[&str] = &["typing", "typing_extensions", "__future__", "dataclasses", "abc", "enum"];
 
-/// Map an annotation to a type pyfast can use. Anything else (generics,
+/// Map an annotation to a type pyrock can use. Anything else (generics,
 /// unions, user classes) is accepted but does not constrain the value.
 fn parse_ann(v: &Value) -> Option<Ty> {
     match ty(v) {
@@ -1460,7 +1460,7 @@ impl<'l> Lowerer<'l> {
     /// An enum class used as an iterable: its member list.
     fn enum_members_json(&self, v: &Value) -> Value {
         if self.enum_class_of(v).is_some() {
-            serde_json::json!({"_t": "Attribute", "value": v, "attr": "_pyfast_members_", "ctx": {"_t": "Load"}, "_loc": v["_loc"]})
+            serde_json::json!({"_t": "Attribute", "value": v, "attr": "_pyrock_members_", "ctx": {"_t": "Load"}, "_loc": v["_loc"]})
         } else {
             v.clone()
         }
@@ -2322,7 +2322,7 @@ impl<'l> Lowerer<'l> {
             }
             // `Color["RED"]`: the member with that name.
             "Subscript" if self.enum_class_of(&e["value"]).is_some() => {
-                let call = serde_json::json!({"_t": "Call", "func": {"_t": "Attribute", "value": e["value"], "attr": "_pyfast_by_name_", "ctx": {"_t": "Load"}, "_loc": e["_loc"]}, "args": [e["slice"]], "keywords": [], "_loc": e["_loc"]});
+                let call = serde_json::json!({"_t": "Call", "func": {"_t": "Attribute", "value": e["value"], "attr": "_pyrock_by_name_", "ctx": {"_t": "Load"}, "_loc": e["_loc"]}, "args": [e["slice"]], "keywords": [], "_loc": e["_loc"]});
                 return self.lower_call(&call);
             }
             "Subscript" => ExprKind::Subscript { obj: Box::new(self.lower_expr(&e["value"])?), index: Box::new(self.lower_index(&e["slice"])?) },
@@ -2560,7 +2560,7 @@ impl<'l> Lowerer<'l> {
         let mut abstracts: Vec<String> = Vec::new();
         let mut enum_kind: Option<String> = None;
         for item in arr(st, "body") {
-            if ty(item) == "Assign" && arr(item, "targets").first().is_some_and(|t| sstr(t, "id") == "__pyfast_enum__") {
+            if ty(item) == "Assign" && arr(item, "targets").first().is_some_and(|t| sstr(t, "id") == "__pyrock_enum__") {
                 enum_kind = item["value"]["value"]["value"].as_str().map(String::from);
                 continue;
             }
@@ -2676,7 +2676,7 @@ impl<'l> Lowerer<'l> {
                     if item["value"].is_null() || (ty(item) == "AnnAssign" && self.ld.classes[cid as usize].dataclass) {
                         continue;
                     }
-                    if arr(item, "targets").first().is_some_and(|t| sstr(t, "id") == "__pyfast_enum__") {
+                    if arr(item, "targets").first().is_some_and(|t| sstr(t, "id") == "__pyrock_enum__") {
                         continue;
                     }
                     self.cur_fid = None;
@@ -3375,7 +3375,7 @@ impl<'l> Lowerer<'l> {
                     }
                     if self.ld.classes[c as usize].enum_kind.is_some() && self.in_enum_body != Some(c) {
                         // `Color(1)`: the member with that value.
-                        return self.lower_class_attr_call(c, "_pyfast_lookup_", args, kwargs, sp);
+                        return self.lower_class_attr_call(c, "_pyrock_lookup_", args, kwargs, sp);
                     }
                     return Some(Expr { kind: ExprKind::New { class: c, args, kwargs }, span: sp });
                 }
@@ -3444,7 +3444,7 @@ impl<'l> Lowerer<'l> {
                     Binding::Unit(u) if self.ld.unit_classes[u].contains_key(attr) => {
                         let c = self.ld.unit_classes[u][attr];
                         if self.ld.classes[c as usize].enum_kind.is_some() {
-                            return self.lower_class_attr_call(c, "_pyfast_lookup_", args, kwargs, sp);
+                            return self.lower_class_attr_call(c, "_pyrock_lookup_", args, kwargs, sp);
                         }
                         return Some(Expr { kind: ExprKind::New { class: c, args, kwargs }, span: sp });
                     }

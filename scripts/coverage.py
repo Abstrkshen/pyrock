@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Measure how much of a Python code base pyfast accepts natively.
+"""Measure how much of a Python code base pyrock accepts natively.
 
-Usage: python3 scripts/coverage.py [DIR] [--pyfast PATH] [--jobs N]
+Usage: python3 scripts/coverage.py [DIR] [--pyrock PATH] [--jobs N]
 
 DIR defaults to the running interpreter's standard library. Each top-level `.py` file of
 DIR is copied alone into a scratch directory (so its imports go to CPython instead of
-compiling its siblings) and checked with `pyfast check` in hybrid mode. When DIR is a
+compiling its siblings) and checked with `pyrock check` in hybrid mode. When DIR is a
 package (it has `__init__.py`), every module in it is checked in place instead, imported
 by a driver file, so relative imports resolve; CPython boundaries are not counted. A function or
 method counts as accepted when no error is reported inside it and its class (if any) has
@@ -32,13 +32,13 @@ FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
 ERR = re.compile(r"\s*(\S+?):(\d+):\d+\s+(P\d+)\s+error: (.*)")
 
 
-def check(pyfast, src, scratch):
+def check(pyrock, src, scratch):
     name = os.path.basename(src)[:-3]
     d = os.path.join(scratch, name)
     os.makedirs(d, exist_ok=True)
     shutil.copy(src, d)
     try:
-        r = subprocess.run([pyfast, "check", os.path.join(d, name + ".py")],
+        r = subprocess.run([pyrock, "check", os.path.join(d, name + ".py")],
                            capture_output=True, text=True, timeout=120)
         out = r.stdout + r.stderr
     except subprocess.TimeoutExpired:
@@ -51,7 +51,7 @@ def check(pyfast, src, scratch):
     return src, errs
 
 
-def check_in_package(pyfast, src, pkg_root, pkg):
+def check_in_package(pyrock, src, pkg_root, pkg):
     """A module of a package, imported by a driver next to the package (so
     relative imports resolve). Native-only lists every error of the module;
     CPython boundaries (P2xx) are not blockers and are dropped."""
@@ -62,7 +62,7 @@ def check_in_package(pyfast, src, pkg_root, pkg):
     with open(driver, "w") as f:
         f.write(f"import {dotted}\n")
     try:
-        r = subprocess.run([pyfast, "check", "--mode", "native-only", driver], capture_output=True, text=True, timeout=120)
+        r = subprocess.run([pyrock, "check", "--mode", "native-only", driver], capture_output=True, text=True, timeout=120)
         out = r.stdout + r.stderr
     except subprocess.TimeoutExpired:
         out = ""
@@ -78,22 +78,22 @@ def check_in_package(pyfast, src, pkg_root, pkg):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dir", nargs="?", default=sysconfig.get_paths()["stdlib"])
-    ap.add_argument("--pyfast", default=shutil.which("pyfast") or "pyfast")
+    ap.add_argument("--pyrock", default=shutil.which("pyrock") or "pyrock")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     a = ap.parse_args()
 
-    scratch = tempfile.mkdtemp(prefix="pyfast-coverage-")
+    scratch = tempfile.mkdtemp(prefix="pyrock-coverage-")
     if os.path.exists(os.path.join(a.dir, "__init__.py")):
         # A package: every module, checked in place (relative imports work).
         pkg = os.path.basename(os.path.normpath(a.dir))
         shutil.copytree(a.dir, os.path.join(scratch, pkg), ignore=shutil.ignore_patterns("__pycache__"))
         files = sorted(os.path.join(d, f) for d, _, fs in os.walk(os.path.join(scratch, pkg)) for f in fs if f.endswith(".py"))
         with ThreadPoolExecutor(a.jobs) as ex:
-            results = list(ex.map(lambda f: check_in_package(a.pyfast, f, scratch, pkg), files))
+            results = list(ex.map(lambda f: check_in_package(a.pyrock, f, scratch, pkg), files))
     else:
         files = sorted(os.path.join(a.dir, f) for f in os.listdir(a.dir) if f.endswith(".py"))
         with ThreadPoolExecutor(a.jobs) as ex:
-            results = list(ex.map(lambda f: check(a.pyfast, f, scratch), files))
+            results = list(ex.map(lambda f: check(a.pyrock, f, scratch), files))
     parsed = [(src, errs, open(src, encoding="utf-8", errors="replace").read()) for src, errs in results]
     shutil.rmtree(scratch, ignore_errors=True)
 

@@ -19,9 +19,9 @@ def caesar(text, shift):
     return out
 
 
-print(banner("pyfast", 30))
-print("abc" < "abd", "Zebra" < "apple", "fast" in "pyfast", len("héllo"))
-print(is_palindrome("A man a plan a canal Panama"), is_palindrome("pyfast"))
+print(banner("pyrock", 30))
+print("abc" < "abd", "Zebra" < "apple", "fast" in "pyrock", len("héllo"))
+print(is_palindrome("A man a plan a canal Panama"), is_palindrome("pyrock"))
 secret = caesar("hello world", 3)
 print(secret, "->", caesar(secret, 23))
 print("-".join(["a", "b", "c"]), "x,y,z".split(","), "  trim  ".strip())

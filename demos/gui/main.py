@@ -12,7 +12,7 @@ COLORS = [raylib.GOLD, raylib.SKYBLUE, raylib.PINK, raylib.LIME, raylib.ORANGE, 
 
 def run(max_frames):
     world = World(960, 600, 300, 42)
-    raylib.InitWindow(960, 600, b"pyfast: 300 balls")
+    raylib.InitWindow(960, 600, b"pyrock: 300 balls")
     raylib.SetTargetFPS(60)
     frame = 0
     while not raylib.WindowShouldClose() and (max_frames == 0 or frame < max_frames):

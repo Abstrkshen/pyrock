@@ -2,7 +2,7 @@
 //! operator accepts and what type it produces. Codegen and inference both
 //! consult this table so they can never disagree.
 
-use pyfast_ir::{BinOp, Builtin, CmpOp, Ty, UnaryOp};
+use pyrock_ir::{BinOp, Builtin, CmpOp, Ty, UnaryOp};
 
 fn promote(l: Ty, r: Ty) -> Option<Ty> {
     if !l.is_numeric() || !r.is_numeric() {
@@ -105,13 +105,13 @@ pub fn compare(op: CmpOp, l: Ty, r: Ty) -> bool {
         return !matches!(op, CmpOp::In | CmpOp::NotIn);
     }
     let optional = |t: Ty| t == Ty::None || t.as_opt().is_some();
-    if l.as_comp().is_some_and(|c| !matches!(c, pyfast_ir::Comp::Opt(_))) || r.as_comp().is_some_and(|c| !matches!(c, pyfast_ir::Comp::Opt(_))) {
+    if l.as_comp().is_some_and(|c| !matches!(c, pyrock_ir::Comp::Opt(_))) || r.as_comp().is_some_and(|c| !matches!(c, pyrock_ir::Comp::Opt(_))) {
         return match op {
             CmpOp::Eq | CmpOp::NotEq | CmpOp::Is | CmpOp::IsNot => true,
             CmpOp::In | CmpOp::NotIn => crate::native::contains_ok(l, r),
             // Ordering: same-shaped sequences (lists, tuples), set inclusion.
             _ => {
-                let seq = |t: Ty| t.list_elem().is_some() || t.tuple_items().is_some() || matches!(t.as_comp(), Some(pyfast_ir::Comp::TupleVar(_)));
+                let seq = |t: Ty| t.list_elem().is_some() || t.tuple_items().is_some() || matches!(t.as_comp(), Some(pyrock_ir::Comp::TupleVar(_)));
                 (l == r && (seq(l) || l.set_elem().is_some())) || (seq(l) && seq(r) && crate::native::ty_join(l, r, false).is_some())
             }
         };
@@ -176,7 +176,7 @@ pub fn builtin(b: Builtin, args: &[Ty], boxing: bool) -> Result<Ty, String> {
         }
         Builtin::Len => {
             arity(1)?;
-            let sized = args[0].as_comp().is_some_and(|c| matches!(c, pyfast_ir::Comp::List(_) | pyfast_ir::Comp::Dict(..) | pyfast_ir::Comp::Set(_) | pyfast_ir::Comp::Tuple(_) | pyfast_ir::Comp::TupleVar(_) | pyfast_ir::Comp::View(..) | pyfast_ir::Comp::Record(_)));
+            let sized = args[0].as_comp().is_some_and(|c| matches!(c, pyrock_ir::Comp::List(_) | pyrock_ir::Comp::Dict(..) | pyrock_ir::Comp::Set(_) | pyrock_ir::Comp::Tuple(_) | pyrock_ir::Comp::TupleVar(_) | pyrock_ir::Comp::View(..) | pyrock_ir::Comp::Record(_)));
             if args[0] == Ty::Str || args[0] == Ty::Obj || sized {
                 Ok(Ty::Int)
             } else {

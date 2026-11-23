@@ -11,13 +11,13 @@
 The whole program compiles without CPython (`--mode native-only`).
 
 ```sh
-pyfast check --mode native-only main.py
-pyfast run main.py
-pyfast bench bench_bpe.py --release --runs 3
+pyrock check --mode native-only main.py
+pyrock run main.py
+pyrock bench bench_bpe.py --release --runs 3
 ```
 
 `bench_bpe.py` trains the tokenizer on a generated 200k-word corpus. It is pure Python,
 so CPython can run it too: about 2.7x faster natively (string-allocation bound).
 
 `reference/` holds CPython versions of the Rust and C modules, used only to check the
-output: `PYTHONPATH=reference python3 main.py` prints the same as `pyfast run main.py`.
+output: `PYTHONPATH=reference python3 main.py` prints the same as `pyrock run main.py`.

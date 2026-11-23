@@ -1,4 +1,4 @@
-pyfast explain tests/golden/control.py   (mode: hybrid, parsed with CPython 3.12.3)
+pyrock explain tests/golden/control.py   (mode: hybrid, parsed with CPython 3.12.3)
 
 Inferred generic signatures
   sign(A) -> int where Lt(A, int)

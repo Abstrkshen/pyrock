@@ -1,22 +1,22 @@
-//! `pyfast` command-line driver: parse → infer → plan → emit → cargo.
+//! `pyrock` command-line driver: parse → infer → plan → emit → cargo.
 
-use pyfast_analysis::{plan, Plan, Tier};
-use pyfast_infer::{generic, specialize, Program};
-use pyfast_ir::{Diagnostic, Mode, Severity};
+use pyrock_analysis::{plan, Plan, Tier};
+use pyrock_infer::{generic, specialize, Program};
+use pyrock_ir::{Diagnostic, Mode, Severity};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "\
-pyfast — ahead-of-time Python → Rust compiler (prototype)
+pyrock — ahead-of-time Python → Rust compiler (prototype)
 
 USAGE:
-  pyfast check   <file.py>
-  pyfast explain <file.py> [--format text|json]
-  pyfast emit    <file.py> [--out DIR]
-  pyfast build   <file.py> [--out DIR] [--release] [--mode hybrid|native-only]
-  pyfast run     <file.py> [--release] [--mode ...] [-- ARGS...]
-  pyfast bench   <file.py> [--baseline python] [--runs N]
+  pyrock check   <file.py>
+  pyrock explain <file.py> [--format text|json]
+  pyrock emit    <file.py> [--out DIR]
+  pyrock build   <file.py> [--out DIR] [--release] [--mode hybrid|native-only]
+  pyrock run     <file.py> [--release] [--mode ...] [-- ARGS...]
+  pyrock bench   <file.py> [--baseline python] [--runs N]
 
 OPTIONS:
   --python PATH   interpreter used for parsing and baselines (default: python3)
@@ -41,7 +41,7 @@ fn parse_args() -> Result<Opts, String> {
         return Err(USAGE.into());
     }
     if cmd == "-V" || cmd == "--version" || cmd == "version" {
-        println!("pyfast {}", env!("CARGO_PKG_VERSION"));
+        println!("pyrock {}", env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
     }
     let mut o = Opts {
@@ -110,7 +110,7 @@ fn main() -> ExitCode {
     match run(&o) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("pyfast: {e}");
+            eprintln!("pyrock: {e}");
             ExitCode::from(1)
         }
     }
@@ -141,7 +141,7 @@ fn mode_str(m: Mode) -> &'static str {
 
 fn run(o: &Opts) -> Result<ExitCode, String> {
     let file_name = Path::new(&o.file).file_name().and_then(|s| s.to_str()).unwrap_or("main.py").to_string();
-    let parsed = pyfast_frontend::parse_file(&o.file, &o.python, o.mode)?;
+    let parsed = pyrock_frontend::parse_file(&o.file, &o.python, o.mode)?;
     let Some(module) = parsed.module else {
         print_diags(&[o.file.clone()], &parsed.diagnostics);
         return Ok(ExitCode::from(1));
@@ -207,7 +207,7 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
             }
             // Replace this process with the program, so signals (`kill %1`,
             // a service manager's SIGTERM) and the exit status reach it
-            // directly instead of leaving it running behind a dead `pyfast`.
+            // directly instead of leaving it running behind a dead `pyrock`.
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;
@@ -227,7 +227,7 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
 fn default_out(file: &str) -> PathBuf {
     let p = Path::new(file);
     let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
-    p.parent().unwrap_or(Path::new(".")).join(".pyfast").join(stem)
+    p.parent().unwrap_or(Path::new(".")).join(".pyrock").join(stem)
 }
 
 /// Cargo package name: the script stem plus a hash of the absolute output
@@ -241,30 +241,30 @@ fn crate_name(file_name: &str, out: &Path) -> String {
     for b in abs.to_string_lossy().bytes() {
         h = (h ^ b as u32).wrapping_mul(16777619);
     }
-    format!("pyfast_{s}_{h:08x}")
+    format!("pyrock_{s}_{h:08x}")
 }
 
-/// Shared Cargo target dir: `$PYFAST_TARGET_DIR`, else `$XDG_CACHE_HOME/pyfast/target`,
-/// else `~/.cache/pyfast/target`. Keeps the runtime and PyO3 compiled once.
+/// Shared Cargo target dir: `$PYROCK_TARGET_DIR`, else `$XDG_CACHE_HOME/pyrock/target`,
+/// else `~/.cache/pyrock/target`. Keeps the runtime and PyO3 compiled once.
 fn target_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("PYFAST_TARGET_DIR") {
+    if let Ok(p) = std::env::var("PYROCK_TARGET_DIR") {
         return PathBuf::from(p);
     }
     let cache = std::env::var("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".cache"));
-    cache.join("pyfast").join("target")
+    cache.join("pyrock").join("target")
 }
 
 mod embedded {
     include!(concat!(env!("OUT_DIR"), "/runtime_files.rs"));
 }
 
-/// The runtime crate generated projects depend on: `$PYFAST_RUNTIME`, else
+/// The runtime crate generated projects depend on: `$PYROCK_RUNTIME`, else
 /// the copy embedded in this binary, extracted once per content hash into
-/// `<cache>/pyfast/runtime/<hash>` (so the binary works from anywhere).
+/// `<cache>/pyrock/runtime/<hash>` (so the binary works from anywhere).
 fn runtime_path() -> Result<PathBuf, String> {
-    if let Ok(p) = std::env::var("PYFAST_RUNTIME") {
+    if let Ok(p) = std::env::var("PYROCK_RUNTIME") {
         return Ok(PathBuf::from(p));
     }
     let base = target_dir().parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
@@ -283,7 +283,7 @@ fn runtime_path() -> Result<PathBuf, String> {
         }
         Ok(())
     };
-    write().map_err(|e| format!("cannot extract the pyfast runtime into {}: {e}", tmp.display()))?;
+    write().map_err(|e| format!("cannot extract the pyrock runtime into {}: {e}", tmp.display()))?;
     if std::fs::rename(&tmp, &dir).is_err() {
         // Another process won the race.
         let _ = std::fs::remove_dir_all(&tmp);
@@ -311,14 +311,14 @@ fn python_paths(python: &str, root_dir: &str) -> Vec<String> {
     paths
 }
 
-fn write_project(o: &Opts, py: &str, module: &pyfast_ir::Module, c: &Compiled, out: &Path, file_name: &str) -> Result<(), String> {
+fn write_project(o: &Opts, py: &str, module: &pyrock_ir::Module, c: &Compiled, out: &Path, file_name: &str) -> Result<(), String> {
     let py_paths = if c.plan.uses_python { python_paths(&o.python, &module.root_dir) } else { vec![] };
-    let emitted = pyfast_codegen_rust::emit(&c.prog, &c.plan, file_name, &py_paths);
+    let emitted = pyrock_codegen_rust::emit(&c.prog, &c.plan, file_name, &py_paths);
     std::fs::create_dir_all(out.join("src")).map_err(|e| e.to_string())?;
     let rt = runtime_path()?;
     let features = if c.plan.uses_python { ", features = [\"python\"]" } else { "" };
     let build_deps = if emitted.build_rs.is_some() { "\n[build-dependencies]\ncc = \"1\"\n" } else { "" };
-    // Cargo dependencies declared by linked Rust modules (`// pyfast: dep regex = "1"`).
+    // Cargo dependencies declared by linked Rust modules (`// pyrock: dep regex = "1"`).
     let mut rust_deps = String::new();
     for (i, x) in module.externs.iter().enumerate() {
         if c.plan.externs_used.contains(&i) {
@@ -331,7 +331,7 @@ fn write_project(o: &Opts, py: &str, module: &pyfast_ir::Module, c: &Compiled, o
         }
     }
     let cargo = format!(
-        "# Generated by pyfast. Do not edit.\n[package]\nname = \"{}\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n[dependencies]\npyfast-runtime = {{ path = {:?}{features} }}\n{rust_deps}{build_deps}\n[profile.release]\ncodegen-units = 1\npanic = \"abort\"\n\n[workspace]\n",
+        "# Generated by pyrock. Do not edit.\n[package]\nname = \"{}\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n[dependencies]\npyrock-runtime = {{ path = {:?}{features} }}\n{rust_deps}{build_deps}\n[profile.release]\ncodegen-units = 1\npanic = \"abort\"\n\n[workspace]\n",
         crate_name(file_name, out),
         rt.display().to_string()
     );
@@ -349,10 +349,10 @@ fn write_project(o: &Opts, py: &str, module: &pyfast_ir::Module, c: &Compiled, o
         .iter()
         .map(|(f, s)| serde_json::json!({"rust_fn": f, "python": {"file": files.get(s.unit as usize), "line": s.line, "col": s.col}}))
         .collect();
-    write_if_changed(&out.join("pyfast.sourcemap.json"), &serde_json::to_string_pretty(&serde_json::json!({"file": file_name, "functions": smap})).unwrap())?;
+    write_if_changed(&out.join("pyrock.sourcemap.json"), &serde_json::to_string_pretty(&serde_json::json!({"file": file_name, "functions": smap})).unwrap())?;
     let schemes = generic::infer_schemes(module);
     let report = report_json(o, py, module, &schemes, Some(c), &c.diagnostics);
-    write_if_changed(&out.join("pyfast-report.json"), &serde_json::to_string_pretty(&report).unwrap())?;
+    write_if_changed(&out.join("pyrock-report.json"), &serde_json::to_string_pretty(&report).unwrap())?;
     Ok(())
 }
 
@@ -391,13 +391,13 @@ fn cargo_build(out: &Path, release: bool, quiet: bool, python: &str) -> Result<P
     }
     let st = cmd.status().map_err(|e| format!("failed to run cargo: {e}"))?;
     if !st.success() {
-        return Err("cargo build of the generated project failed (if the error is inside an imported .rs/.c file, fix it there; otherwise this is a pyfast bug)".into());
+        return Err("cargo build of the generated project failed (if the error is inside an imported .rs/.c file, fix it there; otherwise this is a pyrock bug)".into());
     }
     let cargo_toml = std::fs::read_to_string(out.join("Cargo.toml")).map_err(|e| e.to_string())?;
     let name = cargo_toml.lines().find_map(|l| l.strip_prefix("name = \"")).and_then(|l| l.strip_suffix('"')).unwrap_or("main");
     let built = target.join(if release { "release" } else { "debug" }).join(name);
-    // Stable location next to the generated project: .pyfast/<stem>/<stem>
-    let stem = name.strip_prefix("pyfast_").and_then(|n| n.rsplit_once('_')).map(|(s, _)| s).unwrap_or(name);
+    // Stable location next to the generated project: .pyrock/<stem>/<stem>
+    let stem = name.strip_prefix("pyrock_").and_then(|n| n.rsplit_once('_')).map(|(s, _)| s).unwrap_or(name);
     let exe = out.join(stem);
     // Copy next to it, then rename over it: replacing works even while the
     // previous build is still running ("Text file busy" when copying onto it).
@@ -414,9 +414,9 @@ fn tier_str(t: Tier) -> &'static str {
     }
 }
 
-fn explain_text(o: &Opts, py: &str, module: &pyfast_ir::Module, schemes: &generic::Schemes, c: Option<&Compiled>, diags: &[Diagnostic]) {
+fn explain_text(o: &Opts, py: &str, module: &pyrock_ir::Module, schemes: &generic::Schemes, c: Option<&Compiled>, diags: &[Diagnostic]) {
     let files = module.files();
-    println!("pyfast explain {}   (mode: {}, parsed with CPython {py})\n", o.file, mode_str(o.mode));
+    println!("pyrock explain {}   (mode: {}, parsed with CPython {py})\n", o.file, mode_str(o.mode));
     if !module.imports.is_empty() {
         println!("Imports");
         let w = module.imports.iter().map(|r| r.name.len()).max().unwrap_or(4);
@@ -472,7 +472,7 @@ fn explain_text(o: &Opts, py: &str, module: &pyfast_ir::Module, schemes: &generi
     }
 }
 
-fn report_json(o: &Opts, py: &str, module: &pyfast_ir::Module, schemes: &generic::Schemes, c: Option<&Compiled>, diags: &[Diagnostic]) -> serde_json::Value {
+fn report_json(o: &Opts, py: &str, module: &pyrock_ir::Module, schemes: &generic::Schemes, c: Option<&Compiled>, diags: &[Diagnostic]) -> serde_json::Value {
     let generics: Vec<_> = schemes.by_func.iter().map(|(fid, s)| generic::render(&module.funcs[*fid].name, s)).collect();
     let (specs, unreachable, boundaries) = match c {
         Some(c) => (
@@ -500,11 +500,11 @@ fn report_json(o: &Opts, py: &str, module: &pyfast_ir::Module, schemes: &generic
         })
         .collect();
     serde_json::json!({
-        "pyfast_version": env!("CARGO_PKG_VERSION"),
+        "pyrock_version": env!("CARGO_PKG_VERSION"),
         "file": o.file,
         "files": module.files(),
         "mode": o.mode,
-        "parser": {"protocol": pyfast_frontend::PROTOCOL, "cpython": py},
+        "parser": {"protocol": pyrock_frontend::PROTOCOL, "cpython": py},
         "int_semantics": "i64-checked",
         "imports": module.imports,
         "externs": externs,
@@ -516,7 +516,7 @@ fn report_json(o: &Opts, py: &str, module: &pyfast_ir::Module, schemes: &generic
         "diagnostics": diags,
         "runtime_requirements": {
             "cpython": c.map(|c| c.plan.uses_python).unwrap_or(false),
-            "c_compiler": module.externs.iter().any(|x| x.lang == pyfast_ir::Lang::C),
+            "c_compiler": module.externs.iter().any(|x| x.lang == pyrock_ir::Lang::C),
         },
     })
 }
@@ -565,9 +565,9 @@ fn bench(o: &Opts, file_name: &str) -> Result<ExitCode, String> {
     let rustc_path = Path::new(&cargo).parent().map(|d| d.join("rustc")).filter(|p| p.exists()).unwrap_or_else(|| "rustc".into());
     let rustc = Command::new(rustc_path).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
     let pyv = Command::new(&o.python).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-    println!("pyfast bench {file_name}  ({} runs each, wall clock incl. process startup)", o.runs);
+    println!("pyrock bench {file_name}  ({} runs each, wall clock incl. process startup)", o.runs);
     println!("  hardware : {cpu}");
-    println!("  versions : {pyv}; {rustc}; pyfast {}", env!("CARGO_PKG_VERSION"));
+    println!("  versions : {pyv}; {rustc}; pyrock {}", env!("CARGO_PKG_VERSION"));
     println!("  command  : {} {} | {exe}", o.python, o.file);
     println!("  python   : median {:>9.3} ms   (min {:.3}, max {:.3})", ms(pm), ms(pmin), ms(pmax));
     println!("  native   : median {:>9.3} ms   (min {:.3}, max {:.3})", ms(nm), ms(nmin), ms(nmax));

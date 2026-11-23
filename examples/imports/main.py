@@ -19,7 +19,7 @@ def sum_squares(n):
 area = geometry.circle_area(2.0)
 print("circle area:", area)
 print("rust dot:", vecmath.dot(1.5, 2.0, 3.0, 4.0))
-print("rust greet:", vecmath.greet("pyfast"))
+print("rust greet:", vecmath.greet("pyrock"))
 print("c gcd:", fastc.gcd(1071, 462))
 print("c scale:", fastc.scale(2.5, 4))
 print("c version:", fastc.version())

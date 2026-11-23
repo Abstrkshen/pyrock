@@ -73,68 +73,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pyfast"
-version = "0.1.0"
-dependencies = [
- "pyfast-analysis",
- "pyfast-codegen-rust",
- "pyfast-frontend",
- "pyfast-infer",
- "pyfast-ir",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "pyfast-analysis"
-version = "0.1.0"
-dependencies = [
- "pyfast-infer",
- "pyfast-ir",
- "serde",
-]
-
-[[package]]
-name = "pyfast-codegen-rust"
-version = "0.1.0"
-dependencies = [
- "pyfast-analysis",
- "pyfast-infer",
- "pyfast-ir",
-]
-
-[[package]]
-name = "pyfast-frontend"
-version = "0.1.0"
-dependencies = [
- "pyfast-ir",
- "serde_json",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "pyfast-infer"
-version = "0.1.0"
-dependencies = [
- "pyfast-ir",
-]
-
-[[package]]
-name = "pyfast-ir"
-version = "0.1.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "pyfast-runtime"
-version = "0.1.0"
-dependencies = [
- "corosensei",
- "pyo3",
-]
-
-[[package]]
 name = "pyo3"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -189,6 +127,68 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "pyrock"
+version = "0.1.0"
+dependencies = [
+ "pyrock-analysis",
+ "pyrock-codegen-rust",
+ "pyrock-frontend",
+ "pyrock-infer",
+ "pyrock-ir",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pyrock-analysis"
+version = "0.1.0"
+dependencies = [
+ "pyrock-infer",
+ "pyrock-ir",
+ "serde",
+]
+
+[[package]]
+name = "pyrock-codegen-rust"
+version = "0.1.0"
+dependencies = [
+ "pyrock-analysis",
+ "pyrock-infer",
+ "pyrock-ir",
+]
+
+[[package]]
+name = "pyrock-frontend"
+version = "0.1.0"
+dependencies = [
+ "pyrock-ir",
+ "serde_json",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "pyrock-infer"
+version = "0.1.0"
+dependencies = [
+ "pyrock-ir",
+]
+
+[[package]]
+name = "pyrock-ir"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "pyrock-runtime"
+version = "0.1.0"
+dependencies = [
+ "corosensei",
+ "pyo3",
 ]
 
 [[package]]

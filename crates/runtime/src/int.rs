@@ -90,7 +90,7 @@ pub fn pow(a: i64, b: i64) -> PyResult<i64> {
     if b < 0 {
         return Err(Exc::new(
             "NotImplementedError",
-            "int ** negative int produces a float, which this int specialization cannot hold (pyfast M1 subset)",
+            "int ** negative int produces a float, which this int specialization cannot hold (pyrock M1 subset)",
         ));
     }
     match a {

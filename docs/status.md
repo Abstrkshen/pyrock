@@ -1,12 +1,12 @@
 # Current state (2026-11-23)
 
-What pyfast compiles today, how fast it is, how it is tested, and what is still missing.
+What pyrock compiles today, how fast it is, how it is tested, and what is still missing.
 The step-by-step history is in [roadmap.md](roadmap.md); the precise language subset and the
 diagnostic codes are in [subset.md](subset.md).
 
 ## In one paragraph
 
-pyfast compiles ordinary Python into a native executable through readable Rust. Code it can
+pyrock compiles ordinary Python into a native executable through readable Rust. Code it can
 type compiles to plain Rust; anything else (imported Python packages, values without a
 single type) runs through an embedded CPython at reported boundaries (hybrid mode, the
 default). `--mode native-only` turns those boundaries into errors, and such programs don't
@@ -51,16 +51,16 @@ threads.
   `array.array`/numpy arrays), `Vec<u8>` as `bytes`, `Option`, tuples, `HashMap`,
   callbacks (`impl Fn`, `&dyn Fn`) taking Python functions/lambdas/closures, `pub struct`
   handles with `impl` methods and fields, `Result` (errors raise). Crates via a
-  `// pyfast: dep NAME = "VERSION"` comment.
+  `// pyrock: dep NAME = "VERSION"` comment.
 * C: scalars, strings, pointer+length arrays (written back when not `const`),
   `typedef struct` values, function pointers (Python functions as C callbacks),
-  `// pyfast: link NAME` and `// pyfast: pkg-config NAME`.
+  `// pyrock: link NAME` and `// pyrock: pkg-config NAME`.
 
 Full type tables: [imports.md](imports.md).
 
 ## Speed (measured, `--release`, Intel Core 7 240H, CPython 3.12.3)
 
-| Program | CPython | pyfast | |
+| Program | CPython | pyrock | |
 |---|---|---|---|
 | `benchmarks/numeric_loop.py` (int/float/recursion) | 626 ms | 13 ms | 48x |
 | `demos/gui/headless.py` (300 balls, pairwise collisions) | 3.3 s | 0.2 s | 16.7x |
@@ -94,10 +94,10 @@ with the GUI demo under a virtual display.
 
 ## Installation
 
-`perch install` builds a release binary into `~/Documents/bin/pyfast`. The binary carries
-its runtime crate and unpacks it into `~/.cache/pyfast/runtime/<hash>/` on first use, so it
-does not depend on the repository's location. Generated projects go in `.pyfast/<name>/`
-next to the program; compiled dependencies are cached in `~/.cache/pyfast/target`.
+`perch install` builds a release binary into `~/Documents/bin/pyrock`. The binary carries
+its runtime crate and unpacks it into `~/.cache/pyrock/runtime/<hash>/` on first use, so it
+does not depend on the repository's location. Generated projects go in `.pyrock/<name>/`
+next to the program; compiled dependencies are cached in `~/.cache/pyrock/target`.
 
 ## Known differences from CPython
 
@@ -109,7 +109,7 @@ next to the program; compiled dependencies are cached in `~/.cache/pyfast/target
 * CPython threads run only while compiled code waits (I/O, `sleep`, `join`, the asyncio
   event loop), not during long native loops (the GIL is held while native code runs).
 * At exit, CPython's own order of finalizing several imported modules that define
-  functions is not stable (it changes once `.pyc` files are cached); pyfast uses one fixed
+  functions is not stable (it changes once `.pyc` files are cached); pyrock uses one fixed
   order.
 
 ## Not supported yet
@@ -138,7 +138,7 @@ Rust/C interop beyond it. Where the implementation differs:
 * There is no separate block/SSA IR with a verifier (§9): specialization works on the HIR,
   and rustc checks the emitted code.
 * The GIL is held while native code runs (§8 asks to release it during long computations).
-* The CLI is `pyfast`, not `pyrust`; `emit` has no `--target` (Rust is the only backend).
+* The CLI is `pyrock`, not `pyrust`; `emit` has no `--target` (Rust is the only backend).
 * Benchmarks measure wall time and output only, on Linux only (§12 also lists compile time,
   startup, RSS, code size, bridge overhead and macOS).
 

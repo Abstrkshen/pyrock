@@ -1,5 +1,5 @@
 // C arrays (pointer + length) and structs by value.
-// pyfast: link m
+// pyrock: link m
 #include <math.h>
 #include <stddef.h>
 

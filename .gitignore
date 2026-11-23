@@ -1,5 +1,5 @@
 /target
-.pyfast/
+.pyrock/
 __pycache__/
 *.pyc
 /.ignore/

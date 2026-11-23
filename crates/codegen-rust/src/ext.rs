@@ -2,8 +2,8 @@
 //! handles, and value conversions in both directions.
 
 use crate::{as_float, as_int, borrow, FnEmitter};
-use pyfast_infer::native;
-use pyfast_ir::*;
+use pyrock_infer::native;
+use pyrock_ir::*;
 use std::fmt::Write;
 
 /// Rust path of an extern module's items (`rs_name` / `c_name`).
@@ -104,7 +104,7 @@ pub(crate) fn build_lines(x: &ExternModule, b: &mut String) {
         )
         .unwrap();
     }
-    writeln!(b, "    build.compile(\"pyfast_c_{}\");", x.name).unwrap();
+    writeln!(b, "    build.compile(\"pyrock_c_{}\");", x.name).unwrap();
     for lib in &x.link_libs {
         if let Some(dir) = lib.strip_prefix("search=") {
             writeln!(b, "    println!(\"cargo:rustc-link-search=native={dir}\");").unwrap();
@@ -271,13 +271,13 @@ impl FnEmitter<'_, '_> {
                 ExtTy::CFn(ps, r) => {
                     uses_callbacks = true;
                     let (fid, _) = t.as_closure().expect("callback is a native function value");
-                    let env = pyfast_infer::spec::env_offset(&self.prog.module.funcs[fid]) == 1;
+                    let env = pyrock_infer::spec::env_offset(&self.prog.module.funcs[fid]) == 1;
                     let mut key: Vec<Ty> = if env { vec![t] } else { vec![] };
                     key.extend(ps.iter().map(|x| x.ty()));
-                    let spec = self.prog.spec(&pyfast_infer::SpecKey { func: fid, args: key }).expect("callback specialization").clone();
+                    let spec = self.prog.spec(&pyrock_infer::SpecKey { func: fid, args: key }).expect("callback specialization").clone();
                     let rt_ty = match spec.ret {
-                        pyfast_infer::Slot::Known(x) => x,
-                        pyfast_infer::Slot::Boxed(..) => Ty::Obj,
+                        pyrock_infer::Slot::Known(x) => x,
+                        pyrock_infer::Slot::Boxed(..) => Ty::Obj,
                         _ => Ty::None,
                     };
                     let mut n = 0;
@@ -311,13 +311,13 @@ impl FnEmitter<'_, '_> {
                 ExtTy::Callback(ps, r, dyn_ref) => {
                     uses_callbacks = true;
                     let (fid, _) = t.as_closure().expect("callback is a native function value");
-                    let env = pyfast_infer::spec::env_offset(&self.prog.module.funcs[fid]) == 1;
+                    let env = pyrock_infer::spec::env_offset(&self.prog.module.funcs[fid]) == 1;
                     let mut key: Vec<Ty> = if env { vec![t] } else { vec![] };
                     key.extend(ps.iter().map(|x| x.ty()));
-                    let spec = self.prog.spec(&pyfast_infer::SpecKey { func: fid, args: key }).expect("callback specialization").clone();
+                    let spec = self.prog.spec(&pyrock_infer::SpecKey { func: fid, args: key }).expect("callback specialization").clone();
                     let rt_ty = match spec.ret {
-                        pyfast_infer::Slot::Known(x) => x,
-                        pyfast_infer::Slot::Boxed(..) => Ty::Obj,
+                        pyrock_infer::Slot::Known(x) => x,
+                        pyrock_infer::Slot::Boxed(..) => Ty::Obj,
                         _ => Ty::None,
                     };
                     let mut n = 0;

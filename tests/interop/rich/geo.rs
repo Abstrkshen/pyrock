@@ -1,6 +1,6 @@
 //! Rich Rust interop: containers, Option, tuples, maps, structs with
 //! methods, callbacks and a Cargo dependency.
-// pyfast: dep itoa = "1"
+// pyrock: dep itoa = "1"
 
 use std::collections::HashMap;
 

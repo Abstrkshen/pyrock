@@ -1,6 +1,6 @@
-# How pyfast works
+# How pyrock works
 
-This document follows one program from `pyfast run main.py` to a native executable. It covers
+This document follows one program from `pyrock run main.py` to a native executable. It covers
 what each stage does, the decisions it makes and the code it produces. All code samples are
 real compiler output.
 
@@ -24,7 +24,7 @@ Each stage is a crate under [crates/](../crates/):
 | 5 | `analysis` | `plan` in [lib.rs](../crates/analysis/src/lib.rs) |
 | 6 | `codegen-rust` | `emit` in [lib.rs](../crates/codegen-rust/src/lib.rs) |
 | runtime | `runtime` | Python semantics in Rust and the PyO3 bridge, linked into every program |
-| 7 | `driver` | The `pyfast` CLI in [main.rs](../crates/driver/src/main.rs) |
+| 7 | `driver` | The `pyrock` CLI in [main.rs](../crates/driver/src/main.rs) |
 
 The running example:
 
@@ -48,7 +48,7 @@ print(vecmath.dot(1.0, 2.0, 3.0, 4.0), geometry.circle_area(1.0))
 
 ## 1. Parsing: CPython does it
 
-pyfast doesn't have its own Python parser. It runs the real interpreter in isolated mode
+pyrock doesn't have its own Python parser. It runs the real interpreter in isolated mode
 (`python3 -I dump_ast.py main.py`), which parses the file with the `ast` module and prints the
 tree as JSON (protocol version 1). Every node carries its location, and constants are tagged
 so nothing is lost on the way. Integers are sent as strings, so a huge literal can still be
@@ -88,7 +88,7 @@ CPython instead (P220).
 
 ## 3. Generic signatures
 
-pyfast never asks you for types. For each function it infers a **generic scheme** in the
+pyrock never asks you for types. For each function it infers a **generic scheme** in the
 style of Hindley–Milner, where each operator adds a constraint:
 
 ```
@@ -98,14 +98,14 @@ geometry.circle_area(A) -> R where Mul(float, A, R1), Mul(R1, A, R)
 ```
 
 `Add(A, B, R)` means "whatever `A + B` gives for these types is `R`". These schemes are what
-`pyfast explain` shows as *Inferred generic signatures*. Annotated parameters (`n: int`) are
+`pyrock explain` shows as *Inferred generic signatures*. Annotated parameters (`n: int`) are
 fixed instead of generic.
 
 The schemes explain behaviour. Code generation uses the next stage.
 
 ## 4. Specialization: one Rust function per type combination
 
-Starting from the module body, pyfast walks every **reachable** call and records the concrete
+Starting from the module body, pyrock walks every **reachable** call and records the concrete
 argument types. Each new combination (function, argument types) becomes a **specialization**
 and is analysed in turn, until nothing new appears (a fixed point).
 
@@ -525,24 +525,24 @@ functions through generated trampolines. [imports.md](imports.md) has the type t
 
 ## 7. Building
 
-The driver writes a small Cargo project to `.pyfast/<name>/`:
+The driver writes a small Cargo project to `.pyrock/<name>/`:
 
 ```
-.pyfast/demo/
+.pyrock/demo/
 ├── Cargo.toml              # depends on the runtime crate (embedded in the binary, extracted to
-│                           # ~/.cache/pyfast/runtime/<hash>/), + "python" feature, + cc if C is used
+│                           # ~/.cache/pyrock/runtime/<hash>/), + "python" feature, + cc if C is used
 ├── build.rs                # only if C files are imported
 ├── src/main.rs             # the generated code above
-├── pyfast-report.json      # what explain shows, as JSON
-├── pyfast.sourcemap.json   # Rust function → Python file:line
+├── pyrock-report.json      # what explain shows, as JSON
+├── pyrock.sourcemap.json   # Rust function → Python file:line
 └── demo                    # the executable, copied here after the build
 ```
 
 It then runs `cargo build` with:
 
-* a **shared target directory**, `~/.cache/pyfast/target` (override it with
-  `PYFAST_TARGET_DIR`), so the runtime and PyO3 are compiled once for all your projects;
-* a crate name hashed from the output directory (`pyfast_demo_2b2066bd`), so two `main.py`
+* a **shared target directory**, `~/.cache/pyrock/target` (override it with
+  `PYROCK_TARGET_DIR`), so the runtime and PyO3 are compiled once for all your projects;
+* a crate name hashed from the output directory (`pyrock_demo_2b2066bd`), so two `main.py`
   files in different folders don't overwrite each other;
 * `PYO3_PYTHON` set to the interpreter you build with, so the binary links that Python's
   libpython.
@@ -553,7 +553,7 @@ CPython boundaries. A fully native program is a plain Rust binary.
 Cargo's own incremental build is the cache: an unchanged program rebuilds in well under a second,
 and the runtime and PyO3 are compiled once per toolchain and Python version.
 
-**`pyfast-report.json`** holds everything `explain` prints: `mode`, `parser` (CPython
+**`pyrock-report.json`** holds everything `explain` prints: `mode`, `parser` (CPython
 version, AST protocol), `imports`, `externs` (Rust/C functions and their accepted or
 rejected signatures), `generic_signatures`, `specializations` (each with `spec_id`,
 `function`, `signature`, `rust_name`, `tier`, `effects`, `recursive` and the source `span`),
@@ -561,7 +561,7 @@ rejected signatures), `generic_signatures`, `specializations` (each with `spec_i
 `unreachable_functions`, `int_semantics` and `runtime_requirements` (whether CPython and a
 C compiler are needed).
 
-**`pyfast.sourcemap.json`** maps each generated Rust function to its Python file, line and
+**`pyrock.sourcemap.json`** maps each generated Rust function to its Python file, line and
 column, so a Rust compile error or a profiler frame can be traced back to the source.
 
 ---
@@ -622,8 +622,8 @@ Known differences, such as ints beyond 64 bits, are listed in [subset.md](subset
 ## Seeing all of this yourself
 
 ```console
-pyfast explain main.py                 # imports, generic schemes, specializations, boundaries
-pyfast explain main.py --format json   # the same, machine-readable
-pyfast emit main.py --out /tmp/x       # write the Cargo project without building
-pyfast check main.py --mode native-only   # list every place the program would need CPython
+pyrock explain main.py                 # imports, generic schemes, specializations, boundaries
+pyrock explain main.py --format json   # the same, machine-readable
+pyrock emit main.py --out /tmp/x       # write the Cargo project without building
+pyrock check main.py --mode native-only   # list every place the program would need CPython
 ```

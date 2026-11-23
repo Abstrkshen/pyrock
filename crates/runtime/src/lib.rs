@@ -1,6 +1,6 @@
-//! pyfast runtime: Python-compatible semantics for natively compiled code.
+//! pyrock runtime: Python-compatible semantics for natively compiled code.
 //!
-//! Generated programs `use pyfast_runtime as rt;` and call these helpers
+//! Generated programs `use pyrock_runtime as rt;` and call these helpers
 //! instead of raw Rust operators wherever the two differ (overflow, floor
 //! division, modulo signs, float formatting, exceptions, ...).
 //!

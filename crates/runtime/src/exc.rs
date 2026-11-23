@@ -46,7 +46,7 @@ impl Exc {
     }
 
     pub fn overflow() -> Exc {
-        Exc::new("OverflowError", "int result does not fit in the 64-bit int subset (pyfast: arbitrary precision is not implemented yet)")
+        Exc::new("OverflowError", "int result does not fit in the 64-bit int subset (pyrock: arbitrary precision is not implemented yet)")
     }
 
     pub fn zero_div(msg: &str) -> Exc {

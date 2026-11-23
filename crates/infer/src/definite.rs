@@ -2,7 +2,7 @@
 //! by an assignment on every path is "maybe unbound": codegen stores it as
 //! `Option<T>` and raises UnboundLocalError/NameError exactly like CPython.
 
-use pyfast_ir::*;
+use pyrock_ir::*;
 use std::collections::HashSet;
 
 type Set = HashSet<String>;

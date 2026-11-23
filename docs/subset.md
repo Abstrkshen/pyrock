@@ -135,7 +135,7 @@ These constructs become plain Rust with no Python objects involved:
 
 ## Known divergences (documented, tested where possible)
 
-| Behaviour | CPython | pyfast | Planned fix |
+| Behaviour | CPython | pyrock | Planned fix |
 |---|---|---|---|
 | int results outside i64 | promotes to bigint | `OverflowError` | M4: arbitrary precision / promotion |
 | `int ** negative_int` with a non-literal exponent | float | `NotImplementedError` | M4: union return |
@@ -151,7 +151,7 @@ These constructs become plain Rust with no Python objects involved:
 ## Bridged through CPython (hybrid mode)
 
 These are compiled, but they operate on `rt::py::Obj` values through the embedded interpreter.
-Each site appears under "CPython boundaries" in `pyfast explain`, and each is a compile error
+Each site appears under "CPython boundaries" in `pyrock explain`, and each is a compile error
 under `--mode native-only`.
 
 * `import x` / `from x import y`, where no `x.py`, `x.rs` or `x.c` exists next to the file (P200)
@@ -172,11 +172,11 @@ under `--mode native-only`.
 
 ## Imports of Rust and C
 
-See `skills/pyfast/references/imports.md` for the type tables. Rust: scalars, `&str`/`String`,
+See `skills/pyrock/references/imports.md` for the type tables. Rust: scalars, `&str`/`String`,
 `Vec<T>`/`&[T]`/`&mut [T]` (written back), `Vec<u8>` (bytes), `Option`, tuples, `HashMap`,
 `impl Fn`/`&dyn Fn` callbacks, `pub struct` handles with `impl` methods and fields, and
-`// pyfast: dep` crates. C: scalars, strings, pointer+length arrays (written back when not
-`const`), `typedef struct` values, function pointers, `// pyfast: link` / `pkg-config`.
+`// pyrock: dep` crates. C: scalars, strings, pointer+length arrays (written back when not
+`const`), `typedef struct` values, function pointers, `// pyrock: link` / `pkg-config`.
 Rejected signatures (generics, unions, variadic functions, `static` C functions) are listed
 in `explain`. Calling one gives P150. A struct handle passed to CPython is P231.
 

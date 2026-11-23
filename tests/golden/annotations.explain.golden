@@ -1,4 +1,4 @@
-pyfast explain tests/golden/annotations.py   (mode: hybrid, parsed with CPython 3.12.3)
+pyrock explain tests/golden/annotations.py   (mode: hybrid, parsed with CPython 3.12.3)
 
 Imports
   __future__  -> cpython

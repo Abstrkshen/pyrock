@@ -1,4 +1,4 @@
-//! Embed the runtime crate's sources into the `pyfast` binary, so an
+//! Embed the runtime crate's sources into the `pyrock` binary, so an
 //! installed binary does not depend on this repository staying in place.
 //! The driver extracts them into the cache on first use (`runtime_path`).
 

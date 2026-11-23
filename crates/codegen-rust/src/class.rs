@@ -6,9 +6,9 @@
 //! implemented for it (the orphan rule forbids impls on `rt::Ref<T>`).
 
 use crate::{borrow, coerce, FnEmitter};
-use pyfast_analysis::Plan;
-use pyfast_infer::{Program, SpecKey};
-use pyfast_ir::*;
+use pyrock_analysis::Plan;
+use pyrock_infer::{Program, SpecKey};
+use pyrock_ir::*;
 use std::fmt::Write;
 
 fn field_ident(name: &str) -> String {
@@ -86,7 +86,7 @@ pub(crate) fn emit_classes(prog: &Program, plan: &Plan, out: &mut String) {
         let eq = match m.find_method(c, "__eq__").and_then(|f| spec_name(prog, plan, f.func, vec![t, t])) {
             Some(f) => {
                 let rt_ty = prog.spec(&SpecKey { func: m.find_method(c, "__eq__").unwrap().func, args: vec![t, t] }).and_then(|s| match s.ret {
-                    pyfast_infer::Slot::Known(x) => Some(x),
+                    pyrock_infer::Slot::Known(x) => Some(x),
                     _ => None,
                 });
                 let res = crate::truthy("__r", rt_ty.unwrap_or(Ty::Bool));
@@ -108,7 +108,7 @@ pub(crate) fn emit_classes(prog: &Program, plan: &Plan, out: &mut String) {
         let ord = match m.find_method(c, "__lt__").and_then(|f| spec_name(prog, plan, f.func, vec![t, t])) {
             Some(f) => {
                 let rt_ty = prog.spec(&SpecKey { func: m.find_method(c, "__lt__").unwrap().func, args: vec![t, t] }).and_then(|s| match s.ret {
-                    pyfast_infer::Slot::Known(x) => Some(x),
+                    pyrock_infer::Slot::Known(x) => Some(x),
                     _ => None,
                 });
                 let lt = |a: &str, b: &str| format!("{{ let __r = {f}({a}.clone(), {b}.clone())?; {} }}", crate::truthy("__r", rt_ty.unwrap_or(Ty::Bool)));
@@ -444,15 +444,15 @@ impl FnEmitter<'_, '_> {
                     let key = SpecKey { func: f, args: std::iter::once(*m).chain(tmps.iter().map(|o| o.1)).collect() };
                     let s = self.prog.spec(&key);
                     let rt = s.and_then(|s| match s.ret {
-                        pyfast_infer::Slot::Known(t) => Some(t),
-                        pyfast_infer::Slot::Boxed(..) => Some(Ty::Obj),
+                        pyrock_infer::Slot::Known(t) => Some(t),
+                        pyrock_infer::Slot::Boxed(..) => Some(Ty::Obj),
                         _ => None,
                     });
                     let args: Vec<String> = std::iter::once("__m".to_string()).chain(tmps.iter().map(|o| if o.1.is_clone() { format!("{}.clone()", o.0) } else { o.0.clone() })).collect();
                     (format!("{}({})?", s.map(|s| s.mangled.clone()).unwrap_or_default(), args.join(", ")), rt.unwrap_or(Ty::None))
                 })
                 .collect();
-            let joined = results.iter().skip(1).try_fold(results[0].1, |a, r| pyfast_infer::native::ty_join(a, r.1, true)).unwrap_or(Ty::Obj);
+            let joined = results.iter().skip(1).try_fold(results[0].1, |a, r| pyrock_infer::native::ty_join(a, r.1, true)).unwrap_or(Ty::Obj);
             let ur = recv.1.rust();
             let arms: Vec<String> = ms.iter().zip(&results).map(|(m, (code, rt))| format!("{ur}::{}(__m) => {}", m.variant_name(), crate::coll::convert(code, *rt, joined))).collect();
             return Some(format!("{{ let __u = {}; {lets}match __u {{ {} }} }}", recv.0, arms.join(", ")));

@@ -1,5 +1,5 @@
 // Sampling helpers over arrays (pointer + length).
-// pyfast: link m
+// pyrock: link m
 #include <math.h>
 #include <stddef.h>
 

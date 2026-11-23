@@ -2,9 +2,9 @@
 //! closures (shared cells) and calls through function values.
 
 use crate::{borrow, FnEmitter};
-use pyfast_infer::spec::env_offset;
-use pyfast_infer::SpecKey;
-use pyfast_ir::*;
+use pyrock_infer::spec::env_offset;
+use pyrock_infer::SpecKey;
+use pyrock_ir::*;
 
 impl FnEmitter<'_, '_> {
     /// Whether local `n` lives in a closure cell (captured, or captured by a nested function).
@@ -57,7 +57,7 @@ impl FnEmitter<'_, '_> {
         }
         let (fid, _) = ft.as_closure().expect("closure call on a function value");
         let (bound, order) = self.prog.bound_args(self.spec, fid, false, args, kwargs, e.span).expect("binding checked by inference");
-        let bound = pyfast_infer::spec::env_defaults(bound, func);
+        let bound = pyrock_infer::spec::env_defaults(bound, func);
         if env_offset(&self.prog.module.funcs[fid]) == 1 {
             self.call_bound(fid, vec![(fv, ft)], &bound, &order)
         } else {
@@ -100,7 +100,7 @@ impl FnEmitter<'_, '_> {
         match name {
             "sorted" | "min" | "max" => {
                 let (xs, xt) = self.expr(&args[0]);
-                let el = pyfast_infer::native::iter_elem(xt).unwrap();
+                let el = pyrock_infer::native::iter_elem(xt).unwrap();
                 let (fv, ft) = self.expr(kw("key").unwrap());
                 let rev = match kw("reverse") {
                     Some(r) => {
@@ -123,7 +123,7 @@ impl FnEmitter<'_, '_> {
             "map" => {
                 let (fv, ft) = self.expr(&args[0]);
                 let its: Vec<(String, Ty)> = args[1..].iter().map(|a| self.expr(a)).collect();
-                let els: Vec<Ty> = its.iter().map(|(_, t)| pyfast_infer::native::iter_elem(*t).unwrap()).collect();
+                let els: Vec<Ty> = its.iter().map(|(_, t)| pyrock_infer::native::iter_elem(*t).unwrap()).collect();
                 let (callable, rt) = self.value_callable(ft, &els);
                 let out_el = t.list_elem().unwrap_or(rt);
                 let lets: String = its.iter().enumerate().map(|(i, (c, it))| format!("let mut __i{i} = {}.into_iter(); ", crate::coll::iter_vec(c, *it))).collect();
@@ -141,7 +141,7 @@ impl FnEmitter<'_, '_> {
             _ => {
                 let (fv, ft) = self.expr(&args[0]);
                 let (xs, xt) = self.expr(&args[1]);
-                let el = pyfast_infer::native::iter_elem(xt).unwrap();
+                let el = pyrock_infer::native::iter_elem(xt).unwrap();
                 let (callable, rt) = self.value_callable(ft, &[el]);
                 format!(
                     "{{ let __f = {fv}; let __c = {callable}; let mut __out = Vec::new(); for __x in {} {{ let __r = __c(__x.clone())?; if {} {{ __out.push(__x); }} }} rt::List::<{}>::from_vec(__out) }}",
@@ -166,7 +166,7 @@ impl FnEmitter<'_, '_> {
 
 /// `box_<type>(f)`: wrap a native function value as a Python callable that
 /// binds Python arguments and calls the all-`object` specialization.
-pub(crate) fn emit_boxers(prog: &pyfast_infer::Program, out: &mut String) {
+pub(crate) fn emit_boxers(prog: &pyrock_infer::Program, out: &mut String) {
     use std::fmt::Write;
     for &t in &prog.boxed_fns {
         let (fid, caps) = t.as_closure().unwrap();

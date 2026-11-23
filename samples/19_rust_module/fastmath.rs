@@ -1,4 +1,4 @@
-//! A plain Rust file. pyfast includes it as a module and exposes every
+//! A plain Rust file. pyrock includes it as a module and exposes every
 //! `pub fn` whose parameters/return are ints, floats, bool, &str/String or ().
 
 pub fn hypot(dx: f64, dy: f64) -> f64 {
