@@ -1058,3 +1058,7 @@ runnable ones print the same as CPython.
 * `site/index.html`: the project website (how it works, install, usage, speed, comparison,
   examples, roadmap), published to GitHub Pages by `.github/workflows/pages.yml`. Every code
   sample on it is real output of pyrock 0.1.0.
+* v0.1.0 was published with the two Linux binaries only: GitHub no longer runs the
+  `macos-14` label, so the macOS job never started. The workflow now uses `macos-15`, and
+  v0.1.1 (same compiler, version bump only; the four golden snapshots differ only in their
+  version header) is the first release with every target.
