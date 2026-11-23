@@ -32,13 +32,32 @@
 .workbench { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); border: 1px solid var(--line); border-radius: var(--radius-pane); overflow: hidden; min-height: 560px; }
 .editor { display: flex; flex-direction: column; background: var(--py-pane); min-width: 0; }
 .editor .label, .results .label { display: flex; justify-content: space-between; padding: 12px 18px 0; font-size: 0.88rem; color: var(--muted); }
-.editor textarea {
-  flex: 1; width: 100%; min-height: 520px; resize: none; border: 0; outline: none;
-  background: transparent; color: var(--ink);
-  font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.86rem; line-height: 1.6; font-variant-ligatures: none;
-  padding: 10px 18px 18px; tab-size: 4; white-space: pre; overflow: auto;
+/* The editor is a transparent textarea over a highlighted copy of its text:
+   both layers share every metric below, and the copy follows its scrolling. */
+.code-wrap { position: relative; flex: 1; min-height: 520px; }
+.code-wrap textarea, .code-wrap .hl {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; border: 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.86rem; font-weight: 400; font-style: normal;
+  line-height: 1.6; letter-spacing: 0; font-variant-ligatures: none;
+  padding: 10px 18px 18px; tab-size: 4; white-space: pre; overflow-wrap: normal; word-break: normal;
 }
-.editor textarea:focus-visible { box-shadow: inset 0 0 0 2px var(--pyrite); }
+.code-wrap .hl { overflow: hidden; color: var(--ink); pointer-events: none; }
+.code-wrap .hl code { font: inherit; background: none; border: 0; padding: 0; white-space: inherit; }
+.code-wrap textarea {
+  resize: none; outline: none; overflow: auto; background: transparent;
+  color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--ink);
+}
+.code-wrap textarea::selection { background: rgba(201, 154, 30, 0.32); }
+.code-wrap textarea:focus-visible { box-shadow: inset 0 0 0 2px var(--pyrite); }
+/* Python tokens (no bold or italics: both layers must keep identical glyph widths). */
+.hl .p-k { color: var(--py-key); }
+.hl .p-s { color: var(--py-str); }
+.hl .p-n { color: var(--py-num); }
+.hl .p-c { color: var(--py-com); }
+.hl .p-d { color: var(--bridge); }
+.hl .p-b { color: var(--native); }
+.hl .p-f { color: var(--ink); text-decoration: underline; text-decoration-color: var(--pyrite); text-decoration-thickness: 2px; text-underline-offset: 3px; }
+.hl .p-self { color: var(--muted); }
 .results { background: var(--rs-pane); color: var(--rs-ink); display: flex; flex-direction: column; min-width: 0; }
 .results .tabs { padding: 12px 14px 0; margin: 0; }
 .results .tabs [role="tab"] { color: var(--rs-muted); border-color: #3A464C; font-size: 0.9rem; padding: 4px 14px; }
@@ -67,7 +86,7 @@
 
 @media (max-width: 900px) {
   .workbench { grid-template-columns: minmax(0, 1fr); }
-  .editor textarea { min-height: 340px; }
+  .code-wrap { min-height: 340px; }
   .results { min-height: 420px; }
   .where { grid-template-columns: minmax(0, 1fr); }
   .toolbar .status { margin-left: 0; width: 100%; }
@@ -125,7 +144,10 @@
   <div class="workbench">
     <div class="editor">
       <div class="label"><label for="code">main.py</label><span>Ctrl+Enter runs</span></div>
-      <textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Python source"></textarea>
+      <div class="code-wrap">
+        <pre class="hl" aria-hidden="true"><code id="hl"></code></pre>
+        <textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Python source"></textarea>
+      </div>
     </div>
     <div class="results">
       <div class="tabs" role="tablist" aria-label="Results">
@@ -470,19 +492,84 @@
     boot();
   });
 
-  // ---- editor ----
+  // ---- editor: Python highlighting under a transparent textarea ----
+  var PY_KEYWORDS = new Set(("False None True and as assert async await break case class continue def del elif else " +
+    "except finally for from global if import in is lambda match nonlocal not or pass raise return try type while with yield").split(" "));
+  var PY_BUILTINS = new Set(("abs all any ascii bin bool breakpoint bytearray bytes callable chr classmethod compile complex " +
+    "delattr dict dir divmod enumerate eval exec filter float format frozenset getattr globals hasattr hash help hex id " +
+    "input int isinstance issubclass iter len list locals map max memoryview min next object oct open ord pow print " +
+    "property range repr reversed round set setattr slice sorted staticmethod str sum super tuple vars zip " +
+    "BaseException Exception ValueError TypeError KeyError IndexError RuntimeError StopIteration ZeroDivisionError " +
+    "AttributeError NotImplementedError OverflowError AssertionError ImportError OSError NotImplemented").split(" "));
+  // Order matters: comments and strings first, so their contents aren't tokenized.
+  // Names are consumed whole, so a string prefix or a number is only tried where
+  // a name could start (no lookbehind, which older Safari can't parse).
+  var PY_TOKEN = new RegExp([
+    "(#[^\\n]*)",                                                          // 1 comment
+    "((?:[rRbBuUfF]{1,2})?(?:\"\"\"[\\s\\S]*?(?:\"\"\"|$)|'''[\\s\\S]*?(?:'''|$)" +
+      "|\"(?:[^\"\\\\\\n]|\\\\.)*\"?|'(?:[^'\\\\\\n]|\\\\.)*'?))",         // 2 string (unterminated: to end of line/text)
+    "(@[A-Za-z_][\\w.]*)",                                                 // 3 decorator (checked below)
+    "((?:0[xX][0-9a-fA-F_]+|0[oO][0-7_]+|0[bB][01_]+|(?:\\d[\\d_]*\\.?[\\d_]*|\\.\\d[\\d_]*)(?:[eE][+-]?\\d+)?[jJ]?))", // 4 number
+    "([A-Za-z_]\\w*)",                                                     // 5 name
+  ].join("|"), "g");
+  function esc2(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+  function highlightPython(src) {
+    var out = "", pos = 0, m, prevWord = "";
+    PY_TOKEN.lastIndex = 0;
+    while ((m = PY_TOKEN.exec(src)) !== null) {
+      if (m[0] === "") { PY_TOKEN.lastIndex++; continue; }
+      var cls = null;
+      if (m[1]) cls = "p-c";
+      else if (m[2]) cls = "p-s";
+      else if (m[3]) cls = /(^|\n)[ \t]*$/.test(src.slice(Math.max(0, m.index - 200), m.index)) ? "p-d" : null; // `@` starting a line; otherwise matrix multiply
+      else if (m[4] && src[m.index - 1] === ".") cls = null; // `x.5` is not Python; keep attribute-like text plain
+      else if (m[4]) cls = "p-n";
+      else if (m[5]) {
+        var w = m[5];
+        if (prevWord === "def" || prevWord === "class") cls = "p-f";
+        else if (PY_KEYWORDS.has(w)) cls = "p-k";
+        else if (w === "self" || w === "cls") cls = "p-self";
+        else if (PY_BUILTINS.has(w) && src[m.index - 1] !== ".") cls = "p-b";
+        prevWord = w;
+      }
+      if (!m[5]) prevWord = "";
+      out += esc2(src.slice(pos, m.index)) + (cls ? '<span class="' + cls + '">' + esc2(m[0]) + "</span>" : esc2(m[0]));
+      pos = m.index + m[0].length;
+    }
+    out += esc2(src.slice(pos));
+    // A trailing newline needs a following character, or the last empty line has no height.
+    return out + (src.endsWith("\n") || src === "" ? " " : "");
+  }
+  var hl = $("hl"), hlPre = hl.parentNode;
+  function paint() {
+    hl.innerHTML = highlightPython(code.value);
+    syncScroll();
+  }
+  function syncScroll() {
+    hlPre.scrollTop = code.scrollTop;
+    hlPre.scrollLeft = code.scrollLeft;
+  }
+  code.addEventListener("input", paint);
+  code.addEventListener("scroll", syncScroll);
+
   code.addEventListener("keydown", function (e) {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); run(); return; }
     if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       var a = code.selectionStart, b = code.selectionEnd;
       code.setRangeText("    ", a, b, "end");
+      paint();
     }
   });
 
+  function setCode(text) {
+    code.value = text;
+    code.scrollTop = 0;
+    paint();
+  }
   function load(name) {
     var ex = EXAMPLES[name];
-    code.value = ex.code.join("\n") + "\n";
+    setCode(ex.code.join("\n") + "\n");
     setMode(ex.mode === "native");
   }
   $("example").addEventListener("change", function (e) { load(e.target.value); });
@@ -510,7 +597,7 @@
 
   var params = new URLSearchParams(location.hash.slice(1));
   if (params.get("code")) {
-    try { code.value = unb64(params.get("code")); setMode(params.get("mode") === "native"); }
+    try { setCode(unb64(params.get("code"))); setMode(params.get("mode") === "native"); }
     catch (e) { load("generics"); }
   } else {
     load("generics");

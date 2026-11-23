@@ -1082,3 +1082,9 @@ runnable ones print the same as CPython.
   compile and run, native-only turns boundaries into errors, Stop ends an infinite loop,
   share links round-trip, and the console shows no errors.
 
+* Syntax highlighting in the playground editor: a highlighted copy of the text under a
+  transparent textarea (typing, selection, undo and mobile keyboards stay native), with a
+  Python tokenizer for keywords, builtins, strings (prefixes, triple-quoted, unterminated),
+  numbers, comments, decorators and definition names. Checked in headless Chrome: the copy
+  matches the textarea's text exactly, glyphs line up (drawn over each other), and
+  scrolling and Tab stay in sync.
