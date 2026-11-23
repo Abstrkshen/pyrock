@@ -1,8 +1,25 @@
+# Build output
 /target
 .pyrock/
 __pycache__/
 *.pyc
+
+# Local notes, recordings and scratch files (not part of the project)
 /.ignore/
-*.so
-!tests/**/*.so
+
+# Python virtualenvs (examples/.venv: see examples/README.md)
 .venv
+
+# Shared libraries are built or downloaded, never committed
+# (each example's build.sh recreates them); tests build their own.
+*.so
+*.so.*
+!tests/**/*.so
+examples/*/lib/
+
+# Large third-party downloads of the opencv-yolo example (its build.sh fetches them)
+examples/opencv-yolo/third_party/
+examples/opencv-yolo/models/
+*.onnx
+*.pt
+*.mp4

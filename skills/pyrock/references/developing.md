@@ -1,6 +1,6 @@
 # Working on the pyrock repo
 
-Repo: `~/Documents/projects/pyfast` (a Cargo workspace in git). Rust 1.96, PyO3 0.30,
+Repo: https://github.com/Abstrkshen/pyrock (a Cargo workspace). Rust 1.96, PyO3 0.30,
 Python 3.12. In an agent shell, run `export PATH=$HOME/.cargo/bin:$PATH` first.
 
 ## Pipeline and crates
@@ -52,18 +52,21 @@ bash samples/run_all.sh [--release] [name-filter]      # every sample vs CPython
 
 Review snapshot diffs before re-blessing. A changed golden is a behaviour change.
 
-## perch commands (`commands.perch`)
+## Installing and maintainer shortcuts
+
+`cargo install --path crates/driver` installs `pyrock` into `~/.cargo/bin`; run it again
+after changing the compiler. `commands.perch` holds the maintainer's
+`perch` shortcuts:
 
 | Command | Action |
 |---|---|
-| `perch install` | `cargo build --release -p pyrock` + `bman add` → `~/Documents/bin/pyrock` |
+| `perch install` | `cargo build --release -p pyrock`, then install that binary |
 | `perch build` | release build only |
 | `perch tests` | `cargo test --workspace` |
 | `perch samples` | `bash samples/run_all.sh` |
 | `perch skill` | link this skill into `~/.claude/skills`, `~/.codex/skills` and `~/.cursor/skills` (`bash skills/install.sh --copy` / `--remove` for copies or uninstall) |
 
-After changing the compiler, run `perch install` so the global `pyrock` picks it up. (perch
-reserves `test` and doesn't accept hyphens in command names.)
+(perch reserves `test` and doesn't accept hyphens in command names.)
 
 ## Environment variables
 

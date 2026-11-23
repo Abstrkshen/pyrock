@@ -103,7 +103,7 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done (gate met).
 From a review of `Project.md` against the implementation (2026-11-23) and the coverage
 measurement in [coverage.md](coverage.md). Not started unless marked.
 
-Problems found while building `.ignore/samples/ollama-agents` (its `FINDINGS.md`; repros in
+Problems found while building `examples/ollama-agents` (its `FINDINGS.md`; repros in
 its `repro/` folder), which block ordinary app code:
 
 - [x] F-01: `x is None` checks don't narrow `str | None` for later uses (P301/P307)
@@ -154,7 +154,7 @@ Known bugs:
 
 - [x] `globals()` panicked at runtime; `eval`, `exec` and `locals()` raised
       `SystemError: frame does not exist` (compiled code has no Python frame)
-- [x] `.ignore/samples/raylib-breakout`: the camera offset reached `draw_sky` as `object`
+- [x] `examples/raylib-breakout`: the camera offset reached `draw_sky` as `object`
       although every call site passes a native number, so part of the per-frame drawing was
       bridged (stale specializations counted towards the limit)
 
@@ -204,7 +204,7 @@ Known bugs:
   else/finally ordering, break/continue through finally, bare re-raise, JSON errors from
   CPython, `assert`, an uncaught exception at the end). The fallback fixture now uses a
   metaclass, because its `try` compiles natively now.
-* Effect: `.ignore/samples/rust-http/client.py` (uses `try`/`with`) now compiles natively
+* Effect: `examples/rust-http/client.py` (uses `try`/`with`) now compiles natively
   instead of falling back. `samples/run_all.sh` 21/21, `scripts/readme_check.sh` 11/11.
 
 ### Phase 1.3: Optional, defaults and keyword arguments (2026-11-22)
@@ -388,7 +388,7 @@ Known bugs:
   exceptions become Python exceptions and back.
 * Tests: `tests/differential/closures.py` (native-only), `tests/differential/callbacks.py`
   (`re.sub` with native callbacks, `functools.reduce`, `@functools.lru_cache` on a native
-  recursive function, exceptions through Python). The `.ignore/samples/langchain` module
+  recursive function, exceptions through Python). The `examples/langchain` module
   now compiles natively (its lambda is passed to LangChain as a native callable).
 
 ### Phase 4.2: forwarding wrappers (2026-11-22)
@@ -823,7 +823,7 @@ Each bridged operation cost ~400 ns.
 
 ### Phase 8: the ollama-agents findings (2026-11-23)
 
-`.ignore/samples/ollama-agents/FINDINGS.md` lists problems hit while writing a real app. All
+`examples/ollama-agents/FINDINGS.md` lists problems hit while writing a real app. All
 of its repros (`repro/r1.py` … `r21.py`) now pass `pyrock check --mode native-only`, and the
 runnable ones print the same as CPython.
 
@@ -1023,3 +1023,20 @@ runnable ones print the same as CPython.
 
 * stdlib 62.4% → 64.1% of functions and methods (42 modules); `requests` 74.9% → 82.8%,
   `huggingface_hub` 75.0% → 75.1%, `langchain_core` 43.5% → 49.5%.
+
+### Publishing: examples, installation, ignore rules (2026-11-23)
+
+* The user samples moved from the private `.ignore/samples/` into `examples/`, with an
+  overview README, a pinned `requirements.txt` for the virtualenv (`examples/.venv`) and
+  `build.sh` scripts that download or build what `raylib`, `raylib-breakout` and
+  `opencv-yolo` load (raylib 5.5 release, ONNX Runtime 1.32.0 from its PyPI wheel,
+  OpenCV 4.10.0, YOLO26 ONNX exports). Hardcoded absolute paths became relative to the
+  source file (`__FILE__`) or the loaded library (`dladdr`). Binaries, third-party
+  downloads, models and videos are ignored by git.
+* README: an Installation section (`cargo install --path crates/driver`, requirements, a
+  first program). The README check skips examples marked `skip-ci` when `CI` is set.
+* Golden snapshots replace the build machine's `sys.path` with a placeholder, so they pass
+  on any machine.
+* Fix: recursion through a conditional expression (`return n if n < 2 else fib(n - 1) +
+  fib(n - 2)`) failed with P306; the expression now keeps the typed branch while the other
+  is still unknown. Test: `tests/differential/recursive_ifexp.py`.

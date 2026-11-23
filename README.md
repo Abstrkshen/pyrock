@@ -14,6 +14,50 @@ In hybrid mode (the default), anything that can't be compiled natively crosses i
 embedded CPython at an explicit, reported boundary. `--mode native-only` rejects those
 boundaries instead.
 
+## Installation
+
+pyrock runs on Linux x86-64 (developed and tested on Ubuntu 24.04; macOS is untested). It
+needs:
+
+* a Rust toolchain ([rustup](https://rustup.rs); tested with Rust 1.96), because pyrock
+  builds the generated code with Cargo;
+* Python 3 (tested with 3.12): pyrock parses with CPython's own `ast` module, and programs
+  that use Python packages embed it, which needs the shared `libpython` (Debian/Ubuntu:
+  `sudo apt install python3-dev`);
+* a C compiler (`cc`) if your programs import `.c` files.
+
+Install the `pyrock` command from a clone:
+
+```sh
+git clone https://github.com/Abstrkshen/pyrock.git
+cd pyrock
+cargo install --path crates/driver     # installs ~/.cargo/bin/pyrock
+pyrock --version
+```
+
+The binary carries its runtime crate, so the clone can be moved or deleted afterwards. The
+first build of any program compiles the runtime (and PyO3 if needed) into
+`~/.cache/pyrock/target`, which takes a minute or two; later builds take seconds.
+
+A first program:
+
+```sh
+cat > fib.py <<'EOF'
+def fib(n):
+    return n if n < 2 else fib(n - 1) + fib(n - 2)
+
+print(fib(30))
+EOF
+pyrock run fib.py            # build and run (the executable is .pyrock/fib/fib)
+pyrock explain fib.py        # what was inferred and compiled natively
+pyrock check fib.py --mode native-only
+```
+
+`pyrock run --python path/to/venv/bin/python` uses that interpreter's packages. The
+[examples](examples/) show Rust and C imports, Python packages and larger programs.
+Optional: `bash skills/install.sh` links an agent skill describing pyrock into Claude
+Code, Codex and Cursor.
+
 ## Imports: Python, Rust and C
 
 A plain `import x` (or `from x import f`) is resolved next to the importing file, in this order:
@@ -105,9 +149,11 @@ Specializations (reachable from module entry)
 $ pyrock run examples/generics.py
 ```
 
-## Demos
+## Examples and demos
 
-Three small apps in [demos/](demos/), each with a README and checked in CI:
+[examples/](examples/) has small programs (native code, Rust and C modules, Python packages,
+an AI-agent server, raylib games, live YOLO vision); its README covers their setup. Three
+small apps in [demos/](demos/), each with a README, are checked in CI:
 
 | Demo | What it shows |
 |---|---|

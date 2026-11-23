@@ -76,8 +76,9 @@ bytecode, so keep hot loops on native values.
 
 * [demos/](../demos/): a JSON API on asyncio (backend), a tokenizer + Rust model + C
   sampling program that needs no CPython (AI), and a raylib ball simulation (GUI).
-* `samples/` (21 programs) and the user samples in `.ignore/samples/` (16 README checks),
-  including `raylib-breakout`, a full platformer: 55 native functions, the rest is the
+* `samples/` (21 programs checked against CPython) and [examples/](../examples/) (15
+  programs with READMEs, from `hello` to an AI-agent server and live YOLO vision),
+  including `raylib-breakout`, a full platformer: 63 native functions, the rest is the
   raylib API and ctypes code.
 
 ## How it is tested
@@ -94,7 +95,8 @@ with the GUI demo under a virtual display.
 
 ## Installation
 
-`perch install` builds a release binary into `~/Documents/bin/pyrock`. The binary carries
+`cargo install --path crates/driver` installs the `pyrock` command (see the README's
+Installation section; `commands.perch` has the maintainer's shortcuts). The binary carries
 its runtime crate and unpacks it into `~/.cache/pyrock/runtime/<hash>/` on first use, so it
 does not depend on the repository's location. Generated projects go in `.pyrock/<name>/`
 next to the program; compiled dependencies are cached in `~/.cache/pyrock/target`.

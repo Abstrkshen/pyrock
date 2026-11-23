@@ -1,0 +1,101 @@
+pyrock explain main.py   (mode: hybrid, parsed with CPython 3.12.3)
+
+Imports
+  net     -> rust  examples/ollama-agents/net.rs  (11 function(s))
+  tools   -> python (native)  examples/ollama-agents/tools.py
+  agents  -> python (native)  examples/ollama-agents/agents.py
+      net.listen(i64) -> i64  [Result: errors raise RuntimeError]
+      net.accept() -> (i64, String, String, String,)  [Result: errors raise RuntimeError]
+      net.respond(i64, i64, &str) -> ()
+      net.post(&str, &str) -> String  [Result: errors raise RuntimeError]
+      net.json_get(&str, &str) -> Option<String>
+      net.json_len(&str, &str) -> i64
+      net.json_quote(&str) -> String
+      net.args() -> Vec<String>
+      net.now_ms() -> i64
+      net.json_str(&str, &str) -> String
+      net.json_has(&str, &str) -> bool
+
+Inferred generic signatures
+  arg_value(A, B, object) -> object
+  make_defaults(A) -> None where Contains(str, R), Contains(str, R1), Contains(str, R2), Contains(str, R3), Contains(str, R4), Contains(str, R5)
+  demo(A) -> None where Contains(str, R), Contains(str, R1), Contains(str, R2), Contains(str, R3), Contains(str, R4), Contains(str, R5)
+  err(A) -> str
+  handle(A, B, C, D, str) -> None where Contains(str, R), Contains(str, R1), Contains(str, R2), Contains(str, R3), Add(str, B, R4), Add(R4, str, R5), Add(R5, C, R6)
+  serve(A, str) -> None where Contains(str, R), Contains(str, R1), Contains(str, R2), Contains(str, R3), Contains(str, R4), Contains(str, R5), Contains(str, R6), Contains(str, R7), Contains(str, R8), Contains(str, R9)
+  main() -> None where Contains(str, R), Contains(str, R1), Contains(str, R2), Contains(str, R3), Contains(str, R4), Contains(str, R5), Contains(str, R6), Contains(str, R7), Contains(str, R8), Contains(str, R9), Contains(str, R10), Contains(str, R11), Contains(str, R12), Contains(str, R13), Contains(str, R14), Contains(str, R15)
+  agents.render_steps(A) -> str | object
+  agents.create_agent(A, B, C, D) -> object | str where Contains(str, R), Contains(A, R1), Add(str, A, object)
+  agents.get_agent(A) -> object
+  agents.has_agent(A) -> bool where Contains(A, R)
+  agents.delete_agent(A) -> bool where Contains(A, R)
+  agents.list_json() -> object
+  agents.Step.__init__(A, B, C, D) -> None
+  agents.Step.to_json(A) -> str
+  agents.Agent.__init__(A, B, C, D, E) -> None
+  agents.Agent.request(A) -> object
+  agents.Agent.chat(A, B) -> str | object where Add(R, str, R1), Contains(str, R2)
+  agents.Agent.steps_json(A) -> str | object
+  agents.Agent.describe(A) -> object
+  tools.pow_float(A, B) -> float where Ge(B, float), Lt(B, float), Mul(float, A, float), Pow(A, B, float)
+  tools.format_number(A) -> str where Lt(A, float), Gt(A, float)
+  tools.calculate(str) -> str
+  tools.word_stats(str) -> str | object
+  tools.remember(str) -> str
+  tools.recall(str) -> str where Contains(object, R)
+  tools.has_tool(str) -> bool where Contains(str, R)
+  tools.run_tool(str, str) -> str where Contains(str, R)
+  tools.schema_for(str) -> str
+  tools.Parser.__init__(A, B) -> None
+  tools.Parser.skip(A) -> None
+  tools.Parser.peek(A) -> object | str
+  tools.Parser.expr(A) -> object | None
+  tools.Parser.term(A) -> object | None
+  tools.Parser.power(A) -> float | object
+  tools.Parser.unary(A) -> object
+  tools.Parser.atom(A) -> object | bool | float
+
+Specializations (reachable from module entry)
+  <module agents>                                                                                               native  init_agents              effects: pure
+  main() -> None                                                                                                native  main__                   effects: ffi, io, may_raise
+  <module tools>                                                                                                native  init_tools               effects: pure
+  agents.Agent.__init__(self: agents_Agent, name: str, model: str, system: str, tool_names: list[str]) -> None  native  agents_Agent___init____agents_Agent_str_str_str_list_str effects: pure
+  arg_value(argv: list[str], flag: str, fallback: str) -> str                                                   native  arg_value__list_str_str_str effects: may_raise
+  serve(port: int, model: str) -> Never                                                                         native  serve__int_str           effects: ffi, io, may_raise
+  demo(model: str) -> None                                                                                      native  demo__str                effects: ffi, io, may_raise
+  make_defaults(model: str) -> None                                                                             native  make_defaults__str       effects: pure
+  err(msg: str) -> str                                                                                          native  err__str                 effects: ffi
+  handle(conn: int, method: str, path: str, body: str, model: str) -> None                                      native  handle__int_str_str_str_str effects: ffi, may_raise
+  agents.get_agent(name: str) -> agents_Agent                                                                   native  agents_get_agent__str    effects: pure
+  agents.create_agent(name: str, model: str, system: str, tool_names: list[str]) -> str                         native  agents_create_agent__str_str_str_list_str effects: pure
+  agents.list_json() -> str                                                                                     native  agents_list_json__       effects: ffi
+  agents.has_agent(name: str) -> bool                                                                           native  agents_has_agent__str    effects: pure
+  agents.delete_agent(name: str) -> bool                                                                        native  agents_delete_agent__str effects: pure
+  tools.has_tool(name: str) -> bool                                                                             native  tools_has_tool__str      effects: pure
+  agents.Agent.describe(self: agents_Agent) -> str                                                              native  agents_Agent_describe__agents_Agent effects: ffi
+  agents.Agent.chat(self: agents_Agent, user_message: str) -> str                                               native  agents_Agent_chat__agents_Agent_str effects: ffi, may_raise
+  agents.Agent.steps_json(self: agents_Agent) -> str                                                            native  agents_Agent_steps_json__agents_Agent effects: ffi
+  agents.Agent.request(self: agents_Agent) -> str                                                               native  agents_Agent_request__agents_Agent effects: ffi
+  tools.schema_for(name: str) -> str                                                                            native  tools_schema_for__str    effects: pure
+  tools.run_tool(name: str, args_json: str) -> str                                                              native  tools_run_tool__str_str  effects: ffi, may_raise
+  tools.calculate(args_json: str) -> str                                                                        native  tools_calculate__str     effects: ffi, may_raise
+  tools.Parser.__init__(self: tools_Parser, text: str) -> None                                                  native  tools_Parser___init____tools_Parser_str effects: pure
+  agents.Step.__init__(self: agents_Step, tool: str, args: str, result: str) -> None                            native  agents_Step___init____agents_Step_str_str_str effects: pure
+  tools.word_stats(args_json: str) -> str                                                                       native  tools_word_stats__str    effects: ffi, may_raise
+  tools.Parser.expr(self: tools_Parser) -> float                                                                native  tools_Parser_expr__tools_Parser effects: may_raise  recursive
+  tools.Parser.peek(self: tools_Parser) -> str                                                                  native  tools_Parser_peek__tools_Parser effects: may_raise
+  tools.Parser.term(self: tools_Parser) -> float                                                                native  tools_Parser_term__tools_Parser effects: may_raise  recursive
+  tools.Parser.skip(self: tools_Parser) -> None                                                                 native  tools_Parser_skip__tools_Parser effects: may_raise
+  tools.Parser.power(self: tools_Parser) -> float                                                               native  tools_Parser_power__tools_Parser effects: may_raise  recursive
+  tools.Parser.unary(self: tools_Parser) -> float                                                               native  tools_Parser_unary__tools_Parser effects: may_raise  recursive
+  tools.Parser.atom(self: tools_Parser) -> float                                                                native  tools_Parser_atom__tools_Parser effects: may_raise  recursive
+  agents.render_steps(steps: list[agents_Step]) -> str                                                          native  agents_render_steps__list_agents_Step effects: ffi
+  tools.remember(args_json: str) -> str                                                                         native  tools_remember__str      effects: ffi
+  agents.Step.to_json(self: agents_Step) -> str                                                                 native  agents_Step_to_json__agents_Step effects: ffi
+  tools.recall(args_json: str) -> str                                                                           native  tools_recall__str        effects: ffi
+  tools.pow_float(base: float, exponent: float) -> float                                                        native  tools_pow_float__float_float effects: may_raise
+  tools.format_number(x: float) -> str                                                                          native  tools_format_number__float effects: may_raise
+
+Summary: 39 native, 0 bridged specialization(s); module body native; 1 linked Rust/C module(s)
+Runtime: no CPython needed
+Int semantics: i64 subset with checked arithmetic (OverflowError instead of promotion)

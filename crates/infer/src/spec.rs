@@ -2583,7 +2583,13 @@ impl Ctx<'_, '_> {
                 self.nn_add(&ff);
                 let b = self.expr(orelse);
                 self.nn = start;
-                self.merge(&[a?, b?], e, "conditional expression")
+                match (a, b) {
+                    (Some(a), Some(b)) => self.merge(&[a, b], e, "conditional expression"),
+                    // One branch not typed yet (a recursive call in an early
+                    // round): the other branch's type, so recursion converges.
+                    (Some(t), None) | (None, Some(t)) => Some(t),
+                    (None, None) => None,
+                }
             }
             ExprKind::ExternCall { ext, func, args } => self.extern_args(e, *ext, *func, args),
             ExprKind::SuperDispatch { recv, alts, default } => {

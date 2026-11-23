@@ -1,0 +1,25 @@
+=== math-tutor [qwen3.5:4b] ===
+user> What is (12.5 + 3) * 4 - 2 ** 5 / 8 ?
+  tool calculate {"expression":"(12.5 + 3) * 4 - 2 ** 5 / 8"} -> 58
+agent> The result is 58.
+  (8086 ms)
+=== note-taker [qwen3.5:4b] ===
+user> Remember that my locker code is 4821.
+  tool remember {"key":"locker_code","value":"4821"} -> stored locker_code (1 notes)
+agent> Got it. Your locker code is 4821.
+  (1417 ms)
+=== note-taker [qwen3.5:4b] ===
+user> What is my locker code?
+  tool recall {"key":"locker_code"} -> 4821
+agent> Your locker code is 4821.
+  (1247 ms)
+=== text-analyst [qwen3.5:4b] ===
+user> Analyse this text: the cat saw the dog and the dog saw the cat run
+  tool word_stats {"text":"the cat saw the dog and the dog saw the cat run"} -> words=12 characters=47 unique=6 most_common=the (4x)
+agent> Here are the statistics for the text you provided:
+
+*   **Total words:** 12
+*   **Total characters:** 47
+*   **Unique words:** 6
+*   **Most common word:** "the" (appears 4 times)
+  (2051 ms)

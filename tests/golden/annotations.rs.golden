@@ -103,6 +103,6 @@ fn module_body() -> PyResult<()> {
 }
 
 fn main() {
-    rt::py::init("annotations.py", &["/home/oliver/Documents/projects/pyfast/tests/golden", "/usr/lib/python312.zip", "/usr/lib/python3.12", "/usr/lib/python3.12/lib-dynload", "/usr/local/lib/python3.12/dist-packages", "/usr/lib/python3/dist-packages"]);
+    rt::py::init("annotations.py", &[/* sys.path of the build interpreter */]);
     rt::run_main("annotations.py", || rt::py::attached(module_body))
 }

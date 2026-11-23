@@ -41,6 +41,19 @@ fn last_line(s: &[u8]) -> String {
     String::from_utf8_lossy(s).lines().last().unwrap_or("").to_string()
 }
 
+/// Generated code embeds the build machine's `sys.path` in `rt::py::init(...)`:
+/// replaced by a placeholder so snapshots match on any machine.
+fn machine_neutral(rs: &str) -> String {
+    rs.lines()
+        .map(|l| match (l.find("rt::py::init("), l.find(", &["), l.rfind("]);")) {
+            (Some(_), Some(a), Some(b)) if a < b => format!("{}, &[/* sys.path of the build interpreter */]);", &l[..a]),
+            _ => l.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + if rs.ends_with('\n') { "\n" } else { "" }
+}
+
 fn snapshot(path: PathBuf, actual: &str, failures: &mut Vec<String>) {
     if std::env::var("UPDATE_SNAPSHOTS").is_ok() {
         std::fs::write(&path, actual).unwrap();
@@ -94,7 +107,7 @@ fn golden() {
         let emit = pyrock().arg("emit").arg(&case).arg("--out").arg(&out_dir).output().unwrap();
         assert!(emit.status.success(), "{name}: emit failed: {}", String::from_utf8_lossy(&emit.stderr));
         let rs = std::fs::read_to_string(out_dir.join("src/main.rs")).unwrap();
-        snapshot(case.with_extension("rs.golden"), &rs, &mut failures);
+        snapshot(case.with_extension("rs.golden"), &machine_neutral(&rs), &mut failures);
         let explain = pyrock().current_dir(root()).arg("explain").arg(case.strip_prefix(root()).unwrap()).output().unwrap();
         snapshot(case.with_extension("explain.golden"), &String::from_utf8_lossy(&explain.stdout), &mut failures);
     }

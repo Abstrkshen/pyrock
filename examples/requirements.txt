@@ -1,0 +1,4 @@
+# Python packages the huggingface and langchain examples import (through CPython).
+# Install into examples/.venv, which their READMEs pass to pyrock with --python.
+huggingface_hub==2.4.0
+langchain-core==1.8.4

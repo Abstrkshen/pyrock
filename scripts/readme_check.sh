@@ -4,8 +4,10 @@
 # The `pyrock` on PATH is this repo's fresh debug build, not the installed one.
 #
 # usage: scripts/readme_check.sh [--bench] [DIR...]
-#   DIR defaults to every directory with a README.md under .ignore/samples/,
-#   examples/ and demos/. `pyrock bench` lines are skipped unless --bench is given.
+#   DIR defaults to every directory with a README.md under examples/ and demos/.
+#   `pyrock bench` lines are skipped unless --bench is given. With CI set (as in
+#   GitHub Actions), a README containing `<!-- readme_check: skip-ci ... -->` is
+#   skipped: it needs something CI doesn't have (a camera, Ollama, a venv).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -21,7 +23,7 @@ for a in "$@"; do
     case "$a" in --bench) bench=1 ;; *) dirs+=("$a") ;; esac
 done
 if [[ ${#dirs[@]} -eq 0 ]]; then
-    for r in "$ROOT"/.ignore/samples/*/README.md "$ROOT"/examples/*/README.md "$ROOT"/demos/*/README.md; do
+    for r in "$ROOT"/examples/*/README.md "$ROOT"/demos/*/README.md; do
         [[ -f "$r" ]] && dirs+=("$(dirname "$r")")
     done
 fi
@@ -29,6 +31,10 @@ fi
 pass=0; fail=0
 for d in "${dirs[@]}"; do
     name=$(basename "$d")
+    if [[ -n "${CI:-}" ]] && grep -q "readme_check: skip-ci" "$d/README.md"; then
+        printf "skip  %s %s\n" "$name" "$(grep -o 'skip-ci[^>]*' "$d/README.md" | sed 's/skip-ci *//; s/ *--$//')"
+        continue
+    fi
     mapfile -t cmds < <(sed -n '/^```sh/,/^```/p' "$d/README.md" | grep -v '^```' | grep -v '^\s*$' | grep -v '^\s*#')
     ok=1
     # A block that starts a background job (`cmd &` ... `kill %1`) is one shell

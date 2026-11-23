@@ -1,0 +1,52 @@
+$ curl http://127.0.0.1:8090/health
+{"status":"ok","agents":4}
+[HTTP 200]
+
+$ curl http://127.0.0.1:8090/agents
+[{"name":"assistant","model":"qwen3.5:4b","tools":["calculate"],"turns":0},{"name":"math-tutor","model":"qwen3.5:4b","tools":["calculate"],"turns":0},{"name":"note-taker","model":"qwen3.5:4b","tools":["remember","recall"],"turns":0},{"name":"text-analyst","model":"qwen3.5:4b","tools":["word_stats"],"turns":0}]
+[HTTP 200]
+
+$ curl -X POST http://127.0.0.1:8090/agents -d {"name":"poet-calc","system":"You are a terse assistant. Always use calculate for arithmetic.","tools":["calculate","recall"]}
+{"name":"poet-calc","model":"qwen3.5:4b","tools":["calculate","recall"],"turns":0}
+[HTTP 201]
+
+$ curl -X POST http://127.0.0.1:8090/agents -d {"name":"poet-calc","tools":[]}
+{"error":"agent exists: poet-calc"}
+[HTTP 409]
+
+$ curl -X POST http://127.0.0.1:8090/agents -d {"name":"bad","tools":["nope"]}
+{"error":"unknown tool: nope"}
+[HTTP 409]
+
+$ curl http://127.0.0.1:8090/agents
+[{"name":"assistant","model":"qwen3.5:4b","tools":["calculate"],"turns":0},{"name":"math-tutor","model":"qwen3.5:4b","tools":["calculate"],"turns":0},{"name":"note-taker","model":"qwen3.5:4b","tools":["remember","recall"],"turns":0},{"name":"text-analyst","model":"qwen3.5:4b","tools":["word_stats"],"turns":0},{"name":"poet-calc","model":"qwen3.5:4b","tools":["calculate","recall"],"turns":0}]
+[HTTP 200]
+
+$ curl -X POST http://127.0.0.1:8090/agents/poet-calc/chat -d {"message":"What is 17 * 23 + 0.5?"}
+{"reply":"391.5","steps":[{"tool":"calculate","args":"{\"expression\":\"17 * 23 + 0.5\"}","result":"391.5"}]}
+[HTTP 200]
+
+$ curl -X POST http://127.0.0.1:8090/agents/note-taker/chat -d {"message":"Remember that the wifi password is swordfish."}
+{"reply":"Got it. The wifi password is swordfish.","steps":[{"tool":"remember","args":"{\"key\":\"wifi_password\",\"value\":\"swordfish\"}","result":"stored wifi_password (1 notes)"}]}
+[HTTP 200]
+
+$ curl -X POST http://127.0.0.1:8090/agents/text-analyst/chat -d {"message":"Analyse: to be or not to be"}
+{"reply":"Here are the statistics for the text \"to be or not to be\":\n\n*   **Total words:** 6\n*   **Total characters:** 18\n*   **Unique words:** 4\n*   **Most common word:** \"to\" (appears 2 times)","steps":[{"tool":"word_stats","args":"{\"text\":\"to be or not to be\"}","result":"words=6 characters=18 unique=4 most_common=to (2x)"}]}
+[HTTP 200]
+
+$ curl -X POST http://127.0.0.1:8090/agents/ghost/chat -d {"message":"hi"}
+{"error":"no such agent: ghost"}
+[HTTP 404]
+
+$ curl -X DELETE http://127.0.0.1:8090/agents/poet-calc
+{"deleted":"poet-calc"}
+[HTTP 200]
+
+$ curl -X DELETE http://127.0.0.1:8090/agents/poet-calc
+{"error":"no such agent: poet-calc"}
+[HTTP 404]
+
+$ curl http://127.0.0.1:8090/agents
+[{"name":"assistant","model":"qwen3.5:4b","tools":["calculate"],"turns":0},{"name":"math-tutor","model":"qwen3.5:4b","tools":["calculate"],"turns":0},{"name":"note-taker","model":"qwen3.5:4b","tools":["remember","recall"],"turns":1},{"name":"text-analyst","model":"qwen3.5:4b","tools":["word_stats"],"turns":1}]
+[HTTP 200]
+
