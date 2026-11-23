@@ -150,7 +150,7 @@ impl FnEmitter<'_, '_> {
     /// (an expression; may use `?`).
     pub(crate) fn conv_in(&mut self, x: &str, t: Ty, e: &ExtTy) -> String {
         if t.is_never() {
-            return format!("{{ let __n: rt::Never = {x}; match __n {{}} }}");
+            return format!("{{ let _: rt::Never = {x}; unreachable!() }}");
         }
         let (x, t) = if matches!(e, ExtTy::Opt(_)) { (x.to_string(), t) } else { crate::unopt(x.to_string(), t, &format!("expected {}, got None", e.ty())) };
         let k = self.fresh();

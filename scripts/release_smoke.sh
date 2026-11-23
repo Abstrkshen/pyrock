@@ -48,5 +48,18 @@ out=$("$bin" run hybrid.py 2>err.txt) || fail "hybrid.py (json + Rust + C import
 [ "$out" = "6 12.5 21" ] || fail "hybrid.py printed '$out', expected '6 12.5 21'"
 echo "hybrid with Rust and C imports: ok"
 
+# macOS: Xcode's python3 is a framework build, linked as @rpath/Python3.framework;
+# the binary must carry an rpath to it.
+if [ "$(uname -s)" = Darwin ] && /usr/bin/python3 --version >/dev/null 2>&1; then
+    rm -rf .pyrock
+    out=$("$bin" run hybrid.py --python /usr/bin/python3 2>err.txt) || fail "hybrid.py with Xcode's /usr/bin/python3 did not build or run"
+    [ "$out" = "6 12.5 21" ] || fail "hybrid.py with /usr/bin/python3 printed '$out', expected '6 12.5 21'"
+    echo "hybrid with Xcode's python3: ok"
+fi
+
 "$bin" explain hybrid.py > /dev/null 2>err.txt || fail "explain failed"
 echo "explain: ok"
+
+"$bin" --help > /dev/null 2>err.txt || fail "--help did not exit 0"
+"$bin" bench --help > /dev/null 2>err.txt || fail "bench --help did not exit 0"
+echo "help: ok"

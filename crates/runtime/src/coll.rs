@@ -127,27 +127,30 @@ pub fn ne<T: PyEq>(a: &T, b: &T) -> bool {
 // ---------------------------------------------------------------------------
 // Never: element type of a container that never received an element.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Never {}
+/// No value of it is ever made by compiled code. It is a struct rather than an
+/// empty enum so that a local of this type (the loop variable of a loop over
+/// `[]`) can have a placeholder value where locals need one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Never(());
 
 impl PyEq for Never {
     fn py_eq(&self, _: &Self) -> bool {
-        match *self {}
+        unreachable!("a value of an empty container's element type")
     }
 }
 impl PyOrd for Never {
     fn py_cmp(&self, _: &Self) -> PyResult<Ordering> {
-        match *self {}
+        unreachable!("a value of an empty container's element type")
     }
 }
 impl PyFmt for Never {
     fn py_repr(&self) -> Str {
-        match *self {}
+        unreachable!("a value of an empty container's element type")
     }
 }
 impl Truthy for Never {
     fn truthy(&self) -> bool {
-        match *self {}
+        unreachable!("a value of an empty container's element type")
     }
 }
 

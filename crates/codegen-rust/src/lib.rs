@@ -1115,7 +1115,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             };
             if let Some(obj) = recv.filter(|o| self.ty(o).is_never()) {
                 let (o, _) = self.expr(obj);
-                return (format!("{{ let __n: rt::Never = {o}; match __n {{}} }}"), t);
+                return (format!("{{ let _: rt::Never = {o}; unreachable!() }}"), t);
             }
         }
         let is_class = pyrock_infer::spec::class_like;

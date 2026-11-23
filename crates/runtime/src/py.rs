@@ -159,6 +159,16 @@ pub fn init(script: &str, paths: &[&str]) {
     let r = with(|py| {
         let sys = py.import("sys")?;
         let sys_path = sys.getattr("path")?;
+        // The build interpreter's `sys.path` (its stdlib, its virtualenv's
+        // site-packages, the source folder), unless PYROCK_SYS_PATH replaces
+        // it: the binary then runs with another installation of the same
+        // Python version.
+        let over = std::env::var("PYROCK_SYS_PATH").ok();
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        let paths: Vec<&str> = match &over {
+            Some(v) => v.split(sep).filter(|p| !p.is_empty()).collect(),
+            None => paths.to_vec(),
+        };
         for (i, p) in paths.iter().enumerate() {
             if !sys_path.contains(*p)? {
                 sys_path.call_method1("insert", (i, *p))?;
@@ -606,7 +616,7 @@ impl ToPy for crate::Tuple0 {
 
 impl ToPy for crate::Never {
     fn to_py(&self) -> PyResult<Obj> {
-        match *self {}
+        unreachable!("a value of an empty container's element type")
     }
 }
 

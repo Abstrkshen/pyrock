@@ -14,7 +14,21 @@ jobs:
         run: bash examples/tour/run_all.sh
       - name: Apps (backend, AI, GUI physics) vs expected output
         run: bash examples/apps/run_all.sh
+      - name: Benchmarks vs CPython (fails on a speed regression)
+        run: cargo build --release -p pyrock && bash scripts/bench_all.sh --gate
       - name: GUI app virtualenv (raylib)
         run: python3 -m venv examples/apps/gui/.venv && examples/apps/gui/.venv/bin/pip install raylib
       - name: README commands, verbatim (GUI under a virtual display)
         run: xvfb-run -a bash scripts/readme_check.sh
+
+  macos:
+    # Release smoke test on Apple silicon, including a hybrid build with Xcode's
+    # framework python3 (needs an rpath to Python3.framework).
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release -p pyrock
+      - name: Smoke test
+        run: bash scripts/release_smoke.sh target/release/pyrock

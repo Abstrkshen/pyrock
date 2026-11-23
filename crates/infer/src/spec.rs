@@ -2998,12 +2998,16 @@ impl Ctx<'_, '_> {
                         self.expr(c);
                     }
                 }
-                let et = self.expr(elt)?;
+                // An item not known yet in this pass (a recursive call still
+                // pending, as in `" ".join([c.show() for c in self.kids])`)
+                // adds no evidence, like `out.append(pending)` in a loop: the
+                // fixed point refines it in a later pass.
+                let et = self.expr(elt).unwrap_or(Ty::never());
                 match kind {
                     CompKind::List | CompKind::Gen => Some(Ty::list(et)),
                     CompKind::Set if et.is_hashable() => Some(Ty::set(et)),
                     CompKind::Dict => {
-                        let vt = self.expr(val.as_deref().unwrap())?;
+                        let vt = self.expr(val.as_deref().unwrap()).unwrap_or(Ty::never());
                         if et.is_hashable() {
                             Some(Ty::dict(et, vt))
                         } else {

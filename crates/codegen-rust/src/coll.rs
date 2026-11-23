@@ -15,7 +15,7 @@ pub(crate) fn convert(code: &str, from: Ty, to: Ty) -> String {
         return crate::to_num(code, from);
     }
     if from.is_never() {
-        return format!("{{ let __n: rt::Never = {code}; match __n {{}} }}");
+        return format!("{{ let _: rt::Never = {code}; unreachable!() }}");
     }
     if to == Ty::Obj {
         return boxed(code, from);
@@ -711,6 +711,14 @@ impl FnEmitter<'_, '_> {
                 }
             }
             "min" | "max" => format!("rt::coll::min_of({}, {})?", elems(&vals[0]), name == "max"),
+            // A generator is read only up to the first deciding item, as in
+            // CPython (it may be infinite, or have side effects).
+            "any" | "all" if native::is_gen(vals[0].1) => {
+                let e = native::iter_elem(vals[0].1).unwrap_or(Ty::Obj);
+                let test = crate::truthy("__x", e);
+                let (test, hit) = if name == "any" { (test, "true") } else { (format!("!({test})"), "false") };
+                format!("{{ let __g = {}; let mut __r = !{hit}; while let Some(__x) = __g.next()? {{ if {test} {{ __r = {hit}; break; }} }} __r }}", vals[0].0)
+            }
             "any" | "all" => format!("rt::coll::{name}(&{})", elems(&vals[0])),
             "list" => match vals.first() {
                 None => format!("rt::List::<{}>::new()", t.list_elem().unwrap().rust()),

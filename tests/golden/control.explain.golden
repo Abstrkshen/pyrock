@@ -5,8 +5,8 @@ Inferred generic signatures
   count(A) -> int where Lt(int, A)
 
 Specializations (reachable from module entry)
-  sign(n: int) -> int   native  sign__int                effects: pure
-  count(n: int) -> int  native  count__int               effects: may_raise
+  native  sign(n: int) -> int   sign__int                effects: pure
+  native  count(n: int) -> int  count__int               effects: may_raise
 
 Summary: 2 native, 0 bridged specialization(s); module body native; 0 linked Rust/C module(s)
 Runtime: no CPython needed

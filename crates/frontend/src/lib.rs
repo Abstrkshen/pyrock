@@ -3315,6 +3315,50 @@ impl<'l> Lowerer<'l> {
         Some(Expr { kind, span: sp })
     }
 
+    /// `e` with its generator-expression argument turned into a list
+    /// comprehension, when the callee is a builtin that reads the whole
+    /// iterable: `tuple`, `list`, `set`, `frozenset`, `dict`, `sorted` and
+    /// `"<literal>".join` collect every item first, as CPython does; `sum`,
+    /// `min` and `max` are compiled over a list of the items anyway. Not `any`
+    /// or `all`, which stop at the first deciding item.
+    fn eager_genexpr_call(&self, e: &Value) -> Option<Value> {
+        let args = arr(e, "args");
+        if args.len() != 1 || ty(&args[0]) != "GeneratorExp" {
+            return None;
+        }
+        let g = &args[0];
+        let gens = arr(g, "generators");
+        if contains_await(&g["elt"]) || gens.iter().any(|q| q["is_async"].as_u64().unwrap_or(0) != 0 || contains_await(&q["iter"]) || arr(q, "ifs").iter().any(contains_await)) {
+            return None;
+        }
+        let f = &e["func"];
+        let kws = arr(e, "keywords");
+        let ok = match ty(f) {
+            "Name" => {
+                let id = sstr(f, "id");
+                let builtin = self.ld.builtins.contains(id)
+                    && !self.locals.contains(id)
+                    && !self.bindings.contains_key(id)
+                    && !self.comp_scopes.iter().any(|m| m.contains_key(id));
+                builtin
+                    && match id {
+                        "tuple" | "list" | "set" | "frozenset" | "dict" | "sum" => kws.is_empty(),
+                        "min" | "max" => kws.iter().all(|k| matches!(k["arg"].as_str(), Some("key" | "default"))),
+                        "sorted" => kws.iter().all(|k| matches!(k["arg"].as_str(), Some("key" | "reverse"))),
+                        _ => false,
+                    }
+            }
+            "Attribute" => sstr(f, "attr") == "join" && ty(&f["value"]) == "Constant" && f["value"]["value"]["kind"] == "str" && kws.is_empty(),
+            _ => false,
+        };
+        if !ok {
+            return None;
+        }
+        let mut e2 = e.clone();
+        e2["args"][0]["_t"] = serde_json::json!("ListComp");
+        Some(e2)
+    }
+
     fn lower_call(&mut self, e: &Value) -> Option<Expr> {
         // `list(Color)`, `len(Color)`, `sorted(Color)`, ...: over the members.
         let callee = if ty(&e["func"]) == "Name" { sstr(&e["func"], "id") } else { "" };
@@ -3324,6 +3368,12 @@ impl<'l> Lowerer<'l> {
             let mut e2 = e.clone();
             let args: Vec<Value> = arr(e, "args").iter().map(|a| self.enum_members_json(a)).collect();
             e2["args"] = Value::Array(args);
+            return self.lower_call(&e2);
+        }
+        // `tuple(f(x) for x in xs)`, `"".join(... for ...)`: the consumer reads
+        // every item, so the generator expression is a list comprehension (a
+        // loop, no coroutine per call).
+        if let Some(e2) = self.eager_genexpr_call(e) {
             return self.lower_call(&e2);
         }
         let sp = self.span(e);

@@ -12,6 +12,31 @@ pub fn mode_str(m: Mode) -> &'static str {
     }
 }
 
+/// A path for output people paste into issues: relative to the current
+/// directory when it is inside it, otherwise with the home directory as `~`.
+pub fn display_path(p: &str) -> String {
+    let path = std::path::Path::new(p);
+    if !path.is_absolute() {
+        return p.to_string();
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(r) = path.strip_prefix(&cwd) {
+            return r.display().to_string();
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        if let Ok(r) = path.strip_prefix(&home) {
+            return format!("~/{}", r.display());
+        }
+    }
+    p.to_string()
+}
+
+/// The module's source files as `display_path` shows them.
+pub fn display_files(module: &Module) -> Vec<String> {
+    module.files().iter().map(|f| display_path(f)).collect()
+}
+
 pub fn tier_str(t: Tier) -> &'static str {
     match t {
         Tier::Native => "native",
@@ -22,13 +47,13 @@ pub fn tier_str(t: Tier) -> &'static str {
 /// `plan` is None when the frontend reported errors (nothing was specialized).
 pub fn explain_text(file: &str, mode: Mode, py: &str, module: &Module, schemes: &generic::Schemes, plan: Option<&Plan>, diags: &[Diagnostic]) -> String {
     let mut o = String::new();
-    let files = module.files();
+    let files = display_files(module);
     let _ = writeln!(o, "pyrock explain {file}   (mode: {}, parsed with CPython {py})\n", mode_str(mode));
     if !module.imports.is_empty() {
         let _ = writeln!(o, "Imports");
         let w = module.imports.iter().map(|r| r.name.len()).max().unwrap_or(4);
         for r in &module.imports {
-            let path = r.path.as_deref().map(|p| format!("  {p}")).unwrap_or_default();
+            let path = r.path.as_deref().map(|p| format!("  {}", display_path(p))).unwrap_or_default();
             let note = r.note.as_deref().filter(|_| r.kind != "python (CPython fallback)").map(|n| format!("  ({n})")).unwrap_or_default();
             let _ = writeln!(o, "  {:<w$}  -> {}{path}{note}", r.name, r.kind);
         }
@@ -49,10 +74,13 @@ pub fn explain_text(file: &str, mode: Mode, py: &str, module: &Module, schemes: 
     }
     if let Some(plan) = plan {
         let _ = writeln!(o, "\nSpecializations (reachable from module entry)");
-        let w = plan.entries.iter().map(|e| e.signature.len()).max().unwrap_or(10);
+        // Signatures are padded to the widest one up to 60 columns; a longer
+        // one (a record type) makes only its own row long.
+        const MAX_W: usize = 60;
+        let w = plan.entries.iter().skip(1).map(|e| e.signature.chars().count()).filter(|&n| n <= MAX_W).max().unwrap_or(0);
         for e in plan.entries.iter().skip(1) {
-            let rec = if e.recursive { "  recursive" } else { "" };
-            let _ = writeln!(o, "  {:<w$}  {:<7} {:<24} effects: {}{rec}", e.signature, tier_str(e.tier), e.rust_name, e.effects.join(", "));
+            let rec = if e.recursive { ", recursive" } else { "" };
+            let _ = writeln!(o, "  {:<6}  {:<w$}  {:<24} effects: {}{rec}", tier_str(e.tier), e.signature, e.rust_name, e.effects.join(", "));
         }
         if !plan.unreachable.is_empty() {
             let _ = writeln!(o, "\nNot reached from module entry (not compiled): {}", plan.unreachable.join(", "));

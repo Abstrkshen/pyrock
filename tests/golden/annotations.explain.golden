@@ -17,17 +17,17 @@ Inferred generic signatures
   log(str) -> None
 
 Specializations (reachable from module entry)
-  add(a: int, b: int) -> int              native  add__int_int             effects: may_raise
-  add_partial(a: float, b: int) -> float  native  add_partial__float_int   effects: pure
-  parse_int(s: str) -> int                bridge  parse_int__str           effects: calls_python
-  scale(x: int, k: int) -> int            native  scale__int_int           effects: may_raise
-  scale(x: float, k: float) -> float      native  scale__float_float       effects: pure
-  ratio(n: int, d: int) -> float          native  ratio__int_int           effects: may_raise
-  maybe(flag: bool) -> int | None         native  maybe__bool              effects: pure
-  total(xs: list[int]) -> int             native  total__list_int          effects: pure
-  log(msg: str) -> None                   native  log__str                 effects: io
-  add(a: str, b: str) -> str              native  add__str_str             effects: pure
-  add_partial(a: int, b: int) -> int      native  add_partial__int_int     effects: may_raise
+  native  add(a: int, b: int) -> int              add__int_int             effects: may_raise
+  native  add_partial(a: float, b: int) -> float  add_partial__float_int   effects: pure
+  bridge  parse_int(s: str) -> int                parse_int__str           effects: calls_python
+  native  scale(x: int, k: int) -> int            scale__int_int           effects: may_raise
+  native  scale(x: float, k: float) -> float      scale__float_float       effects: pure
+  native  ratio(n: int, d: int) -> float          ratio__int_int           effects: may_raise
+  native  maybe(flag: bool) -> int | None         maybe__bool              effects: pure
+  native  total(xs: list[int]) -> int             total__list_int          effects: pure
+  native  log(msg: str) -> None                   log__str                 effects: io
+  native  add(a: str, b: str) -> str              add__str_str             effects: pure
+  native  add_partial(a: int, b: int) -> int      add_partial__int_int     effects: may_raise
 
 Not reached from module entry (not compiled): describe
 

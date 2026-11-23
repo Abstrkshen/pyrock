@@ -9,18 +9,31 @@ use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "\
-pyrock — ahead-of-time Python → Rust compiler (prototype)
+pyrock — ahead-of-time Python → Rust compiler
 
 USAGE:
-  pyrock check   <file.py>
-  pyrock explain <file.py> [--format text|json]
-  pyrock emit    <file.py> [--out DIR]
-  pyrock build   <file.py> [--out DIR] [--release] [--mode hybrid|native-only]
+  pyrock check   <file.py> [--mode hybrid|native-only]
+  pyrock explain <file.py> [--format text|json] [--mode ...]
+  pyrock emit    <file.py> [--out DIR] [--mode ...]
+  pyrock build   <file.py> [--out DIR] [--release] [--mode ...]
   pyrock run     <file.py> [--release] [--mode ...] [-- ARGS...]
-  pyrock bench   <file.py> [--baseline python] [--runs N]
+  pyrock bench   <file.py> [--runs N] [--min-speedup X] [--hardware]
 
 OPTIONS:
-  --python PATH   interpreter used for parsing and baselines (default: python3)
+  --mode M          hybrid (default): code that can't be compiled runs in CPython;
+                    native-only: report it as an error instead
+  --release         build with optimizations (bench always does)
+  --out DIR         where the generated Cargo project goes (default: .pyrock/<name>)
+  --format F        explain output: text (default) or json
+  --python PATH     interpreter used for parsing, embedding and the bench baseline
+                    (default: python3)
+  --runs N          bench: runs of each program (default: 5)
+  --min-speedup X   bench: fail unless the native build is at least X times faster
+  --hardware        bench: also print the CPU model
+  -h, --help        print this help
+  -V, --version     print the version
+
+Docs: https://github.com/Abstrkshen/pyrock
 ";
 
 struct Opts {
@@ -32,18 +45,24 @@ struct Opts {
     mode: Mode,
     python: String,
     runs: usize,
+    min_speedup: Option<f64>,
+    hardware: bool,
     passthrough: Vec<String>,
 }
 
 fn parse_args() -> Result<Opts, String> {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().ok_or(USAGE)?;
-    if cmd == "-h" || cmd == "--help" {
-        return Err(USAGE.into());
+    if cmd == "-h" || cmd == "--help" || cmd == "help" {
+        print!("{USAGE}");
+        std::process::exit(0);
     }
     if cmd == "-V" || cmd == "--version" || cmd == "version" {
         println!("pyrock {}", env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
+    }
+    if !matches!(cmd.as_str(), "check" | "explain" | "emit" | "build" | "run" | "bench") {
+        return Err(format!("unknown command `{cmd}`\n\n{USAGE}"));
     }
     let mut o = Opts {
         cmd,
@@ -54,6 +73,8 @@ fn parse_args() -> Result<Opts, String> {
         mode: Mode::Hybrid,
         python: "python3".into(),
         runs: 5,
+        min_speedup: None,
+        hardware: false,
         passthrough: vec![],
     };
     while let Some(a) = args.next() {
@@ -62,7 +83,13 @@ fn parse_args() -> Result<Opts, String> {
             "--format" => o.format = args.next().ok_or("--format needs a value")?,
             "--release" => o.release = true,
             "--python" => o.python = args.next().ok_or("--python needs a value")?,
-            "--runs" => o.runs = args.next().ok_or("--runs needs a value")?.parse().map_err(|_| "bad --runs")?,
+            "--runs" => o.runs = args.next().ok_or("--runs needs a value")?.parse().ok().filter(|&n| n > 0).ok_or("--runs needs a positive number")?,
+            "--min-speedup" => o.min_speedup = Some(args.next().ok_or("--min-speedup needs a value")?.parse().map_err(|_| "--min-speedup needs a number")?),
+            "--hardware" => o.hardware = true,
+            "-h" | "--help" => {
+                print!("{USAGE}");
+                std::process::exit(0);
+            }
             "--baseline" => {
                 let b = args.next().ok_or("--baseline needs a value")?;
                 if b != "python" {
@@ -140,7 +167,7 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
         print_diags(&[o.file.clone()], &parsed.diagnostics);
         return Ok(ExitCode::from(1));
     };
-    let files = module.files();
+    let files = explain::display_files(&module);
     if o.cmd == "bench" {
         return bench(o, &file_name);
     }
@@ -311,7 +338,28 @@ fn write_project(o: &Opts, py: &str, module: &pyrock_ir::Module, c: &Compiled, o
     std::fs::create_dir_all(out.join("src")).map_err(|e| e.to_string())?;
     let rt = runtime_path()?;
     let features = if c.plan.uses_python { ", features = [\"python\"]" } else { "" };
-    let build_deps = if emitted.build_rs.is_some() { "\n[build-dependencies]\ncc = \"1\"\n" } else { "" };
+    // macOS framework Pythons (Xcode's /usr/bin/python3) are linked as
+    // `@rpath/Python3.framework/...`: the binary needs an rpath to the
+    // framework folder, which PyO3's build config knows.
+    let framework_rpath = c.plan.uses_python && cfg!(target_os = "macos");
+    let mut build_rs = emitted.build_rs.clone();
+    if framework_rpath {
+        let call = "    pyo3_build_config::add_python_framework_link_args();\n";
+        build_rs = Some(match build_rs {
+            Some(b) => b.replacen("fn main() {\n", &format!("fn main() {{\n{call}"), 1),
+            None => format!("// Generated by pyrock: links the macOS Python framework.\nfn main() {{\n{call}}}\n"),
+        });
+    }
+    let mut build_deps = String::new();
+    if build_rs.is_some() {
+        build_deps.push_str("\n[build-dependencies]\n");
+        if emitted.build_rs.is_some() {
+            build_deps.push_str("cc = \"1\"\n");
+        }
+        if framework_rpath {
+            build_deps.push_str("pyo3-build-config = \"0.30\"\n");
+        }
+    }
     // Cargo dependencies declared by linked Rust modules (`// pyrock: dep regex = "1"`).
     let mut rust_deps = String::new();
     for (i, x) in module.externs.iter().enumerate() {
@@ -331,7 +379,7 @@ fn write_project(o: &Opts, py: &str, module: &pyrock_ir::Module, c: &Compiled, o
     );
     write_if_changed(&out.join("Cargo.toml"), &cargo)?;
     write_if_changed(&out.join("src/main.rs"), &emitted.main_rs)?;
-    match &emitted.build_rs {
+    match &build_rs {
         Some(b) => write_if_changed(&out.join("build.rs"), b)?,
         None => {
             let _ = std::fs::remove_file(out.join("build.rs"));
@@ -377,6 +425,14 @@ fn cargo_build(out: &Path, release: bool, quiet: bool, python: &str) -> Result<P
     let mut cmd = Command::new(cargo_bin());
     // PyO3 links against the same interpreter that parsed the program.
     cmd.arg("build").arg("--manifest-path").arg(out.join("Cargo.toml")).env("CARGO_TARGET_DIR", &target).env("PYO3_PYTHON", python);
+    // Source paths compiled into the binary (panic locations in the runtime,
+    // the standard library and dependencies) show the home directory as `~`,
+    // so a shared binary doesn't carry the user name. Cargo appends this to
+    // any `build.rustflags` already configured.
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        let flag = format!("--remap-path-prefix={}=~", home.to_string_lossy());
+        cmd.arg("--config").arg(format!("build.rustflags=[{}]", serde_json::to_string(&flag).unwrap()));
+    }
     if release {
         cmd.arg("--release");
     }
@@ -469,20 +525,46 @@ fn bench(o: &Opts, file_name: &str) -> Result<ExitCode, String> {
         return Ok(ExitCode::from(1));
     }
     let exe = String::from_utf8_lossy(&st.stdout).trim().to_string();
-    let time = |cmd: &mut Command| -> Result<(Duration, Vec<u8>), String> {
+    struct Run {
+        time: Duration,
+        out: std::process::Output,
+    }
+    let time = |cmd: &mut Command| -> Result<Run, String> {
         let t = Instant::now();
         let out = cmd.output().map_err(|e| e.to_string())?;
-        Ok((t.elapsed(), out.stdout))
+        Ok(Run { time: t.elapsed(), out })
     };
+    // A failed run has no meaningful time: report it and stop.
+    let failed = |who: &str, cmd: &str, r: &Run| {
+        let err = String::from_utf8_lossy(&r.out.stderr);
+        let tail: Vec<&str> = err.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect();
+        eprintln!("pyrock bench: the {who} run failed ({}), so there is nothing to compare: {cmd}", exit_desc(&r.out.status));
+        for l in tail {
+            eprintln!("  | {l}");
+        }
+    };
+    let shown_exe = explain::display_path(&exe);
+    let py_cmd = format!("{} {}", o.python, o.file);
     let mut native = Vec::new();
     let mut python = Vec::new();
-    let mut outputs_match = true;
     for _ in 0..o.runs {
-        let (tn, on) = time(&mut Command::new(&exe))?;
-        let (tp, op) = time(Command::new(&o.python).arg(&o.file))?;
-        outputs_match &= on == op;
-        native.push(tn);
-        python.push(tp);
+        let n = time(&mut Command::new(&exe))?;
+        let p = time(Command::new(&o.python).arg(&o.file))?;
+        if !p.out.status.success() {
+            failed("CPython", &py_cmd, &p);
+            return Ok(ExitCode::from(1));
+        }
+        if !n.out.status.success() {
+            failed("native", &shown_exe, &n);
+            return Ok(ExitCode::from(1));
+        }
+        if n.out.stdout != p.out.stdout {
+            eprintln!("pyrock bench: stdout differs between CPython and the native build, so the times are not comparable");
+            eprintln!("  first difference at line {}", first_diff_line(&p.out.stdout, &n.out.stdout));
+            return Ok(ExitCode::from(1));
+        }
+        native.push(n.time);
+        python.push(p.time);
     }
     let stats = |v: &mut Vec<Duration>| {
         v.sort();
@@ -490,24 +572,57 @@ fn bench(o: &Opts, file_name: &str) -> Result<ExitCode, String> {
     };
     let (nm, nmin, nmax) = stats(&mut native);
     let (pm, pmin, pmax) = stats(&mut python);
-    let cpu = std::fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .and_then(|s| s.lines().find(|l| l.starts_with("model name")).map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string()))
-        .unwrap_or_else(|| "unknown".into());
     let cargo = cargo_bin();
     let rustc_path = Path::new(&cargo).parent().map(|d| d.join("rustc")).filter(|p| p.exists()).unwrap_or_else(|| "rustc".into());
     let rustc = Command::new(rustc_path).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
     let pyv = Command::new(&o.python).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let speedup = pm.as_secs_f64() / nm.as_secs_f64();
     println!("pyrock bench {file_name}  ({} runs each, wall clock incl. process startup)", o.runs);
-    println!("  hardware : {cpu}");
+    if o.hardware {
+        let cpu = std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|s| s.lines().find(|l| l.starts_with("model name")).map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string()))
+            .or_else(|| Command::new("sysctl").args(["-n", "machdep.cpu.brand_string"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| "unknown".into());
+        println!("  hardware : {cpu}");
+    }
     println!("  versions : {pyv}; {rustc}; pyrock {}", env!("CARGO_PKG_VERSION"));
-    println!("  command  : {} {} | {exe}", o.python, o.file);
+    println!("  command  : {py_cmd} | {shown_exe}");
     println!("  python   : median {:>9.3} ms   (min {:.3}, max {:.3})", ms(pm), ms(pmin), ms(pmax));
     println!("  native   : median {:>9.3} ms   (min {:.3}, max {:.3})", ms(nm), ms(nmin), ms(nmax));
-    println!("  speedup  : {:.2}x (median python / median native)", pm.as_secs_f64() / nm.as_secs_f64());
-    println!("  stdout   : {}", if outputs_match { "identical in every run" } else { "MISMATCH — results are not comparable" });
-    Ok(if outputs_match { ExitCode::SUCCESS } else { ExitCode::from(1) })
+    println!("  speedup  : {speedup:.2}x (median python / median native)");
+    println!("  output   : both exit 0, stdout identical in every run");
+    if let Some(min) = o.min_speedup {
+        if speedup < min {
+            eprintln!("pyrock bench: speedup {speedup:.2}x is below --min-speedup {min}");
+            return Ok(ExitCode::from(1));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
+
+fn exit_desc(st: &std::process::ExitStatus) -> String {
+    match st.code() {
+        Some(c) => format!("exit status {c}"),
+        None => "killed by a signal".into(),
+    }
+}
+
+/// 1-based line number of the first difference between two outputs.
+fn first_diff_line(a: &[u8], b: &[u8]) -> usize {
+    let (a, b) = (String::from_utf8_lossy(a), String::from_utf8_lossy(b));
+    let mut al = a.lines();
+    let mut bl = b.lines();
+    let mut n = 1;
+    loop {
+        match (al.next(), bl.next()) {
+            (Some(x), Some(y)) if x == y => n += 1,
+            (None, None) => return n,
+            _ => return n,
+        }
+    }
+}
+
 
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0

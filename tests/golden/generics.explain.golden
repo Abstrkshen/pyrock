@@ -6,12 +6,12 @@ Inferred generic signatures
   sum_squares(int) -> int
 
 Specializations (reachable from module entry)
-  twice(x: int) -> int              native  twice__int               effects: may_raise
-  twice(x: float) -> float          native  twice__float             effects: pure
-  add(a: str, b: str) -> str        native  add__str_str             effects: pure
-  sum_squares(n: int) -> int        native  sum_squares__int         effects: may_raise
-  add(a: int, b: int) -> int        native  add__int_int             effects: may_raise
-  add(a: float, b: float) -> float  native  add__float_float         effects: pure
+  native  twice(x: int) -> int              twice__int               effects: may_raise
+  native  twice(x: float) -> float          twice__float             effects: pure
+  native  add(a: str, b: str) -> str        add__str_str             effects: pure
+  native  sum_squares(n: int) -> int        sum_squares__int         effects: may_raise
+  native  add(a: int, b: int) -> int        add__int_int             effects: may_raise
+  native  add(a: float, b: float) -> float  add__float_float         effects: pure
 
 Summary: 6 native, 0 bridged specialization(s); module body native; 0 linked Rust/C module(s)
 Runtime: no CPython needed
