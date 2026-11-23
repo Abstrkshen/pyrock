@@ -1,4 +1,4 @@
-# Native values next to CPython objects (found by demos/backend).
+# Native values next to CPython objects (found by examples/apps/backend).
 import json
 
 from _shapes import Square, area_sum

@@ -4,7 +4,8 @@
 # The `pyrock` on PATH is this repo's fresh debug build, not the installed one.
 #
 # usage: scripts/readme_check.sh [--bench] [DIR...]
-#   DIR defaults to every directory with a README.md under examples/ and demos/.
+#   DIR defaults to every example with a README.md: examples/<group>/<example>/
+#   (the group and index READMEs only describe; they are not run).
 #   `pyrock bench` lines are skipped unless --bench is given. With CI set (as in
 #   GitHub Actions), a README containing `<!-- readme_check: skip-ci ... -->` is
 #   skipped: it needs something CI doesn't have (a camera, Ollama, a venv).
@@ -23,7 +24,7 @@ for a in "$@"; do
     case "$a" in --bench) bench=1 ;; *) dirs+=("$a") ;; esac
 done
 if [[ ${#dirs[@]} -eq 0 ]]; then
-    for r in "$ROOT"/examples/*/README.md "$ROOT"/demos/*/README.md; do
+    for r in "$ROOT"/examples/*/*/README.md; do
         [[ -f "$r" ]] && dirs+=("$(dirname "$r")")
     done
 fi

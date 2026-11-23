@@ -1,5 +1,4 @@
 # mode: native-only
-# The playground's "mandel" example (site/play.html): a picture printed as text.
 # Print a "P3" image (plain-text PPM: width, height, then r g b per pixel)
 # and the playground paints it on a canvas.
 W, H, LIMIT = 180, 120, 80

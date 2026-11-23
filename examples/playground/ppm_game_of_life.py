@@ -1,5 +1,4 @@
 # mode: native-only
-# The playground's "life" example (site/play.html): a picture printed as text.
 # Several P3 images in a row play as an animation: Conway's Game of Life,
 # one frame per generation.
 W, H = 48, 32

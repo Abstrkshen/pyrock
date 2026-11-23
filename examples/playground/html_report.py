@@ -1,5 +1,4 @@
 # mode: native-only
-# The playground's "report" example (site/play.html): a picture printed as text.
 # Print HTML and the playground renders it.
 from dataclasses import dataclass
 

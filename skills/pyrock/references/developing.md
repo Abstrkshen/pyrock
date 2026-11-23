@@ -40,11 +40,16 @@ Docs: `README.md`, `docs/imports.md`, `docs/how-it-works.md`, `docs/subset.md`, 
 cargo test --workspace                                 # everything
 cargo test -p pyrock --test suites                     # integration suites only
 UPDATE_SNAPSHOTS=1 cargo test -p pyrock --test suites  # re-bless golden/diagnostic snapshots
-bash samples/run_all.sh [--release] [name-filter]      # every sample vs CPython / expected files
+bash examples/tour/run_all.sh [--release] [name-filter]  # every tour program vs CPython / expected files
+bash examples/apps/run_all.sh                          # the apps vs expected output
+bash scripts/build_site.sh                             # site/: playground wasm + examples/playground
 ```
 
 * `tests/differential/*.py`: compiled output must equal `python3` on stdout, exit code and the
   last stderr line. Files starting with `_` are helper modules, not tests.
+* `examples/playground/*.py` (the website playground's programs) run in the same differential
+  test. A first line `# mode: native-only` selects that mode (here and in `tests/differential`);
+  `# expect: compile error (P301)` means `check` must reject the program with that code.
 * `tests/golden/*.py`: snapshots `.rs.golden` and `.explain.golden`.
 * `tests/diagnostics/*.py`: `.stderr` snapshot of `pyrock check`. A `# mode: native-only`
   first line selects that mode.
@@ -65,7 +70,7 @@ after changing the compiler. `commands.perch` holds the maintainer's
 | `perch install` | `cargo build --release -p pyrock`, then install that binary |
 | `perch build` | release build only |
 | `perch tests` | `cargo test --workspace` |
-| `perch samples` | `bash samples/run_all.sh` |
+| `perch samples` | `bash examples/tour/run_all.sh` |
 | `perch skill` | link this skill into `~/.claude/skills`, `~/.codex/skills` and `~/.cursor/skills` (`bash skills/install.sh --copy` / `--remove` for copies or uninstall) |
 
 (perch reserves `test` and doesn't accept hyphens in command names.)

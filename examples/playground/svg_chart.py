@@ -1,5 +1,4 @@
 # mode: native-only
-# The playground's "chart" example (site/play.html): a picture printed as text.
 # Print SVG and the playground draws it. It's only text output,
 # so the compiled program prints exactly the same picture.
 text = """the quick brown fox jumps over the lazy dog the fox

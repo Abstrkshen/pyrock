@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Build every sample with pyrock, run it, and compare with CPython.
+# Build every tour program with pyrock, run it, and compare with CPython.
 #   - NN_name.py           : compared with `python3 NN_name.py`
 #   - NN_name/main.py      : compared with CPython, or with expected.txt /
 #                            expected.err when it imports Rust or C
 # Compared: stdout, exit status and the last stderr line (the exception).
 #
-# usage: samples/run_all.sh [--release] [name-filter]
+# usage: examples/tour/run_all.sh [--release] [name-filter]
 set -u
 cd "$(dirname "$0")"
-ROOT=$(cd .. && pwd)
+ROOT=$(cd ../.. && pwd)
 PYROCK="$ROOT/target/debug/pyrock"
 PROFILE=()
 FILTER=""

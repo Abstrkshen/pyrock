@@ -10,8 +10,8 @@ import vecmath     # vecmath.rs next to this file  → linked into the binary
 import fastc       # fastc.c (+ fastc.h)           → compiled with the C compiler and linked
 ```
 
-The full working version is in [examples/imports/](../examples/imports/). Run it with
-`pyrock run examples/imports/main.py`.
+The full working version is in [examples/interop/imports/](../examples/interop/imports/). Run it with
+`pyrock run examples/interop/imports/main.py`.
 
 ## How a name is resolved
 

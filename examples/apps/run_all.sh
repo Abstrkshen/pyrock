@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build and run each demo, compare stdout with its expected.stdout.
-# usage: demos/run_all.sh
+# Build and run each app (except ollama-agents, which needs Ollama), compare stdout with its expected.stdout.
+# usage: examples/apps/run_all.sh
 set -u
 cd "$(dirname "$0")"
-ROOT=$(cd .. && pwd)
+ROOT=$(cd ../.. && pwd)
 export PATH="$HOME/.cargo/bin:$PATH"
 (cd "$ROOT" && cargo build -q -p pyrock) || exit 1
 PYROCK="$ROOT/target/debug/pyrock"

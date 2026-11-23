@@ -63,30 +63,31 @@ Full type tables: [imports.md](imports.md).
 | Program | CPython | pyrock | |
 |---|---|---|---|
 | `benchmarks/numeric_loop.py` (int/float/recursion) | 626 ms | 13 ms | 48x |
-| `demos/gui/headless.py` (300 balls, pairwise collisions) | 3.3 s | 0.2 s | 16.7x |
+| `examples/apps/gui/headless.py` (300 balls, pairwise collisions) | 3.3 s | 0.2 s | 16.7x |
 | Game state in dicts (200k frames, record dicts) | 0.58 s | 31 ms | 18.8x |
 | The same state in classes | 0.47 s | 46 ms | 10x |
-| `demos/ai/bench_bpe.py` (string-heavy tokenizer training) | 0.40 s | 0.15 s | 2.7x |
+| `examples/apps/ai/bench_bpe.py` (string-heavy tokenizer training) | 0.40 s | 0.15 s | 2.7x |
 
 Code that mostly calls into CPython (numpy, OpenCV, the `raylib` package) gains little:
 each bridged operation costs about 15 ns against about 5 ns in CPython's own specialized
 bytecode, so keep hot loops on native values.
 
-## Demos and samples
+## Examples
 
-* [demos/](../demos/): a JSON API on asyncio (backend), a tokenizer + Rust model + C
-  sampling program that needs no CPython (AI), and a raylib ball simulation (GUI).
-* `samples/` (21 programs checked against CPython) and [examples/](../examples/) (15
-  programs with READMEs, from `hello` to an AI-agent server and live YOLO vision),
-  including `raylib-breakout`, a full platformer: 63 native functions, the rest is the
-  raylib API and ctypes code.
+[examples/](../examples/) holds everything runnable, grouped: `tour/` (23 numbered
+programs checked against CPython), `interop/` (Rust, C and Python modules), `packages/`
+(pip packages through CPython), `apps/` (a JSON API on asyncio; an AI pipeline with a
+tokenizer in Python, a model in Rust and sampling in C, needing no CPython; a raylib ball
+simulation; an AI-agent server), `graphics/` (raylib, `raylib-breakout`, a full platformer
+with 63 native functions, and live YOLO vision), and `playground/` (the website
+playground's programs, each also a differential test).
 
 ## How it is tested
 
 ```console
 cargo test --workspace         # differential (vs CPython), golden (generated Rust), diagnostics, interop
-bash samples/run_all.sh        # 21 samples vs CPython
-bash demos/run_all.sh          # the 3 demos vs expected output
+bash examples/tour/run_all.sh  # 23 tour programs vs CPython
+bash examples/apps/run_all.sh  # 3 apps vs expected output
 bash scripts/readme_check.sh   # every README command, verbatim
 ```
 

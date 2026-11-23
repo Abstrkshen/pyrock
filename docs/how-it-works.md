@@ -614,8 +614,8 @@ behaviour is reproduced:
 The test suite compiles each program in [tests/differential](../tests/differential/), runs
 it, and compares its stdout, exit code and final error line with `python3` running the same
 file. Snapshot tests pin the generated Rust ([tests/golden](../tests/golden/)) and the
-diagnostics ([tests/diagnostics](../tests/diagnostics/)). [samples/run_all.sh](../samples/run_all.sh)
-does the same for every sample program.
+diagnostics ([tests/diagnostics](../tests/diagnostics/)). [examples/tour/run_all.sh](../examples/tour/run_all.sh)
+does the same for every tour program.
 
 Known differences, such as ints beyond 64 bits, are listed in [subset.md](subset.md).
 

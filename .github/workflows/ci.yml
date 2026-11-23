@@ -10,11 +10,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y python3-dev python3-venv xvfb libgl1-mesa-dri
       - name: Unit and suite tests
         run: cargo test --workspace
-      - name: Samples vs CPython
-        run: bash samples/run_all.sh
-      - name: Demos (backend, AI, GUI physics) vs expected output
-        run: bash demos/run_all.sh
-      - name: GUI demo virtualenv (raylib)
-        run: python3 -m venv demos/gui/.venv && demos/gui/.venv/bin/pip install raylib
+      - name: Tour programs vs CPython
+        run: bash examples/tour/run_all.sh
+      - name: Apps (backend, AI, GUI physics) vs expected output
+        run: bash examples/apps/run_all.sh
+      - name: GUI app virtualenv (raylib)
+        run: python3 -m venv examples/apps/gui/.venv && examples/apps/gui/.venv/bin/pip install raylib
       - name: README commands, verbatim (GUI under a virtual display)
         run: xvfb-run -a bash scripts/readme_check.sh

@@ -2,14 +2,14 @@
 # Build everything this sample needs, into lib/, third_party/ and models/.
 # Steps whose output already exists are skipped.
 #
-# Needs: a C/C++ compiler, cmake, python3, the examples' virtualenv ../.venv
+# Needs: a C/C++ compiler, cmake, python3, the examples' virtualenv ../../.venv
 # (or set PYTHON=...) with pip or uv for the model export, and FFmpeg development
 # packages for OpenCV's video input (Debian/Ubuntu: sudo apt install cmake
 # libavcodec-dev libavformat-dev libswscale-dev).
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p lib models third_party
-PYTHON="${PYTHON:-../.venv/bin/python}"
+PYTHON="${PYTHON:-../../.venv/bin/python}"
 
 # 1. raylib 5.5 (the window).
 bash ../fetch-raylib.sh lib

@@ -1,19 +1,21 @@
-# Sample programs
+# A tour of what compiles
 
-Ordinary Python programs that pyrock compiles to native executables. Every one is checked
-by `run_all.sh`: the compiled binary must produce the same stdout, exit status and final
-exception line as CPython. The Rust/C samples can't run under CPython, so they are checked
-against `expected.txt` / `expected.err`.
+Small, ordinary Python programs, one idea each, numbered in reading order. Every one is
+checked by `run_all.sh`: the compiled executable must print the same stdout, exit with the
+same status and end with the same exception line as CPython. The Rust and C programs can't
+run under CPython, so they are checked against `expected.txt` / `expected.err` instead.
+
+From this folder:
 
 ```console
-samples/run_all.sh                 # build + check everything (debug builds)
-samples/run_all.sh --release 08    # one sample, optimised
-target/debug/pyrock explain samples/06_generics.py
-target/debug/pyrock run samples/08_mandelbrot.py
-target/debug/pyrock bench samples/04_collatz.py --runs 3
+bash run_all.sh                    # build and check every program (debug builds)
+bash run_all.sh --release 08       # one program, optimized
+pyrock explain 06_generics.py      # what was inferred for an unannotated function
+pyrock run 08_mandelbrot.py
+pyrock bench 04_collatz.py --runs 3
 ```
 
-| Sample | Shows | Runtime |
+| Program | Shows | Runtime |
 |---|---|---|
 | [01_hello.py](01_hello.py) | Smallest program, f-strings | native only |
 | [02_fizzbuzz.py](02_fizzbuzz.py) | `if/elif/else`, `range`, string building | native only |
@@ -36,6 +38,8 @@ target/debug/pyrock bench samples/04_collatz.py --runs 3
 | [19_rust_module/](19_rust_module/) | `import fastmath` → `fastmath.rs`; `Result` errors become `RuntimeError` | native only |
 | [20_c_module/](20_c_module/) | `import clib` → `clib.c` + `clib.h`; `OverflowError` for a too-large C `int` | native only |
 | [21_everything/](21_everything/) | Python + Rust + C + CPython packages in one program | CPython for stdlib |
+| [22_native_sieve/](22_native_sieve/) | A prime sieve kept fully native (`--mode native-only`), with `bench` | native only |
+| [23_native_mandelbrot/](23_native_mandelbrot/) | The ASCII Mandelbrot set again, checked with `--mode native-only` | native only |
 
 "native only" means the binary doesn't link libpython at all. In `pyrock explain`, the
 "CPython boundaries" section lists every place a program crosses into Python, with the reason.

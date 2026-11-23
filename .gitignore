@@ -15,14 +15,15 @@ __pycache__/
 *.so
 *.so.*
 !tests/**/*.so
-examples/*/lib/
+examples/graphics/*/lib/
 
 # Large third-party downloads of the opencv-yolo example (its build.sh fetches them)
-examples/opencv-yolo/third_party/
-examples/opencv-yolo/models/
+examples/graphics/opencv-yolo/third_party/
+examples/graphics/opencv-yolo/models/
 *.onnx
 *.pt
 *.mp4
 
-# Built by .github/workflows/pages.yml from crates/playground
+# Built by scripts/build_site.sh (crates/playground, examples/playground)
 site/pyrock.wasm
+site/examples/

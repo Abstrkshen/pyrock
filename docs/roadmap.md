@@ -1099,3 +1099,20 @@ runnable ones print the same as CPython.
   Checked in headless Chrome: each example is detected and drawn (canvas pixels set,
   animations advance), the Picture/Text toggle works, and a later plain-text run clears
   the picture.
+
+### One `examples/` tree (2026-11-23)
+
+* `samples/`, `demos/` and `examples/` held overlapping kinds of programs. Everything
+  runnable is now under `examples/`, grouped by what it shows: `tour/` (was `samples/`,
+  plus the two native-only examples, now 22 and 23), `interop/`, `packages/`, `apps/`
+  (was `demos/`, plus `ollama-agents`), `graphics/` and `playground/`. `examples/hello`
+  and `examples/generics.py` were copies of `tour/01_hello.py` and `tour/06_generics.py`
+  and are gone. `benchmarks/` and `tests/` stay as they are.
+* The playground's programs live in `examples/playground/` (one copy): the website loads
+  them (`scripts/build_site.sh` copies them and builds the wasm), and the differential test
+  runs them. That test now honours `# mode: native-only` (before, it always compiled in
+  hybrid mode) and checks `# expect: compile error (Pxxx)`.
+* `scripts/readme_check.sh` runs `examples/<group>/<example>/README.md`; `interop/imports`
+  got a README. Verified: `cargo test --workspace`, `examples/tour/run_all.sh` (23/23),
+  `examples/apps/run_all.sh` (3/3), `CI=1 scripts/readme_check.sh` (11 passed, 6 skipped),
+  the playground in headless Chrome, and every GitHub link on the home page.

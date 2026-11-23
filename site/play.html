@@ -141,22 +141,7 @@
 
   <div class="toolbar">
     <label>Example
-      <select id="example" aria-label="Load an example">
-        <optgroup label="The compiler">
-        <option value="generics">One function, three types</option>
-        <option value="classes">Classes and lists</option>
-        <option value="generators">Generators, dicts, lambdas</option>
-        <option value="packages">A Python package (json)</option>
-        <option value="typeerror">A bug pyrock catches</option>
-        </optgroup>
-        <optgroup label="Pictures from printed output">
-          <option value="chart">SVG: a bar chart</option>
-          <option value="balls">SVG frames: bouncing balls</option>
-          <option value="mandel">PPM image: the Mandelbrot set</option>
-          <option value="life">PPM frames: Game of Life</option>
-          <option value="report">HTML: an orders report</option>
-        </optgroup>
-      </select>
+      <select id="example" aria-label="Load an example"></select>
     </label>
     <div class="seg" role="group" aria-label="Compilation mode">
       <button type="button" id="mode-hybrid" aria-pressed="true">hybrid</button>
@@ -271,288 +256,20 @@
     try { localStorage.setItem("pyrock-theme", root.dataset.theme); } catch (e) {}
   });
 
-  var EXAMPLES = {
-    generics: {
-      mode: "hybrid",
-      code: [
-        "def add(a, b):",
-        "    return a + b",
-        "",
-        "def fib(n):",
-        "    return n if n < 2 else fib(n - 1) + fib(n - 2)",
-        "",
-        "# add is called with ints, floats and strings:",
-        "# pyrock compiles three Rust functions from it.",
-        "print(add(1, 2), add(1.5, 2.25), add(\"py\", \"rock\"))",
-        "print(fib(25))",
-      ],
-    },
-    classes: {
-      mode: "native",
-      code: [
-        "from dataclasses import dataclass",
-        "",
-        "@dataclass",
-        "class Body:",
-        "    x: float",
-        "    v: float",
-        "",
-        "    def step(self, dt):",
-        "        self.x += self.v * dt",
-        "",
-        "def simulate(bodies, steps):",
-        "    for _ in range(steps):",
-        "        for b in bodies:",
-        "            b.step(0.01)",
-        "    return sum(b.x for b in bodies)",
-        "",
-        "bodies = [Body(float(i), 1.0 + i / 10) for i in range(100)]",
-        "print(round(simulate(bodies, 1000), 3))",
-      ],
-    },
-    generators: {
-      mode: "native",
-      code: [
-        "def primes():",
-        "    found = []",
-        "    n = 2",
-        "    while True:",
-        "        if all(n % p for p in found):",
-        "            found.append(n)",
-        "            yield n",
-        "        n += 1",
-        "",
-        "def take(it, k):",
-        "    out = []",
-        "    for x in it:",
-        "        if len(out) == k:",
-        "            break",
-        "        out.append(x)",
-        "    return out",
-        "",
-        "print(take(primes(), 10))",
-        "",
-        "words = \"the quick brown fox jumps over the lazy dog the end\".split()",
-        "counts = {}",
-        "for w in words:",
-        "    counts[w] = counts.get(w, 0) + 1",
-        "print(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:3])",
-      ],
-    },
-    packages: {
-      mode: "hybrid",
-      code: [
-        "import json",
-        "",
-        "def total(prices):",
-        "    s = 0.0",
-        "    for p in prices:",
-        "        s += p",
-        "    return s",
-        "",
-        "# json is a CPython module: these lines are boundaries (see Explain).",
-        "# total() gets a native list of floats and compiles to plain Rust.",
-        "order = json.loads('{\"items\": [{\"price\": 9.5}, {\"price\": 3.25}]}')",
-        "prices = [float(item[\"price\"]) for item in order[\"items\"]]",
-        "print(total(prices))",
-        "",
-        "# Switch to native-only: every boundary becomes an error.",
-      ],
-    },
-    typeerror: {
-      mode: "hybrid",
-      code: [
-        "def label(count):",
-        "    return \"items: \" + count",
-        "",
-        "print(label(\"three\"))",
-        "print(label(3))   # CPython fails here when it runs; pyrock refuses to compile it",
-      ],
-    },
-    chart: {
-      mode: "native",
-      code: [
-        "# Print SVG and the playground draws it. It's only text output,",
-        "# so the compiled program prints exactly the same picture.",
-        "text = \"\"\"the quick brown fox jumps over the lazy dog the fox",
-        "barks and the dog runs while the quick fox hides from the dog\"\"\"",
-        "",
-        "counts = {}",
-        "for w in text.split():",
-        "    counts[w] = counts.get(w, 0) + 1",
-        "top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:8]",
-        "",
-        "W, H, bar = 520, 300, 46",
-        "most = top[0][1]",
-        "parts = [f'<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{W}\" height=\"{H}\" font-family=\"sans-serif\">',",
-        "         f'<rect width=\"{W}\" height=\"{H}\" fill=\"#f8f9f6\"/>',",
-        "         '<text x=\"20\" y=\"30\" font-size=\"18\" fill=\"#1c2326\">Most common words</text>']",
-        "for i, (word, n) in enumerate(top):",
-        "    h = round(200 * n / most)",
-        "    x = 30 + i * (bar + 16)",
-        "    parts.append(f'<rect x=\"{x}\" y=\"{260 - h}\" width=\"{bar}\" height=\"{h}\" rx=\"4\" fill=\"#0f6e57\"/>')",
-        "    parts.append(f'<text x=\"{x + bar // 2}\" y=\"{252 - h}\" font-size=\"13\" text-anchor=\"middle\">{n}</text>')",
-        "    parts.append(f'<text x=\"{x + bar // 2}\" y=\"280\" font-size=\"12\" text-anchor=\"middle\">{word}</text>')",
-        "parts.append(\"</svg>\")",
-        "print(\"\\n\".join(parts))",
-      ],
-    },
-    balls: {
-      mode: "native",
-      code: [
-        "# Several SVGs printed one after another play as an animation:",
-        "# each <svg> is one frame. The physics compiles to native Rust.",
-        "W, H, R = 480, 300, 12",
-        "",
-        "class Ball:",
-        "    def __init__(self, x, y, vx, vy, color):",
-        "        self.x = x",
-        "        self.y = y",
-        "        self.vx = vx",
-        "        self.vy = vy",
-        "        self.color = color",
-        "",
-        "    def step(self, dt):",
-        "        self.vy += 900.0 * dt",
-        "        self.x += self.vx * dt",
-        "        self.y += self.vy * dt",
-        "        if self.x < R or self.x > W - R:",
-        "            self.vx = -self.vx",
-        "            self.x = min(max(self.x, R), W - R)",
-        "        if self.y > H - R:",
-        "            self.vy = -self.vy * 0.88",
-        "            self.y = H - R",
-        "",
-        "colors = [\"#0f6e57\", \"#c99a1e\", \"#2c55a0\", \"#a0521a\", \"#56626a\"]",
-        "balls = [Ball(40.0 + i * 85, 40.0 + i * 20, 120.0 + i * 35, 0.0, colors[i % 5]) for i in range(5)]",
-        "",
-        "for frame in range(150):",
-        "    for _ in range(4):",
-        "        for b in balls:",
-        "            b.step(1 / 240)",
-        "    parts = [f'<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{W}\" height=\"{H}\">',",
-        "             f'<rect width=\"{W}\" height=\"{H}\" fill=\"#f3f4f0\"/>']",
-        "    for b in balls:",
-        "        parts.append(f'<circle cx=\"{b.x:.1f}\" cy=\"{b.y:.1f}\" r=\"{R}\" fill=\"{b.color}\"/>')",
-        "    parts.append(\"</svg>\")",
-        "    print(\"\".join(parts))",
-      ],
-    },
-    mandel: {
-      mode: "native",
-      code: [
-        "# Print a \"P3\" image (plain-text PPM: width, height, then r g b per pixel)",
-        "# and the playground paints it on a canvas.",
-        "W, H, LIMIT = 180, 120, 80",
-        "",
-        "def escape(cr, ci):",
-        "    zr = 0.0",
-        "    zi = 0.0",
-        "    for i in range(LIMIT):",
-        "        zr, zi = zr * zr - zi * zi + cr, 2 * zr * zi + ci",
-        "        if zr * zr + zi * zi > 4.0:",
-        "            return i",
-        "    return LIMIT",
-        "",
-        "def mix(a, b, t):",
-        "    return int(a + (b - a) * t)",
-        "",
-        "def color(n):",
-        "    if n == LIMIT:",
-        "        return \"28 35 38\"",
-        "    s = (n / LIMIT) ** 0.45",
-        "    if s < 0.6:  # pale stone to malachite",
-        "        u = s / 0.6",
-        "        return f\"{mix(236, 15, u)} {mix(238, 110, u)} {mix(233, 87, u)}\"",
-        "    u = (s - 0.6) / 0.4  # malachite to pyrite",
-        "    return f\"{mix(15, 201, u)} {mix(110, 154, u)} {mix(87, 30, u)}\"",
-        "",
-        "print(\"P3\")",
-        "print(W, H)",
-        "print(255)",
-        "for y in range(H):",
-        "    row = []",
-        "    for x in range(W):",
-        "        cr = -2.2 + 3.1 * x / W",
-        "        ci = -1.2 + 2.4 * y / H",
-        "        row.append(color(escape(cr, ci)))",
-        "    print(\" \".join(row))",
-      ],
-    },
-    life: {
-      mode: "native",
-      code: [
-        "# Several P3 images in a row play as an animation: Conway's Game of Life,",
-        "# one frame per generation.",
-        "W, H = 48, 32",
-        "",
-        "def step(grid):",
-        "    new = []",
-        "    for y in range(H):",
-        "        row = []",
-        "        for x in range(W):",
-        "            n = 0",
-        "            for dy in (-1, 0, 1):",
-        "                for dx in (-1, 0, 1):",
-        "                    if dx != 0 or dy != 0:",
-        "                        n += grid[(y + dy) % H][(x + dx) % W]",
-        "            alive = grid[y][x] == 1",
-        "            row.append(1 if n == 3 or (alive and n == 2) else 0)",
-        "        new.append(row)",
-        "    return new",
-        "",
-        "seed = 12345",
-        "def rand():",
-        "    global seed",
-        "    seed = (seed * 1103515245 + 12345) % 2147483648",
-        "    return seed",
-        "",
-        "grid = [[1 if (rand() >> 16) % 3 == 0 else 0 for _ in range(W)] for _ in range(H)]  # high bits: the low ones repeat",
-        "for gen in range(60):",
-        "    print(\"P3\", W, H, 9)  # colour values from 0 to 9",
-        "    for row in grid:",
-        "        print(\" \".join(\"9 7 1\" if c else \"1 2 2\" for c in row))",
-        "    grid = step(grid)",
-      ],
-    },
-    report: {
-      mode: "native",
-      code: [
-        "# Print HTML and the playground renders it.",
-        "from dataclasses import dataclass",
-        "",
-        "@dataclass",
-        "class Order:",
-        "    customer: str",
-        "    items: int",
-        "    price: float",
-        "",
-        "orders = [Order(\"Ada\", 3, 12.5), Order(\"Grace\", 1, 99.0), Order(\"Linus\", 7, 4.25), Order(\"Guido\", 2, 30.0)]",
-        "total = sum(o.items * o.price for o in orders)",
-        "",
-        "rows = []",
-        "for o in sorted(orders, key=lambda o: -o.items * o.price):",
-        "    amount = o.items * o.price",
-        "    width = round(100 * amount / total)",
-        "    rows.append(f\"<tr><td>{o.customer}</td><td>{o.items}</td><td>{amount:.2f}</td>\"",
-        "                f'<td><div style=\"background:#0f6e57;height:10px;width:{width}%\"></div></td></tr>')",
-        "",
-        "print(f\"\"\"<!doctype html>",
-        "<style>",
-        "  body {{ font-family: system-ui, sans-serif; margin: 24px; color: #1c2326; }}",
-        "  table {{ border-collapse: collapse; width: 100%; }}",
-        "  th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid #ccd; }}",
-        "  td:last-child {{ width: 40%; }}",
-        "</style>",
-        "<h2>Orders</h2>",
-        "<table>",
-        "<tr><th>Customer</th><th>Items</th><th>Amount</th><th>Share</th></tr>",
-        "{\"\".join(rows)}",
-        "</table>",
-        "<p>Total: <strong>{total:.2f}</strong> from {len(orders)} orders.</p>\"\"\")",
-      ],
-    },
-  };
+  // The programs live in examples/playground/ (scripts/build_site.sh copies them
+  // to site/examples/). A first line `# mode: native-only` selects the mode.
+  var EXAMPLES = [
+    { file: "generics.py", title: "One function, three types", group: "The compiler" },
+    { file: "classes.py", title: "Classes and lists", group: "The compiler" },
+    { file: "generators.py", title: "Generators, dicts, lambdas", group: "The compiler" },
+    { file: "json_boundaries.py", title: "A Python package (json)", group: "The compiler" },
+    { file: "type_error.py", title: "A bug pyrock catches", group: "The compiler" },
+    { file: "svg_chart.py", title: "SVG: a bar chart", group: "Pictures from printed output" },
+    { file: "svg_bouncing_balls.py", title: "SVG frames: bouncing balls", group: "Pictures from printed output" },
+    { file: "ppm_mandelbrot.py", title: "PPM image: the Mandelbrot set", group: "Pictures from printed output" },
+    { file: "ppm_game_of_life.py", title: "PPM frames: Game of Life", group: "Pictures from printed output" },
+    { file: "html_report.py", title: "HTML: an orders report", group: "Pictures from printed output" },
+  ];
 
   var $ = function (id) { return document.getElementById(id); };
   var code = $("code"), status = $("status");
@@ -946,11 +663,42 @@
     code.scrollTop = 0;
     paint();
   }
-  function load(name) {
-    var ex = EXAMPLES[name];
-    setCode(ex.code.join("\n") + "\n");
-    setMode(ex.mode === "native");
+  var exampleCache = {};
+  function fetchExample(file) {
+    if (!exampleCache[file]) {
+      exampleCache[file] = fetch("examples/" + file).then(function (r) {
+        if (!r.ok) throw new Error(file + ": HTTP " + r.status);
+        return r.text();
+      });
+    }
+    return exampleCache[file];
   }
+  function load(file) {
+    $("example").value = file;
+    return fetchExample(file).then(function (text) {
+      var lines = text.split("\n"), native = false;
+      while (lines.length && /^# (mode|expect):/.test(lines[0])) {
+        if (/^# mode: native-only/.test(lines[0])) native = true;
+        lines.shift();
+      }
+      setCode(lines.join("\n"));
+      setMode(native);
+    }, function (err) { status.textContent = "Couldn't load the example: " + err.message; });
+  }
+  (function fillExamples() {
+    var sel = $("example"), groups = {};
+    EXAMPLES.forEach(function (ex) {
+      if (!groups[ex.group]) {
+        groups[ex.group] = document.createElement("optgroup");
+        groups[ex.group].label = ex.group;
+        sel.appendChild(groups[ex.group]);
+      }
+      var o = document.createElement("option");
+      o.value = ex.file;
+      o.textContent = ex.title;
+      groups[ex.group].appendChild(o);
+    });
+  })();
   $("example").addEventListener("change", function (e) { load(e.target.value); });
 
   // ---- links: #code=<base64url>&mode=native ----
@@ -977,9 +725,9 @@
   var params = new URLSearchParams(location.hash.slice(1));
   if (params.get("code")) {
     try { setCode(unb64(params.get("code"))); setMode(params.get("mode") === "native"); }
-    catch (e) { load("generics"); }
+    catch (e) { load(EXAMPLES[0].file); }
   } else {
-    load("generics");
+    load(EXAMPLES[0].file);
   }
 
   boot();

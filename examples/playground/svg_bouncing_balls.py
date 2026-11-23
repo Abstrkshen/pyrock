@@ -1,5 +1,4 @@
 # mode: native-only
-# The playground's "balls" example (site/play.html): a picture printed as text.
 # Several SVGs printed one after another play as an animation:
 # each <svg> is one frame. The physics compiles to native Rust.
 W, H, R = 480, 300, 12

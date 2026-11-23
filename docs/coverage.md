@@ -21,7 +21,7 @@ covered.
   and 83% / 75% / 50% of those in the `requests` / `huggingface_hub` / `langchain_core`
   packages. Whole modules pass much less often (42 of 167 stdlib modules), because one
   blocker in a module stops that whole module.
-* **Code written for pyrock:** the 21 samples, 3 demos and 14 user samples all compile; the
+* **Code written for pyrock:** the 23 tour programs, the apps and the other examples all compile; the
   fully native ones need no CPython at all.
 
 Library code is the hardest case: it is full of library-specific decorators, CPython base

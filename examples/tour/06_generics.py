@@ -1,5 +1,5 @@
 # One unannotated function, many concrete specializations.
-# Try: pyrock explain samples/06_generics.py
+# Try: pyrock explain examples/tour/06_generics.py
 def add(a, b):
     return a + b
 

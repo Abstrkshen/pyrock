@@ -53,9 +53,9 @@ command skill
 end
 
 command samples
-    description "Compile every program in samples/ and check it against CPython"
+    description "Compile every program in examples/tour/ and check it against CPython"
     dir "${script_dir}"
     do
-        bash samples/run_all.sh
+        bash examples/tour/run_all.sh
     end
 end

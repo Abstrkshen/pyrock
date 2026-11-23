@@ -1,5 +1,8 @@
 //! Test suites from design section 12:
-//! - differential: CPython vs generated binary (stdout, exit status, exception line)
+//! - differential: CPython vs generated binary (stdout, exit status, exception line),
+//!   for tests/differential and the playground's programs (examples/playground). A
+//!   first line `# mode: native-only` selects that mode; a line
+//!   `# expect: compile error (P301)` means `check` must reject it with that code
 //! - golden: snapshot of generated Rust and the explain report
 //! - diagnostics: snapshot of `pyrock check` output for rejected programs
 //!   (a first line `# mode: native-only` selects that mode)
@@ -26,7 +29,11 @@ fn python() -> String {
 }
 
 fn cases(dir: &str) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::fs::read_dir(root().join("tests").join(dir))
+    cases_in(&root().join("tests").join(dir))
+}
+
+fn cases_in(dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|e| e == "py"))
@@ -69,10 +76,23 @@ fn snapshot(path: PathBuf, actual: &str, failures: &mut Vec<String>) {
 #[test]
 fn differential() {
     let mut failures = Vec::new();
-    for case in cases("differential") {
-        let name = case.file_stem().unwrap().to_str().unwrap().to_string();
+    let playground = cases_in(&root().join("examples/playground"));
+    for case in cases("differential").into_iter().chain(playground) {
+        let in_playground = case.parent().is_some_and(|d| d.ends_with("examples/playground"));
+        let name = format!("{}{}", if in_playground { "playground_" } else { "" }, case.file_stem().unwrap().to_str().unwrap());
+        let src = std::fs::read_to_string(&case).unwrap();
+        let native_only = src.starts_with("# mode: native-only");
+        let mode: &[&str] = if native_only { &["--mode", "native-only"] } else { &[] };
+        if let Some(code) = src.lines().take(3).find_map(|l| l.strip_prefix("# expect: compile error (")).and_then(|r| r.split(')').next()) {
+            let check = pyrock().arg("check").arg(&case).args(mode).output().unwrap();
+            let err = String::from_utf8_lossy(&check.stderr);
+            if check.status.success() || !err.contains(&format!("  {code}  error")) {
+                failures.push(format!("{name}: expected `check` to fail with {code}\n{err}"));
+            }
+            continue;
+        }
         let out_dir = root().join("target/pyrock-tests").join(&name);
-        let build = pyrock().arg("build").arg(&case).arg("--out").arg(&out_dir).output().unwrap();
+        let build = pyrock().arg("build").arg(&case).args(mode).arg("--out").arg(&out_dir).output().unwrap();
         if !build.status.success() {
             failures.push(format!("{name}: pyrock build failed\n{}", String::from_utf8_lossy(&build.stderr)));
             continue;

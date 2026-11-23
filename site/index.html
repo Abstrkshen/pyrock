@@ -433,9 +433,9 @@ pyrock --version</pre>
     <div class="bars">
       <div class="bar"><div class="what"><code>numeric_loop.py</code><small>int and float loops, recursion</small></div><div><div class="track"><div class="fill" style="--x:48">48x</div></div><div class="times">CPython 626 ms, pyrock 13 ms</div></div></div>
       <div class="bar"><div class="what">Game state in dicts<small>200k frames of record dicts</small></div><div><div class="track"><div class="fill" style="--x:18.8">18.8x</div></div><div class="times">CPython 0.58 s, pyrock 31 ms</div></div></div>
-      <div class="bar"><div class="what"><code>demos/gui/headless.py</code><small>300 balls, pairwise collisions</small></div><div><div class="track"><div class="fill" style="--x:16.7">16.7x</div></div><div class="times">CPython 3.3 s, pyrock 0.2 s</div></div></div>
+      <div class="bar"><div class="what"><code>apps/gui/headless.py</code><small>300 balls, pairwise collisions</small></div><div><div class="track"><div class="fill" style="--x:16.7">16.7x</div></div><div class="times">CPython 3.3 s, pyrock 0.2 s</div></div></div>
       <div class="bar"><div class="what">The same game state in classes<small>200k frames</small></div><div><div class="track"><div class="fill" style="--x:10">10x</div></div><div class="times">CPython 0.47 s, pyrock 46 ms</div></div></div>
-      <div class="bar"><div class="what"><code>demos/ai/bench_bpe.py</code><small>training a BPE tokenizer, string-heavy</small></div><div><div class="track"><div class="fill" style="--x:2.7">2.7x</div></div><div class="times">CPython 0.40 s, pyrock 0.15 s</div></div></div>
+      <div class="bar"><div class="what"><code>apps/ai/bench_bpe.py</code><small>training a BPE tokenizer, string-heavy</small></div><div><div class="track"><div class="fill" style="--x:2.7">2.7x</div></div><div class="times">CPython 0.40 s, pyrock 0.15 s</div></div></div>
     </div>
     <div class="speed-notes">
       <div>
@@ -501,19 +501,19 @@ pyrock --version</pre>
 
 <section id="examples">
   <div class="wrap">
-    <h2>Examples and demos</h2>
+    <h2>Examples</h2>
     <p class="lede">Each one has a README with commands you can run as written. CI runs
     them all, except the ones that need a camera, a local model server or extra packages.</p>
     <div class="ex-grid">
       <ul class="ex-list">
-        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/raylib-breakout">raylib-breakout</a><span class="tag hybrid">hybrid</span></div><p>A platformer with SVG sprites. The game logic is 63 native functions; drawing is the C raylib library.</p></li>
-        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/ollama-agents">ollama-agents</a><span class="tag native">native</span></div><p>An AI-agent HTTP server: agent logic in Python, HTTP and JSON in a Rust file, tool calls through a local Ollama model. No CPython at run time.</p></li>
-        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/opencv-yolo">opencv-yolo</a><span class="tag native">native</span></div><p>Live YOLO detection, segmentation and pose from a webcam: OpenCV, ONNX Runtime and raylib in C and C++.</p></li>
-        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/demos/ai">demos/ai</a><span class="tag native">native</span></div><p>A BPE tokenizer in Python, a bigram model in Rust and sampling in C, in one executable.</p></li>
-        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/demos/backend">demos/backend</a><span class="tag hybrid">hybrid</span></div><p>A JSON API on asyncio: native store, routing and validation; sockets and <code>json</code> through CPython.</p></li>
-        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/demos/gui">demos/gui</a><span class="tag hybrid">hybrid</span></div><p>300 colliding balls drawn with raylib; the physics runs 17 times faster than in CPython.</p></li>
-        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/langchain">langchain</a>, <a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/huggingface">huggingface</a><span class="tag hybrid">hybrid</span></div><p>Real packages through CPython, with native callbacks passed into them.</p></li>
-        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples">and ten more</a></div><p>From <code>hello</code> to a Rust HTTP server, C++ through <code>ctypes</code>, and every kind of import in one program.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/graphics/raylib-breakout">raylib-breakout</a><span class="tag hybrid">hybrid</span></div><p>A platformer with SVG sprites. The game logic is 63 native functions; drawing is the C raylib library.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/apps/ollama-agents">ollama-agents</a><span class="tag native">native</span></div><p>An AI-agent HTTP server: agent logic in Python, HTTP and JSON in a Rust file, tool calls through a local Ollama model. No CPython at run time.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/graphics/opencv-yolo">opencv-yolo</a><span class="tag native">native</span></div><p>Live YOLO detection, segmentation and pose from a webcam: OpenCV, ONNX Runtime and raylib in C and C++.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/apps/ai">apps/ai</a><span class="tag native">native</span></div><p>A BPE tokenizer in Python, a bigram model in Rust and sampling in C, in one executable.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/apps/backend">apps/backend</a><span class="tag hybrid">hybrid</span></div><p>A JSON API on asyncio: native store, routing and validation; sockets and <code>json</code> through CPython.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/apps/gui">apps/gui</a><span class="tag hybrid">hybrid</span></div><p>300 colliding balls drawn with raylib; the physics runs 17 times faster than in CPython.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/packages/langchain">langchain</a>, <a href="https://github.com/Abstrkshen/pyrock/tree/main/examples/packages/huggingface">huggingface</a><span class="tag hybrid">hybrid</span></div><p>Real packages through CPython, with native callbacks passed into them.</p></li>
+        <li><div><a href="https://github.com/Abstrkshen/pyrock/tree/main/examples">All examples</a></div><p>A 23-program tour of what compiles, Rust and C imports, a Rust HTTP server, C++ through <code>ctypes</code>, and the playground's programs.</p></li>
       </ul>
       <figure class="mandel">
 <pre aria-label="An ASCII-art Mandelbrot set">
@@ -540,7 +540,7 @@ pyrock --version</pre>
                                 .+#.                  
                                  ...                  
                                 .</pre>
-        <figcaption>Output of <code>examples/native-mandelbrot</code>, compiled with
+        <figcaption>Output of <code>examples/tour/23_native_mandelbrot</code>, compiled with
         <code>--mode native-only</code>.</figcaption>
       </figure>
     </div>

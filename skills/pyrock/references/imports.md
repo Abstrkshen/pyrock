@@ -154,7 +154,7 @@ pyrock explain project/main.py
 pyrock run project/main.py
 ```
 
-Working examples in the repo: `examples/imports/`, `samples/18_local_modules/`,
-`samples/19_rust_module/`, `samples/20_c_module/`, `samples/21_everything/`,
+Working examples in the repo: `examples/interop/imports/`, `examples/tour/18_local_modules/`,
+`examples/tour/19_rust_module/`, `examples/tour/20_c_module/`, `examples/tour/21_everything/`,
 `tests/interop/rust_c/`, `tests/interop/rich/` (slices, structs, callbacks, crates, C arrays and
 structs), `tests/interop/buffers/` (`array.array`, `bytes`).

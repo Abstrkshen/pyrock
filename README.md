@@ -151,7 +151,7 @@ print(json.dumps({"area": geometry.circle_area(2.0)}))
 Arguments are converted with checks: a Python int that doesn't fit a C `int` raises
 `OverflowError`, and a `str` containing NUL raises `ValueError`. Values returned from Python
 (e.g. `json.loads("12")`) can be passed to Rust or C, and they are unboxed with the same
-checks. See [examples/imports/](examples/imports/).
+checks. See [examples/interop/imports/](examples/interop/imports/).
 
 ## Type annotations
 
@@ -201,7 +201,7 @@ count: int = json.loads("41")        # native i64 from here on
   while it waits. Programs without boundaries don't link libpython at all.
 
 ```console
-$ pyrock explain examples/generics.py
+$ pyrock explain examples/tour/06_generics.py
 Inferred generic signatures
   add(A, B) -> R where Add(A, B, R)
   twice(A) -> R where Add(A, A, R)
@@ -214,20 +214,24 @@ Specializations (reachable from module entry)
   twice(x: float) -> float          native  twice__float      effects: pure
   add(a: str, b: str) -> str        native  add__str_str      effects: pure
   ...
-$ pyrock run examples/generics.py
+$ pyrock run examples/tour/06_generics.py
 ```
 
-## Examples and demos
+## Examples
 
-[examples/](examples/) has small programs (native code, Rust and C modules, Python packages,
-an AI-agent server, raylib games, live YOLO vision); its README covers their setup. Three
-small apps in [demos/](demos/), each with a README, are checked in CI:
+Everything runnable is in [examples/](examples/), grouped by what it shows; its README is
+the index and covers setup:
 
-| Demo | What it shows |
+| Folder | What's in it |
 |---|---|
-| [backend](demos/backend/) | A JSON API on asyncio: native store, routing and validation; stdlib sockets and `json` through CPython |
-| [ai](demos/ai/) | A BPE tokenizer in Python, a bigram model in Rust (`ngram.rs`), sampling in C (`sampling.c`); no CPython at all (`--mode native-only`) |
-| [gui](demos/gui/) | 300 colliding balls: native physics (17x CPython) drawn with raylib |
+| [tour/](examples/tour/) | 23 small numbered programs, one idea each, checked against CPython |
+| [interop/](examples/interop/) | Importing `.rs`, `.c` and `.py` files, and CPython modules |
+| [packages/](examples/packages/) | pip packages (`huggingface_hub`, LangChain) through CPython |
+| [apps/](examples/apps/) | A JSON API on asyncio, an AI pipeline with no CPython (tokenizer in Python, model in Rust, sampling in C), a raylib physics sim, an AI-agent server |
+| [graphics/](examples/graphics/) | raylib windows, a platformer, live YOLO vision with OpenCV and ONNX Runtime |
+| [playground/](examples/playground/) | The [browser playground](https://abstrkshen.github.io/pyrock/play.html)'s programs, including pictures and animations drawn from printed SVG, HTML and PPM |
+
+Speed measurements are in [benchmarks/](benchmarks/) and [docs/status.md](docs/status.md).
 
 ## How it works
 
@@ -253,9 +257,10 @@ Python source ─► CPython ast (JSON protocol v1) ─► scope-resolved HIR
 ```console
 cargo test --workspace                 # unit + differential + golden + diagnostics
 UPDATE_SNAPSHOTS=1 cargo test -p pyrock --test suites   # re-bless snapshots
-bash samples/run_all.sh                # every sample vs CPython
-bash demos/run_all.sh                  # the demo apps vs their expected output
-bash scripts/readme_check.sh           # every sample and demo README's commands, verbatim
+bash examples/tour/run_all.sh          # every tour program vs CPython
+bash examples/apps/run_all.sh          # the apps vs their expected output
+bash scripts/readme_check.sh           # every example README's commands, verbatim
+bash scripts/build_site.sh             # the website's playground (compiler as wasm, programs)
 ```
 
 Progress towards compiling real backend, AI and GUI apps is tracked in

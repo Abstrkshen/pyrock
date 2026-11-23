@@ -1,13 +1,13 @@
 name: pages
 
 # Publishes site/ to the gh-pages branch, which GitHub Pages serves at
-# https://abstrkshen.github.io/pyrock/ . The playground's compiler
-# (site/pyrock.wasm) is built here from crates/playground, so a compiler change
-# redeploys it.
+# https://abstrkshen.github.io/pyrock/ . scripts/build_site.sh adds the
+# playground's compiler (crates/playground as WebAssembly) and its programs
+# (examples/playground), so a change to either redeploys the site.
 on:
   push:
     branches: [main]
-    paths: ["site/**", "crates/**", "Cargo.lock", ".github/workflows/pages.yml"]
+    paths: ["site/**", "crates/**", "examples/playground/**", "scripts/build_site.sh", "Cargo.lock", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
@@ -25,10 +25,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - name: Build the playground compiler
-        run: |
-          cargo build --release --locked -p pyrock-playground --target wasm32-unknown-unknown
-          cp target/wasm32-unknown-unknown/release/pyrock_playground.wasm site/pyrock.wasm
+      - name: Build the playground (compiler as WebAssembly, example programs)
+        run: bash scripts/build_site.sh
       - name: Push site/ to gh-pages
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
