@@ -259,16 +259,22 @@
   // The programs live in examples/playground/ (scripts/build_site.sh copies them
   // to site/examples/). A first line `# mode: native-only` selects the mode.
   var EXAMPLES = [
-    { file: "generics.py", title: "One function, three types", group: "The compiler" },
-    { file: "classes.py", title: "Classes and lists", group: "The compiler" },
-    { file: "generators.py", title: "Generators, dicts, lambdas", group: "The compiler" },
-    { file: "json_boundaries.py", title: "A Python package (json)", group: "The compiler" },
-    { file: "type_error.py", title: "A bug pyrock catches", group: "The compiler" },
-    { file: "svg_chart.py", title: "SVG: a bar chart", group: "Pictures from printed output" },
-    { file: "svg_bouncing_balls.py", title: "SVG frames: bouncing balls", group: "Pictures from printed output" },
-    { file: "ppm_mandelbrot.py", title: "PPM image: the Mandelbrot set", group: "Pictures from printed output" },
-    { file: "ppm_game_of_life.py", title: "PPM frames: Game of Life", group: "Pictures from printed output" },
-    { file: "html_report.py", title: "HTML: an orders report", group: "Pictures from printed output" },
+    { file: "generics.py", title: "One function, three types", group: "Start here" },
+    { file: "classes.py", title: "Classes and lists", group: "Start here" },
+    { file: "generators.py", title: "Generators, dicts, lambdas", group: "Start here" },
+    { file: "json_boundaries.py", title: "A Python package (json)", group: "Start here" },
+    { file: "type_error.py", title: "A bug pyrock catches", group: "Start here" },
+    { file: "ppm_raytracer.py", title: "Ray tracer (PPM image)", group: "Bigger programs" },
+    { file: "lisp_interpreter.py", title: "A Lisp interpreter", group: "Bigger programs" },
+    { file: "ppm_maze_search.py", title: "Maze generation and search (PPM frames)", group: "Bigger programs" },
+    { file: "svg_boids.py", title: "Flocking birds (SVG frames)", group: "Bigger programs" },
+    { file: "svg_double_pendulum.py", title: "Chaos: two double pendulums (SVG frames)", group: "Bigger programs" },
+    { file: "svg_lsystem_plant.py", title: "L-system plant (SVG)", group: "Bigger programs" },
+    { file: "svg_chart.py", title: "SVG: a bar chart", group: "Printing pictures" },
+    { file: "svg_bouncing_balls.py", title: "SVG frames: bouncing balls", group: "Printing pictures" },
+    { file: "ppm_mandelbrot.py", title: "PPM image: the Mandelbrot set", group: "Printing pictures" },
+    { file: "ppm_game_of_life.py", title: "PPM frames: Game of Life", group: "Printing pictures" },
+    { file: "html_report.py", title: "HTML: an orders report", group: "Printing pictures" },
   ];
 
   var $ = function (id) { return document.getElementById(id); };
@@ -419,6 +425,7 @@
     anim = { frames: [], i: 0, playing: false, raf: 0, last: 0, urls: [] };
     stage.textContent = "";
     $("pv-count").textContent = "";
+    $("pv-kind").textContent = "";
     preview.hidden = true;
     player.hidden = true;
     $("output").hidden = false;

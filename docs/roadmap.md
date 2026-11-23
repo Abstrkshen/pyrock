@@ -152,6 +152,11 @@ Language coverage (ordered by how much code each one blocks in the standard libr
 
 Known bugs:
 
+- [ ] `isinstance` doesn't narrow a union of classes: P308 false warnings, `range(len(v.xs))` rejected (P301), and in a larger program invalid Rust that rustc rejects (`tests/known_bugs/isinstance_union_*.py`)
+- [ ] `zip` over a class's list attribute and a parameter collapses inference for the whole program to `object` (`tests/known_bugs/zip_collapses_inference.py`)
+- [ ] Overridden methods across a class hierarchy collapse inference to `object` (`tests/known_bugs/method_overrides_collapse.py`)
+- [ ] Generator expressions cost about 6 µs per creation natively (slower than CPython in `" ".join(... for ...)` hot loops)
+
 - [x] `globals()` panicked at runtime; `eval`, `exec` and `locals()` raised
       `SystemError: frame does not exist` (compiled code has no Python frame)
 - [x] `examples/raylib-breakout`: the camera offset reached `draw_sky` as `object`
@@ -1116,3 +1121,16 @@ runnable ones print the same as CPython.
   got a README. Verified: `cargo test --workspace`, `examples/tour/run_all.sh` (23/23),
   `examples/apps/run_all.sh` (3/3), `CI=1 scripts/readme_check.sh` (11 passed, 6 skipped),
   the playground in headless Chrome, and every GitHub link on the home page.
+
+### Bigger playground programs (2026-11-23)
+
+* Six more programs in `examples/playground/`, all `--mode native-only`, each a
+  differential test: a ray tracer (PPM), a Lisp interpreter (classes as one Rust enum,
+  closures, recursion), maze generation with an animated breadth-first search (PPM
+  frames), flocking birds (SVG frames), two chaotic double pendulums (SVG frames) and an
+  L-system plant (SVG). Their headers give measured times (for example the ray tracer:
+  30 ms compiled with `--release`, 321 ms in CPython 3.12). The playground lists them as
+  "Bigger programs".
+* Writing them found four compiler problems, now under "Known bugs" above with repros in
+  `tests/known_bugs/`; the programs work around them.
+
