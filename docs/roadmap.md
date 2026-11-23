@@ -902,8 +902,10 @@ runnable ones print the same as CPython.
   abstract method(s) 'a', 'b'` at that point; classes are closed, so this is decided at compile
   time (`Module::unimplemented_abstracts`).
 * `abc` joined the modules whose imports are dropped when only used this way, so such
-  programs need no CPython. Classes are now declared after imports are bound (needed to
-  recognise `ABC`; also lets a base class come from an imported module's re-export).
+  programs need no CPython. `ABC`, `ABCMeta` and `abstractmethod` are recognised from the
+  module's own `abc` imports, because classes are declared before imports resolve (a module
+  imported back by a package import cycle must already expose its classes; declaring them
+  later dropped `requests` from 68% to 62%).
 * Test: `tests/differential/abstract_classes.py` (native-only).
 
 ### Phase 8: dataclass options (2026-11-23)

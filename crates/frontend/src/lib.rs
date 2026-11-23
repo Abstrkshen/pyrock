@@ -356,6 +356,9 @@ struct Lowerer<'l> {
     /// Lowering the body of this enum class: `Color("RED", 1)` there creates
     /// a member; elsewhere `Color(v)` looks one up.
     in_enum_body: Option<ClassId>,
+    /// Local names of `abc.ABC` / `ABCMeta` / `abstractmethod` (by name) and of
+    /// the `abc` module itself (key ""), from this module's imports.
+    abc_names: HashMap<String, String>,
     diags: Vec<Diagnostic>,
 }
 
@@ -598,6 +601,30 @@ fn walrus_targets(v: &Value, out: &mut Vec<String>) {
     go(v, out, true)
 }
 
+/// Names a module binds to `abc`'s members (`from abc import ABC as B` maps
+/// `B` to `ABC`) and to the `abc` module itself (mapped to "").
+fn abc_imports(body: &[Value]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for st in body {
+        match ty(st) {
+            "ImportFrom" if st["module"] == "abc" && st["level"].as_u64().unwrap_or(0) == 0 => {
+                for a in arr(st, "names") {
+                    out.insert(a["asname"].as_str().unwrap_or(sstr(a, "name")).to_string(), sstr(a, "name").to_string());
+                }
+            }
+            "Import" => {
+                for a in arr(st, "names") {
+                    if sstr(a, "name") == "abc" {
+                        out.insert(a["asname"].as_str().unwrap_or("abc").to_string(), String::new());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// The names an `import` statement binds (`import a.b` binds `a`).
 fn import_names(st: &Value) -> Vec<String> {
     arr(st, "names")
@@ -710,6 +737,7 @@ impl<'l> Lowerer<'l> {
             native_imported: HashSet::new(),
             missing_imports: HashMap::new(),
             in_enum_body: None,
+            abc_names: HashMap::new(),
             diags: vec![],
         }
     }
@@ -764,6 +792,15 @@ impl<'l> Lowerer<'l> {
                 }
             }
         }
+        // Pass 1a': discover classes (in order: bases must be defined earlier),
+        // before imports, so a module importing this one back while it loads
+        // (a package import cycle) already sees its classes.
+        self.abc_names = abc_imports(body);
+        for st in body {
+            if ty(st) == "ClassDef" {
+                self.declare_class(st);
+            }
+        }
         // Pass 1b: resolve top-level imports (they are visible inside
         // functions). Imports in blocks and functions are lowered in place
         // (`lower_nested_import`).
@@ -800,13 +837,6 @@ impl<'l> Lowerer<'l> {
             if self.native_import_target(st) {
                 self.resolve_import(st);
                 block_bound.extend(import_names(st));
-            }
-        }
-        // Pass 1c: discover classes (in order: bases must be defined earlier),
-        // once imports are bound (`class C(mod.Base)`, `ABC`, `@abstractmethod`).
-        for st in body {
-            if ty(st) == "ClassDef" {
-                self.declare_class(st);
             }
         }
         self.ld.unit_bindings[self.unit] = self.bindings.clone();
@@ -1404,14 +1434,9 @@ impl<'l> Lowerer<'l> {
     /// `name` from the `abc` module: `ABC` / `abc.ABC` (with `from abc import
     /// ABC` / `import abc`).
     fn is_abc_name(&self, v: &Value, name: &str) -> bool {
-        let slot_is = |b: Option<&Binding>, f: &dyn Fn(&SlotKind) -> bool| matches!(b, Some(Binding::Slot(s)) if f(&self.ld.slots[*s].kind));
         match ty(v) {
-            "Name" => sstr(v, "id") == name && slot_is(self.bindings.get(name), &|k| matches!(k, SlotKind::From { module, attr } if module == "abc" && attr == name)),
-            "Attribute" => {
-                sstr(v, "attr") == name
-                    && ty(&v["value"]) == "Name"
-                    && slot_is(self.bindings.get(sstr(&v["value"], "id")), &|k| matches!(k, SlotKind::Import { module, .. } if module == "abc"))
-            }
+            "Name" => self.abc_names.get(sstr(v, "id")).is_some_and(|n| n == name),
+            "Attribute" => sstr(v, "attr") == name && ty(&v["value"]) == "Name" && self.abc_names.get(sstr(&v["value"], "id")).is_some_and(|n| n.is_empty()),
             _ => false,
         }
     }
