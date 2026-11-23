@@ -22,7 +22,7 @@ ones are `match`, `type X = ...` and `except*`. Measured on code as it is, 62% o
 standard library's functions and methods are accepted, and 75%, 75% and 44% of those in the
 `requests`, `huggingface_hub` and `langchain_core` packages (each measured in place, with
 their relative imports). The main gaps left are other decorators (`functools`,
-library-specific ones), CPython base classes (`NamedTuple`, `pydantic`, `Protocol`), mixins
+library-specific ones), CPython base classes (`pydantic`, `Protocol`), mixins
 and computed class-body assignments.
 Details and the ranked blockers: [coverage.md](coverage.md).
 
@@ -114,7 +114,7 @@ next to the program; compiled dependencies are cached in `~/.cache/pyrock/target
 
 ## Not supported yet
 
-* Classes with a CPython base class (`NamedTuple`, `dict`, ...), multiple inheritance,
+* Classes with a CPython base class (`dict`, `pydantic.BaseModel`, ...), multiple inheritance,
   metaclasses, class decorators other than `@dataclass`, method decorators other than
   `@property`/`@staticmethod`/`@classmethod` (a module using them is imported through
   CPython instead, warning P220).

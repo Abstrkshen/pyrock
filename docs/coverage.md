@@ -11,7 +11,7 @@ covered.
   `ast` module compile natively (table below). The 3 missing are `match`, `type X = ...`
   and `except*`. Some forms of supported nodes are missing too: `class` inside a function
   or `if`, `import *`, complex numbers, `...` as a value, and classes with a CPython base
-  class (`NamedTuple`, `dict`, ...; `Exception`, `Enum` and `ABC` subclasses are fine),
+  class (`dict`, `threading.Thread`, ...; `Exception`, `Enum`, `NamedTuple` and `ABC` subclasses are fine),
   multiple bases or another metaclass.
 * **Values:** everything a program builds itself (numbers, strings, lists, dicts, sets,
   tuples, classes, closures, generators, coroutines) is native. Values from CPython imports

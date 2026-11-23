@@ -363,7 +363,7 @@ struct Lowerer<'l> {
 }
 
 /// Modules whose imports only matter to type checkers.
-const ANNOTATION_ONLY_MODULES: &[&str] = &["typing", "typing_extensions", "__future__", "dataclasses", "abc", "enum"];
+const ANNOTATION_ONLY_MODULES: &[&str] = &["typing", "typing_extensions", "__future__", "dataclasses", "abc", "enum", "functools"];
 
 /// Map an annotation to a type pyrock can use. Anything else (generics,
 /// unions, user classes) is accepted but does not constrain the value.

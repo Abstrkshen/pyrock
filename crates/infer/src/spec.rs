@@ -1212,6 +1212,20 @@ impl Ctx<'_, '_> {
         }
     }
 
+    /// A native instance passed to a builtin that iterates its argument
+    /// (`list(p)`, `sum(p)`): the builtin sees what its `__iter__` returns.
+    /// `None` while that `__iter__`'s type is still unknown (the call must
+    /// not be classified as a CPython call meanwhile: escapes are permanent).
+    fn iter_class_arg(&mut self, builtin: &str, arg: &Expr, t: Ty) -> Option<Ty> {
+        if !ITER_BUILTINS.contains(&builtin) || !class_like(t) || t.union_members().is_some() {
+            return Some(t);
+        }
+        match t.class_id().and_then(|c| self.prog.module.find_method(c, "__iter__").map(|_| ())) {
+            Some(()) => self.dunder(arg, t, "__iter__", &[]).flatten(),
+            None => Some(t),
+        }
+    }
+
     /// The type a builtin sees for an argument: records are dicts, except to
     /// the builtins implemented on records directly.
     fn record_arg(&mut self, builtin: &str, arg: &Expr, t: Ty) -> Ty {
@@ -1879,6 +1893,7 @@ impl Ctx<'_, '_> {
                 let kwtys: Option<Vec<(String, Ty)>> = kwargs.iter().map(|(k, v)| self.expr(v).map(|t| (k.clone(), t))).collect();
                 let (Some(a), Some(k)) = (argtys, kwtys) else { return CallClass::Pending };
                 let a: Vec<Ty> = a.iter().zip(args).map(|(t, x)| self.record_arg(name, x, *t)).collect();
+                let Some(a) = a.iter().zip(args).map(|(t, x)| self.iter_class_arg(name, x, *t)).collect::<Option<Vec<Ty>>>() else { return CallClass::Pending };
                 if name == "isinstance" && a.len() == 2 {
                     // Native classes: decided by the class hierarchy.
                     let natives: Option<Vec<ClassId>> = match &args[1].kind {
@@ -2724,6 +2739,18 @@ impl Ctx<'_, '_> {
             }
             ExprKind::Unpack { value, n, star } => {
                 let vt = self.expr(value)?;
+                // A native instance unpacks through its `__iter__`.
+                let vt = if class_like(vt) {
+                    match self.dunder(value, vt, "__iter__", &[]) {
+                        Some(r) => r?,
+                        None => {
+                            self.report(Diagnostic::error("P301", e.span, format!("cannot unpack non-iterable {vt} object")).note("CPython would raise TypeError here"));
+                            return None;
+                        }
+                    }
+                } else {
+                    vt
+                };
                 let n = *n;
                 let unpack_err = |got: usize| -> String {
                     match star {
@@ -3047,6 +3074,7 @@ impl Ctx<'_, '_> {
             CallClass::Builtin(name) if self.uses_fn_value(&name, args, kwargs) => self.higher_order(e, &name, args, kwargs),
             CallClass::Builtin(name) => {
                 let a: Vec<Ty> = args.iter().map(|x| self.expr(x).map(|t| self.record_arg(&name, x, t))).collect::<Option<_>>()?;
+                let a: Vec<Ty> = a.iter().zip(args).map(|(t, x)| self.iter_class_arg(&name, x, *t)).collect::<Option<_>>()?;
                 let k: Vec<(String, Ty)> = kwargs.iter().map(|(n, v)| self.expr(v).map(|t| (n.clone(), t))).collect::<Option<_>>()?;
                 if a.iter().any(|t| t.is_never()) {
                     return Some(Ty::never());
@@ -3254,3 +3282,6 @@ fn record_with(fs: &[Field], k: &str, t: Ty) -> Option<Ty> {
     }
     Some(Ty::record(out))
 }
+
+/// Builtins that iterate their arguments.
+pub const ITER_BUILTINS: &[&str] = &["list", "tuple", "set", "frozenset", "sorted", "sum", "min", "max", "any", "all", "enumerate", "zip", "dict", "reversed"];

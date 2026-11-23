@@ -83,7 +83,7 @@ Not supported in either mode: classes with a CPython base class or a metaclass (
 an imported `.py`, which falls back to CPython),
 `import *`.
 
-Not supported either: `match`, `NamedTuple` subclasses,
+Not supported either: `match`, classes with a CPython base class such as `dict` or `pydantic.BaseModel`,
 multiple inheritance, method decorators other than `@property`/`@staticmethod`/`@classmethod`.
 On the standard library as it is, 62% of functions are accepted (`docs/coverage.md` in the repo).
 

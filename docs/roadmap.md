@@ -120,11 +120,13 @@ Language coverage (ordered by how much code each one blocks in the standard libr
 - [x] Functions defined inside module-level `if`/`try` blocks
 - [x] `@abstractmethod` with `ABC` / `metaclass=ABCMeta`
 - [x] `@dataclass(...)` options (frozen, order, eq, repr, kw_only, slots)
-- [ ] `@functools.cached_property`, `@lru_cache` on methods, `@contextmanager`
+- [x] `@functools.cached_property`
+- [ ] `@lru_cache` on methods, `@contextmanager` on methods
 - [x] `del name`, `for`/`while ... else`, `:=`, `[*a, *b]`, `{**d}`, `...` placeholders
 - [ ] Computed class-body assignments, `del` of a function or import name, `class` inside a function or block
 - [x] `Enum`, `IntEnum`, `StrEnum`, `auto()`
-- [ ] `NamedTuple` and `TypedDict` classes; multiple inheritance (mixins)
+- [x] `typing.NamedTuple` classes
+- [ ] `TypedDict`, `collections.namedtuple`; multiple inheritance (mixins)
 - [x] Packages next to the program, relative imports, re-exported names
 - [ ] `match`
 - [ ] Arbitrary-precision integers (`Project.md` §6 and M4; today results beyond i64 raise `OverflowError`)
@@ -953,3 +955,27 @@ runnable ones print the same as CPython.
 * Coverage: `requests` 68.2% → 74.9%, `huggingface_hub` 73.1% → 75.0%, `langchain_core`
   41.4% → 43.5%; stdlib unchanged at 62.4%.
 * Test: `tests/differential/typing_decorators.py` (native-only).
+
+### Phase 8: rename to pyrock (2026-11-23)
+
+* The project is now **pyrock** (the name pyfast is taken): crates (`pyrock-*`), the binary,
+  `.pyrock/` output folders, `~/.cache/pyrock`, `PYROCK_TARGET_DIR` / `PYROCK_RUNTIME`,
+  `// pyrock:` directives in `.rs`/`.c` files, docs, the skill (`skills/pyrock`, linked into
+  the Claude Code, Codex and Cursor skill folders) and the user samples. The repository
+  directory keeps its path. Installed globally with `perch install` as `pyrock`.
+
+### Phase 8: cached_property, NamedTuple, iterating native instances (2026-11-23)
+
+* `@functools.cached_property` (by name or `functools.cached_property`) is rewritten by the
+  AST dump into a property that computes once per instance and stores the value in an
+  instance attribute.
+* `class P(typing.NamedTuple)` is rewritten into a frozen, ordered dataclass with `len`,
+  indexing (negative too, `IndexError` past the end), iteration, `_asdict()` and `_fields`.
+  Equality with plain tuples and `isinstance(p, tuple)` are not supported.
+* Unpacking a native instance (`x, y = p`) and passing one to a builtin that iterates its
+  argument (`list`, `tuple`, `sorted`, `sum`, `min`, `max`, `zip`, ...) go through its
+  `__iter__` natively. Such a call stays pending until `__iter__`'s type is known, instead
+  of being sent to CPython in an early inference round (which made the class escape and
+  its field types `object` for good).
+* `functools` joined the imports dropped when unused after rewriting.
+* Tests: `tests/differential/cached_property.py`, `namedtuples.py` (native-only).

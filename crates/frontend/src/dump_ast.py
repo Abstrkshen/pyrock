@@ -217,7 +217,113 @@ def rewrite_enum(cls, kind, names, modules):
     return cls
 
 
+def cached_property_names(tree):
+    """Local names of functools.cached_property, and of the functools module."""
+    names, modules = set(), set()
+    for st in tree.body:
+        if isinstance(st, ast.ImportFrom) and st.module == "functools" and st.level == 0:
+            for a in st.names:
+                if a.name == "cached_property":
+                    names.add(a.asname or a.name)
+        elif isinstance(st, ast.Import):
+            for a in st.names:
+                if a.name == "functools":
+                    modules.add(a.asname or "functools")
+    return names, modules
+
+
+CACHED_TEMPLATE = """
+class _M:
+    @property
+    def {N}(self):
+        try:
+            return self._pyrock_cached_{N}
+        except AttributeError:
+            v = self._pyrock_compute_{N}()
+            self._pyrock_cached_{N} = v
+            return v
+"""
+
+
+def rewrite_cached_properties(tree):
+    """`@cached_property def f(self)` as a property that computes once per
+    instance and stores the value in an instance attribute (reading it before
+    it is set raises AttributeError, which starts the computation)."""
+    names, modules = cached_property_names(tree)
+    if not names and not modules:
+        return
+
+    def is_cached(d):
+        return (isinstance(d, ast.Name) and d.id in names) or (
+            isinstance(d, ast.Attribute) and d.attr == "cached_property" and isinstance(d.value, ast.Name) and d.value.id in modules)
+
+    for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+        body = []
+        for st in cls.body:
+            if isinstance(st, ast.FunctionDef) and len(st.decorator_list) == 1 and is_cached(st.decorator_list[0]):
+                prop = ast.parse(CACHED_TEMPLATE.format(N=st.name)).body[0].body[0]
+                st.name = "_pyrock_compute_" + st.name
+                st.decorator_list = []
+                body += relocate([prop], st) + [st]
+            else:
+                body.append(st)
+        cls.body = body
+
+
+def namedtuple_names(tree):
+    names, modules = set(), set()
+    for st in tree.body:
+        if isinstance(st, ast.ImportFrom) and st.module == "typing" and st.level == 0:
+            for a in st.names:
+                if a.name == "NamedTuple":
+                    names.add(a.asname or a.name)
+        elif isinstance(st, ast.Import):
+            for a in st.names:
+                if a.name == "typing":
+                    modules.add(a.asname or "typing")
+    return names, modules
+
+
+def rewrite_namedtuples(tree):
+    """`class P(NamedTuple)` as a frozen, ordered dataclass that also behaves
+    like its tuple: len, indexing, iteration (unpacking), _asdict, _fields."""
+    names, modules = namedtuple_names(tree)
+    if not names and not modules:
+        return
+
+    def is_nt(b):
+        return (isinstance(b, ast.Name) and b.id in names) or (
+            isinstance(b, ast.Attribute) and b.attr == "NamedTuple" and isinstance(b.value, ast.Name) and b.value.id in modules)
+
+    for cls in tree.body:
+        if not (isinstance(cls, ast.ClassDef) and len(cls.bases) == 1 and is_nt(cls.bases[0]) and not cls.keywords and not cls.decorator_list):
+            continue
+        fields = [st.target.id for st in cls.body if isinstance(st, ast.AnnAssign) and isinstance(st.target, ast.Name)]
+        getitem = "".join(f"        if i == {k}:\n            return self.{f}\n" for k, f in enumerate(fields))
+        iters = "".join(f"        yield self.{f}\n" for f in fields) or "        return\n        yield\n"
+        extra = ast.parse(f"""
+class _M:
+    _fields = {tuple(fields)!r}
+    def __len__(self):
+        return {len(fields)}
+    def __getitem__(self, i):
+        if i < 0:
+            i += {len(fields)}
+{getitem}        raise IndexError("tuple index out of range")
+    def __iter__(self):
+{iters}
+    def _asdict(self):
+        return {{{", ".join(f"{f!r}: self.{f}" for f in fields)}}}
+""").body[0].body
+        dec = ast.parse("dataclass(frozen=True, order=True)", mode="eval").body
+        cls.bases = []
+        cls.decorator_list = relocate([dec], cls)
+        cls.body = cls.body + relocate(extra, cls)
+
+
 def rewrite(tree):
+    rewrite_namedtuples(tree)
+    rewrite_cached_properties(tree)
     names, modules = enum_aliases(tree)
     if not names and not modules:
         return tree

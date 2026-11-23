@@ -647,6 +647,20 @@ impl FnEmitter<'_, '_> {
     /// A CPython builtin with a native implementation.
     pub(crate) fn native_builtin(&mut self, name: &str, args: &[Expr], kwargs: &[(String, Expr)], t: Ty) -> String {
         let vals: Vec<(String, Ty)> = args.iter().map(|a| self.expr(a)).collect();
+        // A native instance iterated by the builtin: through its `__iter__`.
+        let vals: Vec<(String, Ty)> = vals
+            .into_iter()
+            .map(|(c, vt)| {
+                let iterable = pyrock_infer::spec::ITER_BUILTINS.contains(&name) && pyrock_infer::spec::class_like(vt) && vt.union_members().is_none();
+                match vt.class_id().filter(|_| iterable).and_then(|cl| self.prog.module.find_method(cl, "__iter__").cloned()) {
+                    Some(m) => {
+                        let rt = self.prog.spec(&pyrock_infer::spec::SpecKey { func: m.func, args: vec![vt] }).and_then(|s| self.prog.call_result(s)).unwrap_or(Ty::Obj);
+                        (self.dunder((c, vt), "__iter__", vec![]).expect("__iter__"), rt)
+                    }
+                    None => (c, vt),
+                }
+            })
+            .collect();
         // Records (not places) passed to builtins that need a dict: a copy.
         let vals: Vec<(String, Ty)> = vals
             .into_iter()
@@ -835,6 +849,16 @@ impl FnEmitter<'_, '_> {
     /// `a, *b, c = value`: a fixed tuple of the unpacked items.
     pub(crate) fn unpack(&mut self, value: &Expr, n: usize, star: Option<usize>, t: Ty) -> String {
         let (v, vt) = self.expr(value);
+        // A native instance unpacks through its `__iter__`.
+        let (v, vt) = if pyrock_infer::spec::class_like(vt) {
+            let call = self.dunder((v, vt), "__iter__", vec![]).expect("__iter__");
+            let c = vt.class_id().expect("one class");
+            let m = self.prog.module.find_method(c, "__iter__").expect("__iter__");
+            let rt = self.prog.spec(&pyrock_infer::spec::SpecKey { func: m.func, args: vec![vt] }).and_then(|s| self.prog.call_result(s)).unwrap_or(Ty::Obj);
+            (call, rt)
+        } else {
+            (v, vt)
+        };
         let items = t.tuple_items().unwrap();
         if let Some(ts) = vt.tuple_items() {
             let Some(k) = star else { return v };

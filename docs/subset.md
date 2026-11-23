@@ -70,7 +70,8 @@ These constructs become plain Rust with no Python objects involved:
   (`__repr__`, `__str__`, `__eq__`/`__ne__`, `__lt__`/`__le__`/`__gt__`/`__ge__`, `__len__`,
   `__bool__`, `__hash__`, `__contains__`, `__getitem__`/`__setitem__`, `__iter__` returning a
   native iterable, `__add__`/`__radd__` and the other arithmetic dunders, `__neg__`, ...),
-  enums (`Enum`, `IntEnum`, `StrEnum`, `auto()`: members, `C(value)`, `C["NAME"]`, iteration,
+  `typing.NamedTuple` classes (fields, defaults, ordering, indexing, unpacking, `_asdict`),
+  `@functools.cached_property`, enums (`Enum`, `IntEnum`, `StrEnum`, `auto()`: members, `C(value)`, `C["NAME"]`, iteration,
   `len`, `in`, `name`/`value`, CPython's repr/str), abstract base classes (`ABC`, `metaclass=ABCMeta`, `@abstractmethod`, with CPython's
   `TypeError` on instantiating one), `@dataclass` (fields, literal defaults, `field(default_factory=list|dict|set)`,
   `__post_init__`), single inheritance with `super()`, `isinstance` with classes, and user
@@ -210,7 +211,7 @@ in `explain`. Calling one gives P150. A struct handle passed to CPython is P231.
 Not yet supported in either mode (P100; in an imported `.py`, hybrid mode imports the
 whole module through CPython instead, P220):
 
-* classes with a CPython base class (other than `Enum`/`IntEnum`/`StrEnum`/`ABC`), multiple inheritance, metaclasses other than `ABCMeta`,
+* classes with a CPython base class (other than `Enum`/`IntEnum`/`StrEnum`/`ABC`/`NamedTuple`), multiple inheritance, metaclasses other than `ABCMeta`,
   class decorators other than `@dataclass`, `@dataclass(unsafe_hash=...)`, adding class
   attributes after the class statement;
 * `f(*xs)` where `xs` is a list (not a tuple of known length) filling fixed parameters, and
