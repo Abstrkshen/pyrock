@@ -1,3 +1,7 @@
+# mode: native-only
+# Was tests/known_bugs/method_overrides_collapse.py: calls on a receiver of type Never
+# (before any call reached the function) were bridged, so their arguments escaped to
+# CPython and inference collapsed to object.
 # A small Lisp interpreter: tokenizer, parser, environments, lambda with
 # closures, define, set!, if and recursion. Each kind of Lisp value is a Python
 # class with its own methods; pyrock compiles them to one Rust enum.

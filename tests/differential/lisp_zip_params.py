@@ -1,3 +1,7 @@
+# mode: native-only
+# Was tests/known_bugs/zip_collapses_inference.py: `zip(f.params, args)` in a function
+# first analyzed before any call reached it (arguments of type Never) was bridged, so
+# `args` escaped to CPython and inference gave up on the whole program.
 # A small Lisp interpreter: tokenizer, parser, environments, lambda with
 # closures, define, set!, if, and recursion. Lisp values are Python classes,
 # which pyrock compiles to one Rust enum.

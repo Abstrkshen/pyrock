@@ -1532,6 +1532,17 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                         let ExprKind::GetAttr { obj, .. } = &func.kind else { unreachable!() };
                         self.record_get(obj, key, args.get(1), t)
                     }
+                    CallClass::Unreachable => {
+                        let mut parts = Vec::new();
+                        if let ExprKind::GetAttr { obj, .. } = &func.kind {
+                            parts.push(self.expr(obj).0);
+                        }
+                        for a in args.iter().chain(kwargs.iter().map(|(_, v)| v)) {
+                            parts.push(self.expr(a).0);
+                        }
+                        let lets: String = parts.iter().map(|c| format!("let _ = {c}; ")).collect();
+                        format!("{{ {lets}unreachable!(\"a call with an argument of no possible value\") }}")
+                    }
                     CallClass::Bridge | CallClass::Pending => unreachable!(),
                 }
             }

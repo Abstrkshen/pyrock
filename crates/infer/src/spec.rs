@@ -1004,6 +1004,8 @@ pub enum CallClass {
     Bridge,
     /// Not decidable yet (argument types still unknown in this pass).
     Pending,
+    /// A receiver or argument has type `Never`: the call can't be reached.
+    Unreachable,
     /// A method of a natively compiled class.
     UserMethod { func: FuncId, kind: MethodKind },
     /// `cls(...)` on a class object value.
@@ -1977,6 +1979,25 @@ impl Ctx<'_, '_> {
 
     /// Classify a `CallObj` node (method / native builtin / bridge).
     fn classify(&mut self, func: &Expr, args: &[Expr], kwargs: &[(String, Expr)]) -> CallClass {
+        let c = self.classify_inner(func, args, kwargs);
+        // A receiver or argument of type `Never` has no value (a parameter of
+        // a function no call has reached yet in this pass, an item of an empty
+        // container): the call can't happen. Bridging it would make its
+        // arguments escape to CPython for good.
+        if c == CallClass::Bridge {
+            let recv = match &func.kind {
+                ExprKind::GetAttr { obj, .. } => self.expr(obj),
+                _ => None,
+            };
+            let never = recv.is_some_and(|t| t.is_never()) || args.iter().chain(kwargs.iter().map(|(_, v)| v)).any(|a| self.expr(a).is_some_and(|t| t.is_never()));
+            if never {
+                return CallClass::Unreachable;
+            }
+        }
+        c
+    }
+
+    fn classify_inner(&mut self, func: &Expr, args: &[Expr], kwargs: &[(String, Expr)]) -> CallClass {
         // `math.sqrt(x)` on native numbers.
         if let Some(name) = self.prog.math_name(func) {
             if !args.iter().any(|a| matches!(a.kind, ExprKind::Starred(_))) && kwargs.iter().all(|(k, _)| k != "**") {
@@ -3212,6 +3233,12 @@ impl Ctx<'_, '_> {
                     self.expr(a);
                 }
                 None
+            }
+            CallClass::Unreachable => {
+                for a in args.iter().chain(kwargs.iter().map(|(_, v)| v)) {
+                    self.expr(a);
+                }
+                Some(Ty::never())
             }
             CallClass::StaticBool(_) => Some(Ty::Bool),
             CallClass::Math(name) => {

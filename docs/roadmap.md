@@ -153,8 +153,8 @@ Language coverage (ordered by how much code each one blocks in the standard libr
 Known bugs:
 
 - [x] `isinstance` doesn't narrow a union of classes: P308 false warnings, `range(len(v.xs))` rejected (P301), and in a larger program invalid Rust that rustc rejects (fixed; `tests/differential/isinstance_narrowing.py`)
-- [ ] `zip` over a class's list attribute and a parameter collapses inference for the whole program to `object` (`tests/known_bugs/zip_collapses_inference.py`)
-- [ ] Overridden methods across a class hierarchy collapse inference to `object` (`tests/known_bugs/method_overrides_collapse.py`)
+- [x] `zip` over a class's list attribute and a parameter collapses inference for the whole program to `object` (fixed; `tests/differential/lisp_zip_params.py`)
+- [x] Overridden methods across a class hierarchy collapse inference to `object` (fixed; `tests/differential/lisp_method_overrides.py`)
 - [x] Generator expressions cost about 6 µs per creation natively (slower than CPython in `" ".join(... for ...)` hot loops; the BPE benchmark fell to 0.23x CPython): consumed ones compile as loops, and coroutine stacks are reused
 - [x] `any()` / `all()` over a generator read it to the end (an infinite generator hung, side effects ran too often)
 - [x] A recursive call inside a comprehension (`" ".join([c.show() for c in self.kids])`) was P306 "recursion without a base case"
@@ -1202,3 +1202,23 @@ From `.ignore/gaps/TO-PYROCK-DEV.md`, written while making the first video.
   speedup falls below a floor well under the documented figure, and has a macOS job that
   runs the release smoke test, including a hybrid build with Xcode's python3.
 * Tests: `tests/differential/genexpr_consumers.py`.
+
+### Phase 8: calls with no possible value don't bridge (2026-11-23)
+
+* Both remaining known bugs had one cause. In the first inference passes, a function no
+  call has reached yet has parameters of type `Never`. A call there whose receiver or
+  argument is `Never` (`zip(f.params, args)` with `f: Never`; `args[0].as_num()` with
+  `args: list[Never]`) found no native version and was classified as a CPython call, so
+  its other arguments escaped to CPython. An escaped place is a Python object for good,
+  and from `args` that spread to every Lisp value: inference gave up on the whole
+  program.
+* Such a call is now `CallClass::Unreachable`: its type is `Never` (no value reaches it)
+  and nothing escapes; later passes see the real types. If it survives to code
+  generation (truly dead code), it evaluates its parts and then `unreachable!()`.
+* The two repros compile with `--mode native-only` (20 and 42 native specializations)
+  and match CPython; they moved from `tests/known_bugs/` (now gone) to
+  `tests/differential/lisp_zip_params.py` and `lisp_method_overrides.py`.
+* macOS: the framework rpath for hybrid builds is now read from the build interpreter's
+  `PYTHONFRAMEWORKPREFIX` by the driver; `pyo3_build_config::get()` in the generated
+  `build.rs` failed, since it needs a direct dependency on `pyo3` (caught by the new
+  macOS CI job).
