@@ -123,7 +123,8 @@ Language coverage (ordered by how much code each one blocks in the standard libr
 - [ ] `@functools.cached_property`, `@lru_cache` on methods, `@contextmanager`
 - [x] `del name`, `for`/`while ... else`, `:=`, `[*a, *b]`, `{**d}`, `...` placeholders
 - [ ] Computed class-body assignments, `del` of a function or import name, `class` inside a function or block
-- [ ] `Enum`, `NamedTuple` and `TypedDict` classes; multiple inheritance (mixins)
+- [x] `Enum`, `IntEnum`, `StrEnum`, `auto()`
+- [ ] `NamedTuple` and `TypedDict` classes; multiple inheritance (mixins)
 - [x] Packages next to the program, relative imports, re-exported names
 - [ ] `match`
 - [ ] Arbitrary-precision integers (`Project.md` §6 and M4; today results beyond i64 raise `OverflowError`)
@@ -916,3 +917,21 @@ runnable ones print the same as CPython.
   like tuples. `eq=False` / `repr=False` keep identity equality and the default repr.
   `kw_only=True` makes every field keyword-only.
 * Test: `tests/differential/dataclass_options.py` (native-only).
+
+### Phase 8: enums (2026-11-23)
+
+* `class C(Enum)` / `IntEnum` / `StrEnum` (from `enum`, or `enum.Enum`) without its own
+  `__init__` is rewritten by the AST dump (`dump_ast.py`) into a plain class: members are
+  instances created in the class body (`RED = C("RED", 1)`, `auto()` numbered from the last
+  int, or the lowercased name for `StrEnum`; a repeated value is an alias of the first
+  member), with `name`/`value` properties, CPython's `repr` (`<C.RED: 1>`) and `str`
+  (`C.RED`; the value for `IntEnum`/`StrEnum`), a member list and lookup helpers.
+  `IntEnum`/`StrEnum` also compare with plain values, and `IntEnum` adds `+`, `-`, `*`,
+  `int()`.
+* The frontend maps uses of the class itself: `C(v)` looks a member up by value (`ValueError:
+  v is not a valid C`), `C["NAME"]` by name (`KeyError`), and `for m in C`, comprehensions,
+  `list`/`len`/`sorted`/... and `m in C` go over the members; also through `mod.C`.
+  Members are singletons, so `is`, `==` and dict keys work by identity.
+* Compile-time folding decides `isinstance(x, C)` for a local that is exactly a `C` or a
+  builtin value, so methods with `isinstance` dispatch are typed per specialization.
+* Tests: `tests/differential/enums.py`, `enums_int_str.py` (native-only).

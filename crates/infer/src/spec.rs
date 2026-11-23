@@ -291,6 +291,18 @@ pub fn static_truth(locals: &BTreeMap<String, Slot>, e: &Expr) -> Option<bool> {
                 Some(if rest[0].0 == CmpOp::Is { is } else { !is })
             }
             ExprKind::Unary { op: UnaryOp::Not, operand } => static_truth(locals, operand).map(|v| !v),
+            // `isinstance(x, C)` on a local whose type decides it: an instance
+            // of exactly `C`, or a builtin value (never a native class).
+            ExprKind::CallObj { func, args, kwargs }
+                if matches!(&func.kind, ExprKind::PyBuiltin(n) if n == "isinstance") && args.len() == 2 && kwargs.is_empty() =>
+            {
+                let (ExprKind::Local(n), ExprKind::ClassRef(c)) = (&args[0].kind, &args[1].kind) else { return None };
+                match locals.get(n)?.known()? {
+                    t if t.class_id() == Some(*c) => Some(true),
+                    Ty::Int | Ty::Float | Ty::Str | Ty::Bool | Ty::None => Some(false),
+                    _ => None,
+                }
+            }
             // `if x:` on a local that is exactly `None` in this specialization.
             ExprKind::Local(n) if locals.get(n).and_then(|s| s.known()) == Some(Ty::None) => Some(false),
             ExprKind::BoolOp { op, values } => {

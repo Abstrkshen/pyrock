@@ -11,8 +11,8 @@ covered.
   `ast` module compile natively (table below). The 3 missing are `match`, `type X = ...`
   and `except*`. Some forms of supported nodes are missing too: `class` inside a function
   or `if`, `import *`, complex numbers, `...` as a value, and classes with a CPython base
-  class (`Enum`, `NamedTuple`; `Exception` subclasses are fine), multiple bases or a
-  metaclass.
+  class (`NamedTuple`, `dict`, ...; `Exception`, `Enum` and `ABC` subclasses are fine),
+  multiple bases or another metaclass.
 * **Values:** everything a program builds itself (numbers, strings, lists, dicts, sets,
   tuples, classes, closures, generators, coroutines) is native. Values from CPython imports
   (numpy arrays, sockets, `re` matches, ...) stay Python objects; in hybrid mode they work
@@ -38,7 +38,7 @@ All statement and expression nodes of Python 3.12's `ast` module.
 |---|---|---|
 | `FunctionDef` | native | parameters `/`, `*`, defaults (any expression, evaluated once at `def` time), `*args`, `**kwargs`, nested functions, functions defined in `if`/`try` blocks, decorators |
 | `AsyncFunctionDef` | native | run by asyncio; also async generators |
-| `ClassDef` | native, at module level | single inheritance; `@dataclass`; `ABC`/`ABCMeta` with `@abstractmethod`; not inside a function or `if`, not with a CPython base class, several bases, another metaclass or other class decorators |
+| `ClassDef` | native, at module level | single inheritance; `@dataclass` (with options); `Enum`/`IntEnum`/`StrEnum`; `ABC`/`ABCMeta` with `@abstractmethod`; not inside a function or `if`, not with a CPython base class, several bases, another metaclass or other class decorators |
 | `Return`, `Pass`, `Break`, `Continue`, `Expr` | native | |
 | `Assign`, `AugAssign`, `AnnAssign` | native | including unpacking targets, attributes and subscripts |
 | `Delete` | native | `del x[i]`, `del d[k]`, `del obj.attr`, `del name` (unbound afterwards) |

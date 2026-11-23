@@ -51,12 +51,191 @@ def conv(node):
     return node
 
 
+ENUM_KINDS = ("Enum", "IntEnum", "StrEnum")
+
+
+def enum_aliases(tree):
+    """Names that refer to enum.Enum / IntEnum / StrEnum / auto in this module."""
+    names, modules = {}, set()
+    for st in tree.body:
+        if isinstance(st, ast.ImportFrom) and st.module == "enum" and st.level == 0:
+            for a in st.names:
+                if a.name in ENUM_KINDS + ("auto",):
+                    names[a.asname or a.name] = a.name
+        elif isinstance(st, ast.Import):
+            for a in st.names:
+                if a.name == "enum":
+                    modules.add(a.asname or "enum")
+    return names, modules
+
+
+def enum_ref(node, names, modules):
+    if isinstance(node, ast.Name):
+        return names.get(node.id)
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in modules:
+        return node.attr if node.attr in ENUM_KINDS + ("auto",) else None
+    return None
+
+
+ENUM_TEMPLATE = """
+class {C}:
+    __pyfast_enum__ = "{K}"
+    def __init__(self, _name_, _value_):
+        self._name_ = _name_
+        self._value_ = _value_
+    @property
+    def name(self):
+        return self._name_
+    @property
+    def value(self):
+        return self._value_
+    def __repr__(self):
+        return "<{C}." + self._name_ + ": " + repr(self._value_) + ">"
+    def __str__(self):
+        return {STR}
+    @classmethod
+    def _pyfast_lookup_(cls, value):
+        for m in {C}._pyfast_members_:
+            if m._value_ == value:
+                return m
+        raise ValueError(repr(value) + " is not a valid {C}")
+    @classmethod
+    def _pyfast_by_name_(cls, name):
+        for m in {C}._pyfast_members_:
+            if m._name_ == name:
+                return m
+        raise KeyError(name)
+"""
+
+# IntEnum / StrEnum members are also ints / strs: they compare (and IntEnum
+# members compute) with plain values.
+MIXIN_TEMPLATE = """
+class _M:
+    def __eq__(self, other):
+        if isinstance(other, {C}):
+            return self._value_ == other._value_
+        return self._value_ == other
+    def __lt__(self, other):
+        if isinstance(other, {C}):
+            return self._value_ < other._value_
+        return self._value_ < other
+    def __le__(self, other):
+        if isinstance(other, {C}):
+            return self._value_ <= other._value_
+        return self._value_ <= other
+    def __gt__(self, other):
+        if isinstance(other, {C}):
+            return self._value_ > other._value_
+        return self._value_ > other
+    def __ge__(self, other):
+        if isinstance(other, {C}):
+            return self._value_ >= other._value_
+        return self._value_ >= other
+"""
+
+INT_TEMPLATE = """
+class _M:
+    def __int__(self):
+        return self._value_
+    def __index__(self):
+        return self._value_
+    def __add__(self, other):
+        if isinstance(other, {C}):
+            return self._value_ + other._value_
+        return self._value_ + other
+    def __radd__(self, other):
+        return other + self._value_
+    def __sub__(self, other):
+        if isinstance(other, {C}):
+            return self._value_ - other._value_
+        return self._value_ - other
+    def __rsub__(self, other):
+        return other - self._value_
+    def __mul__(self, other):
+        if isinstance(other, {C}):
+            return self._value_ * other._value_
+        return self._value_ * other
+"""
+
+
+def relocate(nodes, at):
+    for n in nodes:
+        for x in ast.walk(n):
+            if isinstance(x, (ast.stmt, ast.expr, ast.excepthandler, ast.arg, ast.keyword)):
+                x.lineno, x.col_offset = at.lineno, at.col_offset
+                x.end_lineno, x.end_col_offset = at.lineno, at.col_offset
+    return nodes
+
+
+def rewrite_enum(cls, kind, names, modules):
+    """`class C(Enum)` as a plain class: members are instances created in the
+    class body, plus the methods Enum provides. pyfast's frontend maps
+    `C(v)`, `C[name]`, `for m in C`, `len(C)` and `m in C` to the helpers."""
+    c = cls.name
+    str_expr = "self._value_" if kind == "StrEnum" else ("str(self._value_)" if kind == "IntEnum" else '"%s." + self._name_' % c)
+    new = ast.parse(ENUM_TEMPLATE.format(C=c, K=kind, STR=str_expr)).body[0]
+    extra = []
+    if kind in ("IntEnum", "StrEnum"):
+        extra += ast.parse(MIXIN_TEMPLATE.format(C=c)).body[0].body
+    if kind == "IntEnum":
+        extra += ast.parse(INT_TEMPLATE.format(C=c)).body[0].body
+    user, members = [], []
+    last_int = 0
+    seen = {}
+    for st in cls.body:
+        is_member = (isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name)
+                     and not st.targets[0].id.startswith("_"))
+        if not is_member:
+            user.append(st)
+            continue
+        name = st.targets[0].id
+        v = st.value
+        if isinstance(v, ast.Call) and enum_ref(v.func, names, modules) == "auto" and not v.args:
+            v = ast.Constant(name.lower()) if kind == "StrEnum" else ast.Constant(last_int + 1)
+        if isinstance(v, ast.Constant) and isinstance(v.value, int) and not isinstance(v.value, bool):
+            last_int = v.value
+        key = repr(v.value) if isinstance(v, ast.Constant) else None
+        if key is not None and key in seen:
+            # A second name for an existing value is an alias of that member.
+            members.append((name, None, seen[key]))
+            continue
+        if key is not None:
+            seen[key] = name
+        members.append((name, v, None))
+    body = [new.body[0]] + new.body[1:] + extra + user
+    for name, v, alias in members:
+        if alias:
+            value = ast.parse(f"{c}.{alias}", mode="eval").body
+        else:
+            value = ast.Call(ast.Name(c, ast.Load()), [ast.Constant(name), v], [])
+        body.append(ast.Assign([ast.Name(name, ast.Store())], value))
+    listed = [n for n, _, alias in members if not alias]
+    body.append(ast.parse(f"_pyfast_members_ = [{', '.join(f'{c}.{n}' for n in listed)}]").body[0])
+    cls.bases = []
+    cls.keywords = []
+    cls.body = relocate(body, cls)
+    return cls
+
+
+def rewrite(tree):
+    names, modules = enum_aliases(tree)
+    if not names and not modules:
+        return tree
+    for st in tree.body:
+        if isinstance(st, ast.ClassDef) and len(st.bases) == 1 and not st.keywords and not st.decorator_list:
+            kind = enum_ref(st.bases[0], names, modules)
+            has_init = any(isinstance(x, ast.FunctionDef) and x.name == "__init__" for x in st.body)
+            if kind in ENUM_KINDS and not has_init:
+                rewrite_enum(st, kind, names, modules)
+    return tree
+
+
 def main():
     path = sys.argv[1]
     with open(path, "rb") as f:
         src = f.read()
     try:
-        tree = ast.parse(src, filename=path)
+        tree = rewrite(ast.parse(src, filename=path))
     except SyntaxError as e:
         json.dump({"protocol": PROTOCOL, "error": {"msg": e.msg, "line": e.lineno or 0,
                                                   "col": e.offset or 0}}, sys.stdout)

@@ -731,6 +731,9 @@ pub struct ClassDef {
     pub abstracts: Vec<String>,
     /// `@dataclass(...)` options.
     pub dc: DataclassOpts,
+    /// `Enum` / `IntEnum` / `StrEnum` for an enum class (rewritten by the
+    /// AST dump into a plain class with its members as class attributes).
+    pub enum_kind: Option<String>,
 }
 
 /// The options of `@dataclass(eq=, order=, frozen=, repr=, kw_only=)`.

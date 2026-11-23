@@ -353,11 +353,14 @@ struct Lowerer<'l> {
     /// Imports of package modules that don't exist (`try: from ._speedups
     /// import f`): they raise ModuleNotFoundError where they run.
     missing_imports: HashMap<Span, String>,
+    /// Lowering the body of this enum class: `Color("RED", 1)` there creates
+    /// a member; elsewhere `Color(v)` looks one up.
+    in_enum_body: Option<ClassId>,
     diags: Vec<Diagnostic>,
 }
 
 /// Modules whose imports only matter to type checkers.
-const ANNOTATION_ONLY_MODULES: &[&str] = &["typing", "typing_extensions", "__future__", "dataclasses", "abc"];
+const ANNOTATION_ONLY_MODULES: &[&str] = &["typing", "typing_extensions", "__future__", "dataclasses", "abc", "enum"];
 
 /// Map an annotation to a type pyfast can use. Anything else (generics,
 /// unions, user classes) is accepted but does not constrain the value.
@@ -706,6 +709,7 @@ impl<'l> Lowerer<'l> {
             hidden_globals: HashSet::new(),
             native_imported: HashSet::new(),
             missing_imports: HashMap::new(),
+            in_enum_body: None,
             diags: vec![],
         }
     }
@@ -1412,6 +1416,31 @@ impl<'l> Lowerer<'l> {
         }
     }
 
+    /// The enum class a `Name` / `mod.Name` refers to.
+    fn enum_class_of(&self, v: &Value) -> Option<ClassId> {
+        let c = match ty(v) {
+            "Name" if !self.locals.contains(sstr(v, "id")) => match self.bindings.get(sstr(v, "id")) {
+                Some(Binding::Class(c)) => *c,
+                _ => return None,
+            },
+            "Attribute" => match self.module_binding(&v["value"]) {
+                Some(Binding::Unit(u)) => *self.ld.unit_classes[u].get(sstr(v, "attr"))?,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.ld.classes[c as usize].enum_kind.is_some().then_some(c)
+    }
+
+    /// An enum class used as an iterable: its member list.
+    fn enum_members_json(&self, v: &Value) -> Value {
+        if self.enum_class_of(v).is_some() {
+            serde_json::json!({"_t": "Attribute", "value": v, "attr": "_pyfast_members_", "ctx": {"_t": "Load"}, "_loc": v["_loc"]})
+        } else {
+            v.clone()
+        }
+    }
+
     /// A hidden name bound to what module `u` binds as `attr` (an import it
     /// re-exports, or a submodule), as a `Name` node to lower in its place.
     fn reexport_name(&mut self, u: usize, attr: &str, loc: &Value) -> Value {
@@ -2001,7 +2030,8 @@ impl<'l> Lowerer<'l> {
             }
             body
         };
-        let it = &st["iter"];
+        let it_owned = self.enum_members_json(&st["iter"]);
+        let it = &it_owned;
         let is_range = ty(it) == "Call"
             && ty(&it["func"]) == "Name"
             && it["func"]["id"] == "range"
@@ -2184,7 +2214,8 @@ impl<'l> Lowerer<'l> {
                         "Is" => CmpOp::Is,
                         _ => CmpOp::IsNot,
                     };
-                    rest.push((op, self.lower_expr(c)?));
+                    let c = if matches!(op, CmpOp::In | CmpOp::NotIn) { self.enum_members_json(c) } else { c.clone() };
+                    rest.push((op, self.lower_expr(&c)?));
                 }
                 ExprKind::Compare { first: Box::new(first), rest }
             }
@@ -2263,6 +2294,11 @@ impl<'l> Lowerer<'l> {
                     pairs.push((self.lower_expr(k)?, self.lower_expr(v)?));
                 }
                 ExprKind::Dict(pairs)
+            }
+            // `Color["RED"]`: the member with that name.
+            "Subscript" if self.enum_class_of(&e["value"]).is_some() => {
+                let call = serde_json::json!({"_t": "Call", "func": {"_t": "Attribute", "value": e["value"], "attr": "_pyfast_by_name_", "ctx": {"_t": "Load"}, "_loc": e["_loc"]}, "args": [e["slice"]], "keywords": [], "_loc": e["_loc"]});
+                return self.lower_call(&call);
             }
             "Subscript" => ExprKind::Subscript { obj: Box::new(self.lower_expr(&e["value"])?), index: Box::new(self.lower_index(&e["slice"])?) },
             "ListComp" | "SetComp" | "GeneratorExp" | "DictComp" => return self.lower_comp(e),
@@ -2497,7 +2533,12 @@ impl<'l> Lowerer<'l> {
         let mut class_vars: Vec<String> = Vec::new();
         let mut fields: Vec<String> = Vec::new();
         let mut abstracts: Vec<String> = Vec::new();
+        let mut enum_kind: Option<String> = None;
         for item in arr(st, "body") {
+            if ty(item) == "Assign" && arr(item, "targets").first().is_some_and(|t| sstr(t, "id") == "__pyfast_enum__") {
+                enum_kind = item["value"]["value"]["value"].as_str().map(String::from);
+                continue;
+            }
             let isp = self.span(item);
             match ty(item) {
                 "FunctionDef" => {
@@ -2565,7 +2606,7 @@ impl<'l> Lowerer<'l> {
         const RESERVED: &[&str] = &["Box", "Vec", "String", "Option", "Result", "Some", "None", "Ok", "Err", "Rc", "RefCell", "Default", "Clone", "Copy", "Self", "Str"];
         let rust = if RESERVED.contains(&name.as_str()) { format!("{unit_prefix}Py{name}") } else { format!("{unit_prefix}{name}") };
         let qual = if self.unit == 0 { name.clone() } else { format!("{}.{name}", self.ld.units[self.unit].name) };
-        self.ld.classes.push(ClassDef { id: cid, name: qual, rust, unit: self.unit, span: sp, base, methods, fields, class_vars, dataclass, abstracts, dc });
+        self.ld.classes.push(ClassDef { id: cid, name: qual, rust, unit: self.unit, span: sp, base, methods, fields, class_vars, dataclass, abstracts, dc, enum_kind });
         self.class_ids.insert(name.clone(), (cid, sp));
         self.bindings.insert(name.clone(), Binding::Class(cid));
         self.ld.unit_classes[self.unit].insert(name, cid);
@@ -2610,10 +2651,19 @@ impl<'l> Lowerer<'l> {
                     if item["value"].is_null() || (ty(item) == "AnnAssign" && self.ld.classes[cid as usize].dataclass) {
                         continue;
                     }
+                    if arr(item, "targets").first().is_some_and(|t| sstr(t, "id") == "__pyfast_enum__") {
+                        continue;
+                    }
                     self.cur_fid = None;
                     self.locals = self.module_vars.difference(&self.globals).cloned().collect();
                     self.in_module = true;
-                    let Some(value) = self.lower_expr(&item["value"]) else { continue };
+                    let saved_enum = self.in_enum_body;
+                    if self.ld.classes[cid as usize].enum_kind.is_some() {
+                        self.in_enum_body = Some(cid);
+                    }
+                    let value = self.lower_expr(&item["value"]);
+                    self.in_enum_body = saved_enum;
+                    let Some(value) = value else { continue };
                     let isp = self.span(item);
                     let targets: Vec<&Value> = if ty(item) == "Assign" { arr(item, "targets").iter().collect() } else { vec![&item["target"]] };
                     for t in targets {
@@ -2948,13 +2998,13 @@ impl<'l> Lowerer<'l> {
                 "<dictcomp>",
             ),
         };
-        let first = self.lower_expr(&gens[0]["iter"])?;
+        let first = self.lower_expr(&self.enum_members_json(&gens[0]["iter"]))?;
         let mut body = serde_json::json!([inner]);
         for (gi, g) in gens.iter().enumerate().rev() {
             for c in arr(g, "ifs").iter().rev() {
                 body = serde_json::json!([{"_t": "If", "_loc": loc, "test": c, "body": body, "orelse": []}]);
             }
-            let iter = if gi == 0 { name("__genexpr_it") } else { g["iter"].clone() };
+            let iter = if gi == 0 { name("__genexpr_it") } else { self.enum_members_json(&g["iter"]) };
             let is_async_for = g["is_async"].as_u64().unwrap_or(0) != 0;
             body = serde_json::json!([{"_t": "For", "_loc": loc, "target": g["target"], "iter": iter, "body": body, "orelse": [], "is_async": is_async_for}]);
         }
@@ -3011,12 +3061,12 @@ impl<'l> Lowerer<'l> {
             let iter = if gi == 0 {
                 let saved = self.comp_scopes.split_off(pushed);
                 let saved_owner = self.comp_owner.split_off(pushed);
-                let it = self.lower_expr(&g["iter"]);
+                let it = self.lower_expr(&self.enum_members_json(&g["iter"]));
                 self.comp_scopes.extend(saved);
                 self.comp_owner.extend(saved_owner);
                 it?
             } else {
-                self.lower_expr(&g["iter"])?
+                self.lower_expr(&self.enum_members_json(&g["iter"]))?
             };
             let mut names = HashSet::new();
             scan_names(&g["target"], &mut names);
@@ -3179,6 +3229,16 @@ impl<'l> Lowerer<'l> {
     }
 
     fn lower_call(&mut self, e: &Value) -> Option<Expr> {
+        // `list(Color)`, `len(Color)`, `sorted(Color)`, ...: over the members.
+        let callee = if ty(&e["func"]) == "Name" { sstr(&e["func"], "id") } else { "" };
+        if matches!(callee, "list" | "len" | "sorted" | "tuple" | "set" | "enumerate" | "reversed" | "iter" | "any" | "all" | "min" | "max" | "zip" | "map" | "filter")
+            && arr(e, "args").iter().any(|a| self.enum_class_of(a).is_some())
+        {
+            let mut e2 = e.clone();
+            let args: Vec<Value> = arr(e, "args").iter().map(|a| self.enum_members_json(a)).collect();
+            e2["args"] = Value::Array(args);
+            return self.lower_call(&e2);
+        }
         let sp = self.span(e);
         let f = &e["func"];
         // Builtins that read the caller's Python frame: compiled code has none,
@@ -3288,6 +3348,10 @@ impl<'l> Lowerer<'l> {
                             }
                         }
                     }
+                    if self.ld.classes[c as usize].enum_kind.is_some() && self.in_enum_body != Some(c) {
+                        // `Color(1)`: the member with that value.
+                        return self.lower_class_attr_call(c, "_pyfast_lookup_", args, kwargs, sp);
+                    }
                     return Some(Expr { kind: ExprKind::New { class: c, args, kwargs }, span: sp });
                 }
                 Some(Binding::Slot(_)) | None => {}
@@ -3354,6 +3418,9 @@ impl<'l> Lowerer<'l> {
                 match b {
                     Binding::Unit(u) if self.ld.unit_classes[u].contains_key(attr) => {
                         let c = self.ld.unit_classes[u][attr];
+                        if self.ld.classes[c as usize].enum_kind.is_some() {
+                            return self.lower_class_attr_call(c, "_pyfast_lookup_", args, kwargs, sp);
+                        }
                         return Some(Expr { kind: ExprKind::New { class: c, args, kwargs }, span: sp });
                     }
                     Binding::Unit(u) => match self.ld.unit_funcs[u].get(attr).copied() {

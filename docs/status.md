@@ -112,7 +112,7 @@ next to the program; compiled dependencies are cached in `~/.cache/pyfast/target
 
 ## Not supported yet
 
-* Classes with a CPython base class (`Enum`, `NamedTuple`, ...), multiple inheritance,
+* Classes with a CPython base class (`NamedTuple`, `dict`, ...), multiple inheritance,
   metaclasses, class decorators other than `@dataclass`, method decorators other than
   `@property`/`@staticmethod`/`@classmethod` (a module using them is imported through
   CPython instead, warning P220).
