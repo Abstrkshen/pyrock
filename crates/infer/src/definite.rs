@@ -168,6 +168,7 @@ fn expr(e: &Expr, cur: &Set, out: &mut HashSet<String>) {
             args.iter().for_each(|a| expr(a, cur, out))
         }
         ExprKind::GetAttr { obj, .. } | ExprKind::Annotated { value: obj, .. } | ExprKind::Walrus { value: obj, .. } => expr(obj, cur, out),
+        ExprKind::SuperDispatch { default, .. } => expr(default, cur, out),
         ExprKind::CallObj { func, args, kwargs } => {
             expr(func, cur, out);
             args.iter().for_each(|a| expr(a, cur, out));

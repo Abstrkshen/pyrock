@@ -568,6 +568,7 @@ fn children(e: &Expr, skip_callee: bool) -> Vec<&Expr> {
         ExprKind::Compare { first, rest } => std::iter::once(&**first).chain(rest.iter().map(|r| &r.1)).collect(),
         ExprKind::BoolOp { values, .. } => values.iter().collect(),
         ExprKind::IfExp { test, body, orelse } => vec![test, body, orelse],
+        ExprKind::SuperDispatch { alts, default, .. } => alts.iter().map(|a| &a.1).chain(std::iter::once(&**default)).collect(),
         ExprKind::Call { args, .. } | ExprKind::ExternCall { args, .. } | ExprKind::List(args) | ExprKind::Tuple(args) | ExprKind::NewExc { args, .. } | ExprKind::Set(args) => args.iter().collect(),
         ExprKind::GetAttr { obj, .. } | ExprKind::Annotated { value: obj, .. } | ExprKind::Walrus { value: obj, .. } | ExprKind::Unpack { value: obj, .. } | ExprKind::Starred(obj) => vec![obj],
         ExprKind::CallObj { func, args, kwargs } => {
@@ -669,6 +670,10 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr), skip_callee: bool) {
             args.iter().for_each(|a| walk_expr(a, f, skip_callee))
         }
         ExprKind::GetAttr { obj, .. } | ExprKind::Annotated { value: obj, .. } | ExprKind::Walrus { value: obj, .. } => walk_expr(obj, f, skip_callee),
+        ExprKind::SuperDispatch { alts, default, .. } => {
+            alts.iter().for_each(|a| walk_expr(&a.1, f, skip_callee));
+            walk_expr(default, f, skip_callee)
+        }
         ExprKind::CallObj { func, args, kwargs } => {
             if skip_callee {
                 // Visit the receiver of `recv.method(...)` but not the lookup itself.

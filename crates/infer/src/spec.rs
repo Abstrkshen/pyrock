@@ -2586,6 +2586,11 @@ impl Ctx<'_, '_> {
                 self.merge(&[a?, b?], e, "conditional expression")
             }
             ExprKind::ExternCall { ext, func, args } => self.extern_args(e, *ext, *func, args),
+            ExprKind::SuperDispatch { recv, alts, default } => {
+                let rt = self.local_ty(recv);
+                let chosen = super_choice(self.prog.module, rt, alts, default);
+                self.expr(chosen)
+            }
             ExprKind::Walrus { target, global, value } => {
                 let t = self.expr(value);
                 match global {
@@ -3285,3 +3290,9 @@ fn record_with(fs: &[Field], k: &str, t: Ty) -> Option<Ty> {
 
 /// Builtins that iterate their arguments.
 pub const ITER_BUILTINS: &[&str] = &["list", "tuple", "set", "frozenset", "sorted", "sum", "min", "max", "any", "all", "enumerate", "zip", "dict", "reversed"];
+
+/// The call a `super()` dispatch makes for a receiver of type `recv`.
+pub fn super_choice<'e>(m: &Module, recv: Option<Ty>, alts: &'e [(ClassId, Expr)], default: &'e Expr) -> &'e Expr {
+    let Some(c) = recv.and_then(|t| t.class_id()) else { return default };
+    alts.iter().find(|(r, _)| m.is_subclass(c, *r)).map(|(_, e)| e).unwrap_or(default)
+}

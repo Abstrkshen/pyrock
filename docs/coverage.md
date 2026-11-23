@@ -12,7 +12,7 @@ covered.
   and `except*`. Some forms of supported nodes are missing too: `class` inside a function
   or `if`, `import *`, complex numbers, `...` as a value, and classes with a CPython base
   class (`dict`, `threading.Thread`, ...; `Exception`, `Enum`, `NamedTuple` and `ABC` subclasses are fine),
-  multiple bases or another metaclass.
+  or another metaclass.
 * **Values:** everything a program builds itself (numbers, strings, lists, dicts, sets,
   tuples, classes, closures, generators, coroutines) is native. Values from CPython imports
   (numpy arrays, sockets, `re` matches, ...) stay Python objects; in hybrid mode they work
@@ -24,8 +24,8 @@ covered.
 * **Code written for pyrock:** the 21 samples, 3 demos and 14 user samples all compile; the
   fully native ones need no CPython at all.
 
-Library code is the hardest case: it is full of decorators from `abc` and `functools`,
-`Enum`/`NamedTuple` classes, mixins and relative imports. Application code, especially
+Library code is the hardest case: it is full of library-specific decorators, CPython base
+classes and computed class bodies. Application code, especially
 hot loops, uses far fewer of these. In hybrid mode none of this stops a program: a module
 pyrock can't compile is imported through CPython instead (P220), and a CPython package is
 always usable.
@@ -38,7 +38,7 @@ All statement and expression nodes of Python 3.12's `ast` module.
 |---|---|---|
 | `FunctionDef` | native | parameters `/`, `*`, defaults (any expression, evaluated once at `def` time), `*args`, `**kwargs`, nested functions, functions defined in `if`/`try` blocks, decorators |
 | `AsyncFunctionDef` | native | run by asyncio; also async generators |
-| `ClassDef` | native, at module level | single inheritance; `@dataclass` (with options); `Enum`/`IntEnum`/`StrEnum`; `ABC`/`ABCMeta` with `@abstractmethod`; not inside a function or `if`, not with a CPython base class, several bases, another metaclass or other class decorators |
+| `ClassDef` | native, at module level | single and multiple inheritance; `@dataclass` (with options); `Enum`/`IntEnum`/`StrEnum`; `ABC`/`ABCMeta` with `@abstractmethod`; not inside a function or `if`, not with a CPython base class, another metaclass or other class decorators |
 | `Return`, `Pass`, `Break`, `Continue`, `Expr` | native | |
 | `Assign`, `AugAssign`, `AnnAssign` | native | including unpacking targets, attributes and subscripts |
 | `Delete` | native | `del x[i]`, `del d[k]`, `del obj.attr`, `del name` (unbound afterwards) |

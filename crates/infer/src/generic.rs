@@ -399,6 +399,7 @@ impl State<'_> {
                 }
                 Sym::Con(self.m.externs[*ext].funcs[*func].ret.ty())
             }
+            ExprKind::SuperDispatch { default, .. } => self.expr(default, cx),
             ExprKind::Walrus { target, global, value } => {
                 let v = self.expr(value, cx);
                 if global.is_none() {

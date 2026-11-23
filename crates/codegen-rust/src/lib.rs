@@ -1396,6 +1396,11 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     Callee::Builtin(b) => self.builtin(*b, vals, t),
                 }
             }
+            ExprKind::SuperDispatch { recv, alts, default } => {
+                let rt = self.local_ty(recv);
+                let chosen = pyrock_infer::spec::super_choice(self.prog.module, rt, alts, default).clone();
+                self.expr(&chosen).0
+            }
             ExprKind::Walrus { target, global, value } => {
                 let (vc, vt) = self.expr(value);
                 let mut set = String::new();

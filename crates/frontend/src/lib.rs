@@ -2349,17 +2349,12 @@ impl<'l> Lowerer<'l> {
 
     /// The unit and global-cell name of class attribute `attr` of `c` (or a base).
     fn class_var_owner(&self, c: ClassId, attr: &str) -> Option<(usize, String)> {
-        let mut cur = Some(c);
-        while let Some(k) = cur {
+        for k in c3_mro(&self.ld.classes, c) {
             let cd = &self.ld.classes[k as usize];
             if cd.class_vars.iter().any(|v| v == attr) {
                 let short = cd.name.rsplit('.').next().unwrap_or("");
                 return Some((cd.unit, format!("{short}.{attr}")));
             }
-            cur = match &cd.base {
-                Some(ClassBase::Native(b)) => Some(*b),
-                _ => None,
-            };
         }
         None
     }
@@ -2375,18 +2370,7 @@ impl<'l> Lowerer<'l> {
     }
 
     fn method_of(&self, c: ClassId, name: &str) -> Option<Method> {
-        let mut cur = Some(c);
-        while let Some(k) = cur {
-            let cd = &self.ld.classes[k as usize];
-            if let Some(m) = cd.methods.iter().find(|m| m.name == name) {
-                return Some(m.clone());
-            }
-            cur = match &cd.base {
-                Some(ClassBase::Native(b)) => Some(*b),
-                _ => None,
-            };
-        }
-        None
+        c3_mro(&self.ld.classes, c).into_iter().find_map(|k| self.ld.classes[k as usize].methods.iter().find(|m| m.name == name).cloned())
     }
 
     /// `Point.make(...)` / `Point.norm(p)`.
@@ -2415,10 +2399,15 @@ impl<'l> Lowerer<'l> {
             self.err("P001", sp, "RuntimeError: super(): no arguments outside a method");
             return None;
         };
+        // The next class after `c` in `c`'s MRO that defines `name` (with
+        // mixins: `class C(Mixin, Base)` reaches Mixin, then Base).
+        let mro = c3_mro(&self.ld.classes, c);
+        let next = mro[1..].iter().find_map(|k| self.ld.classes[*k as usize].methods.iter().find(|m| m.name == name).cloned());
         let base = self.ld.classes[c as usize].base.clone();
         match base {
             Some(ClassBase::Native(b)) => {
-                let Some(m) = self.method_of(b, name) else {
+                let _ = b;
+                let Some(m) = next else {
                     if name == "__init__" && self.exception_root(b).is_some() {
                         return self.exc_super_init(self_name, args, sp);
                     }
@@ -2429,20 +2418,46 @@ impl<'l> Lowerer<'l> {
                     self.err("P301", sp, format!("'super' object has no attribute '{name}'"));
                     return None;
                 };
-                let mut args = args;
-                match m.kind {
-                    MethodKind::Instance | MethodKind::Property | MethodKind::Setter => {
-                        let Some(sn) = self_name else {
-                            self.err("P301", sp, "super() in a method without `self`");
-                            return None;
-                        };
-                        args.insert(0, Expr { kind: ExprKind::Local(sn), span: sp });
+                let call = |me: &mut Self, m: &Method| -> Option<Expr> {
+                    let mut args = args.clone();
+                    match m.kind {
+                        MethodKind::Instance | MethodKind::Property | MethodKind::Setter => {
+                            let Some(sn) = self_name.clone() else {
+                                me.err("P301", sp, "super() in a method without `self`");
+                                return None;
+                            };
+                            args.insert(0, Expr { kind: ExprKind::Local(sn), span: sp });
+                        }
+                        MethodKind::Class => args.insert(0, Expr { kind: ExprKind::ClassRef(c), span: sp }),
+                        MethodKind::Static => {}
                     }
-                    MethodKind::Class => args.insert(0, Expr { kind: ExprKind::ClassRef(c), span: sp }),
-                    MethodKind::Static => {}
+                    let (args, order) = me.bind_args(m.func, &format!("super().{name}"), args, kwargs.clone(), sp)?;
+                    Some(Expr { kind: ExprKind::Call { callee: Callee::Func(m.func), args, order }, span: sp })
+                };
+                let default = call(self, &m)?;
+                // In a subclass's MRO the class after `c` can differ (`class
+                // D(B, C)`: `super()` in B reaches C for a D): the receiver's
+                // class picks the call.
+                let mut alts: Vec<(ClassId, Method, usize)> = Vec::new();
+                if m.kind == MethodKind::Instance && self_name.is_some() {
+                    for r in 0..self.ld.classes.len() as ClassId {
+                        let rm = c3_mro(&self.ld.classes, r);
+                        let Some(pos) = rm.iter().position(|k| *k == c).filter(|_| r != c) else { continue };
+                        let mm = rm[pos + 1..].iter().find_map(|k| self.ld.classes[*k as usize].methods.iter().find(|x| x.name == name).cloned());
+                        if let Some(mm) = mm.filter(|mm| mm.func != m.func) {
+                            alts.push((r, mm, rm.len()));
+                        }
+                    }
                 }
-                let (args, order) = self.bind_args(m.func, &format!("super().{name}"), args, kwargs, sp)?;
-                Some(Expr { kind: ExprKind::Call { callee: Callee::Func(m.func), args, order }, span: sp })
+                if alts.is_empty() {
+                    return Some(default);
+                }
+                alts.sort_by(|a, b| b.2.cmp(&a.2));
+                let mut out = Vec::new();
+                for (r, mm, _) in alts {
+                    out.push((r, call(self, &mm)?));
+                }
+                Some(Expr { kind: ExprKind::SuperDispatch { recv: self_name.clone().unwrap(), alts: out, default: Box::new(default) }, span: sp })
             }
             Some(ClassBase::Exception(_)) if name == "__init__" => {
                 let _ = kwargs;
@@ -2458,15 +2473,10 @@ impl<'l> Lowerer<'l> {
 
     /// The builtin exception at the root of `c`'s bases, if any.
     fn exception_root(&self, c: ClassId) -> Option<String> {
-        let mut cur = Some(c);
-        while let Some(k) = cur {
-            match &self.ld.classes[k as usize].base {
-                Some(ClassBase::Exception(e)) => return Some(e.clone()),
-                Some(ClassBase::Native(b)) => cur = Some(*b),
-                None => return None,
-            }
-        }
-        None
+        c3_mro(&self.ld.classes, c).into_iter().find_map(|k| match &self.ld.classes[k as usize].base {
+            Some(ClassBase::Exception(e)) => Some(e.clone()),
+            _ => None,
+        })
     }
 
     /// `BaseException.__init__(self, *args)`: sets the message (`str(e)`).
@@ -2536,22 +2546,43 @@ impl<'l> Lowerer<'l> {
         // `ABC` as a base adds nothing but abstract-method checking.
         let bases: Vec<Value> = arr(st, "bases").iter().filter(|b| !self.is_abc_name(b, "ABC")).cloned().collect();
         let bases = bases.as_slice();
-        let base = match bases {
-            [] => None,
-            [b] if ty(b) == "Name" && sstr(b, "id") == "object" => None,
-            [b] if ty(b) == "Name" && self.class_ids.contains_key(sstr(b, "id")) => Some(ClassBase::Native(self.class_ids[sstr(b, "id")].0)),
-            [b] if ty(b) == "Name" && is_builtin_exception(sstr(b, "id")) => Some(ClassBase::Exception(sstr(b, "id").to_string())),
-            [b] if ty(b) == "Attribute" && self.module_binding(&b["value"]).is_some_and(|m| matches!(m, Binding::Unit(u) if self.ld.unit_classes[u].contains_key(sstr(b, "attr")))) => {
-                let Some(Binding::Unit(u)) = self.module_binding(&b["value"]) else { unreachable!() };
-                Some(ClassBase::Native(self.ld.unit_classes[u][sstr(b, "attr")]))
+        // Each base: a native class, a builtin exception, or `object`.
+        let mut native_bases: Vec<ClassId> = Vec::new();
+        let mut exc_base: Option<String> = None;
+        for b in bases {
+            if ty(b) == "Name" && sstr(b, "id") == "object" {
+                continue;
             }
-            [_] => {
-                self.unsupported(sp, &format!("class `{name}` with a base class that is not a natively compiled class"), "subclassing CPython classes is phase 4; keep this class in a module that falls back to CPython");
-                None
+            if ty(b) == "Name" && self.class_ids.contains_key(sstr(b, "id")) {
+                native_bases.push(self.class_ids[sstr(b, "id")].0);
+                continue;
             }
-            _ => {
-                self.unsupported(sp, &format!("multiple inheritance in `{name}`"), "use single inheritance");
-                None
+            if ty(b) == "Attribute" {
+                if let Some(Binding::Unit(u)) = self.module_binding(&b["value"]) {
+                    if let Some(&c) = self.ld.unit_classes[u].get(sstr(b, "attr")) {
+                        native_bases.push(c);
+                        continue;
+                    }
+                }
+            }
+            if ty(b) == "Name" && is_builtin_exception(sstr(b, "id")) && exc_base.is_none() {
+                exc_base = Some(sstr(b, "id").to_string());
+                continue;
+            }
+            self.unsupported(sp, &format!("class `{name}` with a base class that is not a natively compiled class"), "keep this class in a module that is imported through CPython");
+        }
+        let base = match (native_bases.first(), exc_base) {
+            (Some(&b), None) => Some(ClassBase::Native(b)),
+            (None, Some(e)) => Some(ClassBase::Exception(e)),
+            (None, None) => None,
+            (Some(&b), Some(e)) => {
+                // A native exception class already carries its builtin root.
+                if native_bases.iter().any(|&nb| self.exception_root(nb).is_some()) {
+                    Some(ClassBase::Native(b))
+                } else {
+                    self.unsupported(sp, &format!("class `{name}` mixing a builtin exception `{e}` with other bases"), "derive the exception from one class");
+                    Some(ClassBase::Native(b))
+                }
             }
         };
         let mut methods = Vec::new();
@@ -2631,7 +2662,7 @@ impl<'l> Lowerer<'l> {
         const RESERVED: &[&str] = &["Box", "Vec", "String", "Option", "Result", "Some", "None", "Ok", "Err", "Rc", "RefCell", "Default", "Clone", "Copy", "Self", "Str"];
         let rust = if RESERVED.contains(&name.as_str()) { format!("{unit_prefix}Py{name}") } else { format!("{unit_prefix}{name}") };
         let qual = if self.unit == 0 { name.clone() } else { format!("{}.{name}", self.ld.units[self.unit].name) };
-        self.ld.classes.push(ClassDef { id: cid, name: qual, rust, unit: self.unit, span: sp, base, methods, fields, class_vars, dataclass, abstracts, dc, enum_kind });
+        self.ld.classes.push(ClassDef { id: cid, name: qual, rust, unit: self.unit, span: sp, base, methods, fields, class_vars, dataclass, abstracts, dc, enum_kind, bases: native_bases });
         self.class_ids.insert(name.clone(), (cid, sp));
         self.bindings.insert(name.clone(), Binding::Class(cid));
         self.ld.unit_classes[self.unit].insert(name, cid);

@@ -74,7 +74,7 @@ These constructs become plain Rust with no Python objects involved:
   `@functools.cached_property`, enums (`Enum`, `IntEnum`, `StrEnum`, `auto()`: members, `C(value)`, `C["NAME"]`, iteration,
   `len`, `in`, `name`/`value`, CPython's repr/str), abstract base classes (`ABC`, `metaclass=ABCMeta`, `@abstractmethod`, with CPython's
   `TypeError` on instantiating one), `@dataclass` (fields, literal defaults, `field(default_factory=list|dict|set)`,
-  `__post_init__`), single inheritance with `super()`, `isinstance` with classes, and user
+  `__post_init__`), single and multiple inheritance (mixins, diamonds; CPython's C3 MRO) with `super()`, `isinstance` with classes, and user
   exception classes (`class NotFound(KeyError)`, `except NotFound as e: e.key`).
   Instances are `Rc<RefCell<..>>` newtypes, so identity and shared mutation match Python.
   Values of different classes in one place (a list of shapes) form a closed union (a Rust
@@ -211,7 +211,7 @@ in `explain`. Calling one gives P150. A struct handle passed to CPython is P231.
 Not yet supported in either mode (P100; in an imported `.py`, hybrid mode imports the
 whole module through CPython instead, P220):
 
-* classes with a CPython base class (other than `Enum`/`IntEnum`/`StrEnum`/`ABC`/`NamedTuple`), multiple inheritance, metaclasses other than `ABCMeta`,
+* classes with a CPython base class (other than `Enum`/`IntEnum`/`StrEnum`/`ABC`/`NamedTuple`), metaclasses other than `ABCMeta`,
   class decorators other than `@dataclass`, `@dataclass(unsafe_hash=...)`, adding class
   attributes after the class statement;
 * `f(*xs)` where `xs` is a list (not a tuple of known length) filling fixed parameters, and

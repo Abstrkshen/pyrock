@@ -126,7 +126,8 @@ Language coverage (ordered by how much code each one blocks in the standard libr
 - [ ] Computed class-body assignments, `del` of a function or import name, `class` inside a function or block
 - [x] `Enum`, `IntEnum`, `StrEnum`, `auto()`
 - [x] `typing.NamedTuple` classes
-- [ ] `TypedDict`, `collections.namedtuple`; multiple inheritance (mixins)
+- [x] Multiple inheritance (mixins, diamonds) with CPython's C3 MRO
+- [ ] `TypedDict`, `collections.namedtuple`
 - [x] Packages next to the program, relative imports, re-exported names
 - [ ] `match`
 - [ ] Arbitrary-precision integers (`Project.md` §6 and M4; today results beyond i64 raise `OverflowError`)
@@ -979,3 +980,16 @@ runnable ones print the same as CPython.
   its field types `object` for good).
 * `functools` joined the imports dropped when unused after rewriting.
 * Tests: `tests/differential/cached_property.py`, `namedtuples.py` (native-only).
+
+### Phase 8: multiple inheritance (2026-11-23)
+
+* A class can have several natively compiled bases (`class User(JsonMixin, ReprMixin, Base)`),
+  plus at most one builtin exception root. `ClassDef::bases` keeps them in order and the
+  method resolution order is CPython's C3 linearisation (`c3_mro`), used for method and
+  class-attribute lookup, fields, `isinstance` and `super()`.
+* `super().m()` takes the next class after the defining class in the receiver's MRO. When
+  some subclass continues the MRO differently (a diamond: `class D(B, C)` makes `super()`
+  in `B` reach `C`), the call is a `SuperDispatch` whose alternative is picked from the
+  receiver's type in each specialization, so cooperative multiple inheritance matches
+  CPython.
+* Test: `tests/differential/mixins.py` (mixins, `super()` chains, a diamond; native-only).

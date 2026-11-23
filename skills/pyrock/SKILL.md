@@ -84,7 +84,8 @@ an imported `.py`, which falls back to CPython),
 `import *`.
 
 Not supported either: `match`, classes with a CPython base class such as `dict` or `pydantic.BaseModel`,
-multiple inheritance, method decorators other than `@property`/`@staticmethod`/`@classmethod`.
+method decorators other than `@property`/`@staticmethod`/`@classmethod`/`@abstractmethod`/
+`@functools.cached_property`.
 On the standard library as it is, 62% of functions are accepted (`docs/coverage.md` in the repo).
 
 See [references/language.md](references/language.md) for the precise subset, semantics and

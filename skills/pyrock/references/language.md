@@ -84,7 +84,6 @@ turns them into errors.
 | Class with a CPython base class, a metaclass or a class decorator other than `@dataclass` | Keep it in an imported `.py` (the module falls back to CPython, P220) |
 | Relative imports, `import *`, a native `.py`/`.rs`/`.c` module imported inside a function | Absolute imports; native modules at module level |
 | `match` | `if`/`elif` chains |
-| Multiple inheritance | Composition, or keep the class in a CPython-imported module |
 | Complex numbers | Keep that code in a CPython-imported module |
 
 ## Making code fast

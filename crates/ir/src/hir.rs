@@ -427,6 +427,11 @@ pub enum ExprKind {
     /// `(target := value)`: assigns the local (or, with `global`, the global
     /// cell of that unit) and evaluates to the value.
     Walrus { target: String, global: Option<usize>, value: Box<Expr> },
+    /// `super().m(...)` in a class whose subclasses continue the MRO
+    /// differently (a diamond): the call for the first `(class, call)` whose
+    /// class the receiver `recv` is an instance of, else `default`. Decided
+    /// per specialization from the receiver's type.
+    SuperDispatch { recv: String, alts: Vec<(ClassId, Expr)>, default: Box<Expr> },
     /// Call into a linked Rust or C module.
     ExternCall { ext: usize, func: usize, args: Vec<Expr> },
     /// --- CPython bridge (all produce `object`) ---
@@ -734,6 +739,48 @@ pub struct ClassDef {
     /// `Enum` / `IntEnum` / `StrEnum` for an enum class (rewritten by the
     /// AST dump into a plain class with its members as class attributes).
     pub enum_kind: Option<String>,
+    /// All natively compiled base classes, in declaration order (`base` is
+    /// the first; more than one is multiple inheritance, e.g. mixins).
+    pub bases: Vec<ClassId>,
+}
+
+/// CPython's C3 method resolution order of `c` over `classes`.
+pub fn c3_mro(classes: &[ClassDef], c: ClassId) -> Vec<ClassId> {
+    fn go(classes: &[ClassDef], c: ClassId, depth: usize) -> Vec<ClassId> {
+        let cd = &classes[c as usize];
+        let bases: Vec<ClassId> = if !cd.bases.is_empty() {
+            cd.bases.clone()
+        } else if let Some(ClassBase::Native(b)) = &cd.base {
+            vec![*b]
+        } else {
+            vec![]
+        };
+        if depth > 64 {
+            return vec![c];
+        }
+        let mut seqs: Vec<Vec<ClassId>> = bases.iter().map(|b| go(classes, *b, depth + 1)).collect();
+        seqs.push(bases.clone());
+        let mut out = vec![c];
+        loop {
+            seqs.retain(|s| !s.is_empty());
+            if seqs.is_empty() {
+                return out;
+            }
+            // The first head that is in no other sequence's tail.
+            let head = seqs.iter().map(|s| s[0]).find(|h| !seqs.iter().any(|s| s[1..].contains(h)));
+            let Some(h) = head.or_else(|| seqs.first().map(|s| s[0])) else { return out };
+            out.push(h);
+            for s in seqs.iter_mut() {
+                if s[0] == h {
+                    s.remove(0);
+                }
+            }
+        }
+    }
+    let mut out = go(classes, c, 0);
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|k| seen.insert(*k));
+    out
 }
 
 /// The options of `@dataclass(eq=, order=, frozen=, repr=, kw_only=)`.
@@ -780,16 +827,7 @@ impl Module {
     }
 
     pub fn mro(&self, c: ClassId) -> Vec<ClassId> {
-        let mut out = vec![c];
-        let mut cur = c;
-        while let Some(ClassBase::Native(b)) = &self.class(cur).base {
-            if out.contains(b) {
-                break;
-            }
-            out.push(*b);
-            cur = *b;
-        }
-        out
+        c3_mro(&self.classes, c)
     }
 
     /// Method lookup along the MRO.
