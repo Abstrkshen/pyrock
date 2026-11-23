@@ -1018,3 +1018,8 @@ runnable ones print the same as CPython.
   name, *args, **kwargs)`. A call that would leave a named parameter for the mapping is
   still P100.
 * Test: `tests/differential/kwargs_forwarding.py`.
+
+### Phase 8: coverage after typing constructs, mixins and kwargs forwarding (2026-11-23)
+
+* stdlib 62.4% → 64.1% of functions and methods (42 modules); `requests` 74.9% → 82.8%,
+  `huggingface_hub` 75.0% → 75.1%, `langchain_core` 43.5% → 49.5%.

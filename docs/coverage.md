@@ -17,9 +17,9 @@ covered.
   tuples, classes, closures, generators, coroutines) is native. Values from CPython imports
   (numpy arrays, sockets, `re` matches, ...) stay Python objects; in hybrid mode they work
   through CPython at reported boundaries, and native-only mode rejects them.
-* **Real code, as it is:** 62% of the functions and methods in the standard library pass,
-  and 75% / 75% / 44% of those in the `requests` / `huggingface_hub` / `langchain_core`
-  packages. Whole modules pass much less often (41 of 167 stdlib modules), because one
+* **Real code, as it is:** 64% of the functions and methods in the standard library pass,
+  and 83% / 75% / 50% of those in the `requests` / `huggingface_hub` / `langchain_core`
+  packages. Whole modules pass much less often (42 of 167 stdlib modules), because one
   blocker in a module stops that whole module.
 * **Code written for pyrock:** the 21 samples, 3 demos and 14 user samples all compile; the
   fully native ones need no CPython at all.
@@ -78,10 +78,10 @@ Results (pyrock 0.1.0, CPython 3.12.3, 2026-11-23):
 
 | Corpus | Modules with no error | Functions + methods accepted |
 |---|---|---|
-| CPython standard library (top-level modules) | 41 / 167 (25%) | 4260 / 6823 (62.4%; 62.2% of lines) |
-| `requests` (all modules, in place) | 11 / 19 | 200 / 267 (74.9%; 82.0% of lines) |
-| `huggingface_hub` (all modules, in place) | 54 / 182 | 1578 / 2103 (75.0%) |
-| `langchain_core` (all modules, in place) | 45 / 188 | 1017 / 2339 (43.5%) |
+| CPython standard library (top-level modules) | 42 / 167 (25%) | 4374 / 6823 (64.1%; 64.1% of lines) |
+| `requests` (all modules, in place) | 14 / 19 | 221 / 267 (82.8%; 92.8% of lines) |
+| `huggingface_hub` (all modules, in place) | 57 / 182 | 1580 / 2103 (75.1%) |
+| `langchain_core` (all modules, in place) | 51 / 188 | 1158 / 2339 (49.5%) |
 
 Before phase 8 started (same day): stdlib 14 modules and 54.3% of functions. The packages
 were then measured one top-level file at a time with relative imports rejected (`requests`
@@ -109,10 +109,9 @@ left out because most of them follow from another blocker):
 | Count | Blocker | Typical source |
 |---|---|---|
 | 110 | Computed class-body assignment | `__add__, __radd__ = _operator_fallbacks(...)`, dispatch tables |
-| 96 | Base class that isn't a native class | `NamedTuple`, `dict`, `threading.Thread`, `collections.abc` ABCs |
+| 105 | Base class that isn't a native class | `dict`, `threading.Thread`, `collections.abc` ABCs, `Exception` mixed with other bases |
 | 44 | `class` inside a function or block, `match` | |
-| 42 | Method decorator other than `@property`/`@staticmethod`/`@classmethod`/`@abstractmethod` | `@functools.cached_property`, `@lru_cache`, `@contextmanager` |
-| 39 | Multiple inheritance | mixins |
+| 36 | Method decorator other than `@property`/`@staticmethod`/`@classmethod`/`@abstractmethod`/`@cached_property` | `@lru_cache`, `@contextmanager`, library-specific ones |
 | 33 | `eval`/`exec`/`globals()`/`locals()` without a namespace | |
 | 29 | Class keywords | a metaclass other than `ABCMeta` |
 | 27 | Other statements in a class body | `if` / `for` in a class body |
@@ -122,11 +121,11 @@ left out because most of them follow from another blocker):
 | 22 | Adding class attributes after the class statement | `Cls.x = ...` at module level |
 | 20 | `del` of a function or import name | module cleanup: `del _f`, `del re` |
 
-In third-party packages, CPython base classes lead (`pydantic.BaseModel`, `typing.Protocol`,
-`TypedDict`), then class decorators, `f(*args)` calls into native functions with fixed
-parameters (123 in `langchain_core`) and library-specific method decorators. `typing`'s
-`@override` and `@overload` (497 uses in `langchain_core`) were the largest blocker until
-they were made no-ops.
+In third-party packages, CPython base classes lead (`pydantic.BaseModel` above all), then
+class and method decorators, and names a package defines in ways a static import can't
+see (a module-level `__getattr__` for lazy imports, P140). `typing`'s `@override` /
+`@overload`, `**kwargs` forwarding, multiple inheritance and `Protocol`/`Generic` bases were
+the largest blockers until phase 8 handled them.
 
 ## What this doesn't cover
 

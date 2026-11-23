@@ -7,7 +7,7 @@ called with, and builds a native executable with Cargo. It explains every decisi
 Status: **prototype.** Classes, closures, exceptions, native collections, generators and
 async/await compile natively, as does Rust and C interop with structs, slices and callbacks.
 52 of Python's 55 statement and expression kinds compile; on the standard library as it is,
-62% of functions and methods are accepted ([docs/coverage.md](docs/coverage.md)).
+64% of functions and methods are accepted ([docs/coverage.md](docs/coverage.md)).
 The current state, with measured speedups and known differences, is in
 [docs/status.md](docs/status.md); the history is in [docs/roadmap.md](docs/roadmap.md).
 In hybrid mode (the default), anything that can't be compiled natively crosses into an
