@@ -17,7 +17,7 @@ pyrock bench bench_bpe.py --release --runs 3
 ```
 
 `bench_bpe.py` trains the tokenizer on a generated 200k-word corpus. It is pure Python,
-so CPython can run it too: about 2.7x faster natively (string-allocation bound).
+so CPython can run it too: about 3x faster natively (string-allocation bound).
 
 `reference/` holds CPython versions of the Rust and C modules, used only to check the
 output: `PYTHONPATH=reference python3 main.py` prints the same as `pyrock run main.py`.

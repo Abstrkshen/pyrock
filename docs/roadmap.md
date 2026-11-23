@@ -155,7 +155,10 @@ Known bugs:
 - [x] `isinstance` doesn't narrow a union of classes: P308 false warnings, `range(len(v.xs))` rejected (P301), and in a larger program invalid Rust that rustc rejects (fixed; `tests/differential/isinstance_narrowing.py`)
 - [ ] `zip` over a class's list attribute and a parameter collapses inference for the whole program to `object` (`tests/known_bugs/zip_collapses_inference.py`)
 - [ ] Overridden methods across a class hierarchy collapse inference to `object` (`tests/known_bugs/method_overrides_collapse.py`)
-- [ ] Generator expressions cost about 6 µs per creation natively (slower than CPython in `" ".join(... for ...)` hot loops)
+- [x] Generator expressions cost about 6 µs per creation natively (slower than CPython in `" ".join(... for ...)` hot loops; the BPE benchmark fell to 0.23x CPython): consumed ones compile as loops, and coroutine stacks are reused
+- [x] `any()` / `all()` over a generator read it to the end (an infinite generator hung, side effects ran too often)
+- [x] A recursive call inside a comprehension (`" ".join([c.show() for c in self.kids])`) was P306 "recursion without a base case"
+- [x] `pyrock bench` reported "stdout identical" and a speedup when both runs crashed
 
 - [x] `globals()` panicked at runtime; `eval`, `exec` and `locals()` raised
       `SystemError: frame does not exist` (compiled code has no Python frame)
@@ -1162,3 +1165,40 @@ runnable ones print the same as CPython.
   `cargo test --workspace`, the tour (23/23) and the apps (3/3) pass, golden snapshots are
   unchanged, and `raylib-breakout` checks exactly as before (63 native, 230 boundaries).
 
+### Launch fixes from the video review (2026-11-23)
+
+From `.ignore/gaps/TO-PYROCK-DEV.md`, written while making the first video.
+
+* **Generator expressions.** Since Phase 6.3 each one was a stackful coroutine with its own
+  2 MiB stack: an `mmap`, `mprotect` and `munmap` per generator, about 5 µs. The BPE
+  benchmark creates one per word and fell from 2.7x to 0.23x CPython. Now
+  `tuple`/`list`/`set`/`frozenset`/`dict`/`sorted`/`sum`/`min`/`max`/`"<literal>".join`
+  of a generator expression compile it as a list comprehension (those builtins read every
+  item anyway), and each thread keeps up to 16 free coroutine stacks for the rest. BPE:
+  3.0x CPython.
+* `any()` / `all()` over a generator now stop at the first deciding item, as in CPython.
+* A comprehension whose item is a recursive call still pending in the current inference
+  pass adds no evidence (like `out.append(...)` in a loop), instead of failing the whole
+  expression: `" ".join([c.show() for c in self.kids])` compiles.
+* `rt::Never` (the element type of an empty container) is a zero-sized struct rather than
+  an empty enum, so a loop variable over `[]` can have a placeholder value.
+* `pyrock bench` reports a speedup only when both runs exit 0 with identical stdout, and
+  otherwise fails and shows the failing run's stderr. `--min-speedup X` fails below X; the
+  CPU model is printed only with `--hardware`; paths are shown relative to the current
+  directory.
+* `--help` / `-h` print the usage and exit 0, after any command; an unknown command is
+  reported as such.
+* `explain` shows file paths relative to the current directory (the home directory as
+  `~` otherwise), puts the tier first and pads signatures to at most 60 columns, so one
+  record-typed signature no longer widens every row.
+* Executables: source paths compiled in (panic locations) show `$HOME` as `~`
+  (`--remap-path-prefix`); `PYROCK_SYS_PATH` replaces a hybrid executable's compiled-in
+  `sys.path` at run time; on macOS, hybrid builds add an rpath to the Python framework, so
+  Xcode's `/usr/bin/python3` works (`dyld: Library not loaded: @rpath/Python3.framework`
+  before). The README says what a hybrid executable needs on another machine.
+* `scripts/bench_all.sh` measures every benchmark the docs quote and prints the table with
+  the commit; `benchmarks/game_state_dicts.py` and `game_state_classes.py` are committed
+  (they were measured from scratch files before). CI runs it with `--gate`, failing when a
+  speedup falls below a floor well under the documented figure, and has a macOS job that
+  runs the release smoke test, including a hybrid build with Xcode's python3.
+* Tests: `tests/differential/genexpr_consumers.py`.

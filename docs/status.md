@@ -58,19 +58,29 @@ threads.
 
 Full type tables: [imports.md](imports.md).
 
-## Speed (measured, `--release`, Intel Core 7 240H, CPython 3.12.3)
+## Speed (measured)
 
-| Program | CPython | pyrock | |
+Measured at commit `1c69939` with `bash scripts/bench_all.sh --runs 5` (Intel Core 7 240H,
+CPython 3.12.3, rustc 1.96.0): medians of 5 runs, wall clock including process start,
+`--release`, both runs exiting 0 with identical stdout.
+
+| Program | CPython | pyrock | Speedup |
 |---|---|---|---|
-| `benchmarks/numeric_loop.py` (int/float/recursion) | 626 ms | 13 ms | 48x |
-| `examples/apps/gui/headless.py` (300 balls, pairwise collisions) | 3.3 s | 0.2 s | 16.7x |
-| Game state in dicts (200k frames, record dicts) | 0.58 s | 31 ms | 18.8x |
-| The same state in classes | 0.47 s | 46 ms | 10x |
-| `examples/apps/ai/bench_bpe.py` (string-heavy tokenizer training) | 0.40 s | 0.15 s | 2.7x |
+| `benchmarks/numeric_loop.py` (int and float loops, recursion) | 998 ms | 20.8 ms | 47.9x |
+| `benchmarks/game_state_dicts.py` (game state in dicts, 200k frames) | 568 ms | 32.0 ms | 17.7x |
+| `benchmarks/game_state_classes.py` (the same state in classes) | 426 ms | 36.1 ms | 11.8x |
+| `examples/apps/gui/headless.py` (300 balls, pairwise collisions) | 3.4 s | 206 ms | 16.3x |
+| `examples/apps/ai/bench_bpe.py` (BPE tokenizer training, string-heavy) | 398 ms | 135 ms | 3.0x |
+| `benchmarks/collections_bench.py` (word counts, sorting, a prime sieve) | 253 ms | 83.5 ms | 3.0x |
 
-Code that mostly calls into CPython (numpy, OpenCV, the `raylib` package) gains little:
-each bridged operation costs about 15 ns against about 5 ns in CPython's own specialized
-bytecode, so keep hot loops on native values.
+`scripts/bench_all.sh` prints this table for the current commit. CI runs it with `--gate`,
+which fails when a speedup falls below a floor set well under these figures (BPE fell to
+0.23x for a while, unnoticed, before the gate existed).
+
+Code that mostly calls into CPython (numpy, OpenCV, the `raylib` package, LangChain,
+`huggingface_hub`) gains little: it gives the same output, but each bridged operation costs
+about 15 ns against about 5 ns in CPython's own specialized bytecode, so keep hot loops on
+native values.
 
 ## Examples
 

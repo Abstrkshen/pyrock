@@ -11,5 +11,5 @@ pyrock bench headless.py --release --runs 3
 pyrock run main.py --python .venv/bin/python -- --frames 120
 ```
 
-`headless.py` runs the simulation without a window: about 17x faster than CPython.
+`headless.py` runs the simulation without a window: about 16x faster than CPython.
 Without `--frames`, the window stays open until you close it.

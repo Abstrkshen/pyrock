@@ -37,7 +37,7 @@ each one against CPython.
 |---|---|---|
 | [backend](apps/backend/) | A JSON API on asyncio: native store, routing and validation; sockets and `json` through CPython | |
 | [ai](apps/ai/) | A BPE tokenizer in Python, a bigram model in Rust, sampling in C; no CPython at all | |
-| [gui](apps/gui/) | 300 colliding balls: native physics (17x CPython) drawn with raylib | `pip install raylib` (see its README) |
+| [gui](apps/gui/) | 300 colliding balls: native physics (16x CPython) drawn with raylib | `pip install raylib` (see its README) |
 | [ollama-agents](apps/ollama-agents/) | An AI-agent HTTP server: native Python logic, Rust HTTP and JSON, no CPython at runtime | [Ollama](https://ollama.com) with `qwen3.5:4b` |
 
 `bash apps/run_all.sh` checks backend, ai and gui against their expected output.

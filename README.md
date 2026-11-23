@@ -80,7 +80,7 @@ pyrock explain main.py [--format json]               # imports, inferred types, 
 pyrock run     main.py [--release] [--mode native-only] [-- ARGS...]
 pyrock build   main.py [--release] [--out DIR]       # prints the executable's path
 pyrock emit    main.py [--out DIR]                   # write the Cargo project, don't build
-pyrock bench   main.py [--baseline python] [--runs N]
+pyrock bench   main.py [--runs N] [--min-speedup X]  # time against CPython
 ```
 
 `main.py` is the program's entry file; the `.py`, `.rs` and `.c` files it imports from its
@@ -90,13 +90,13 @@ directory are compiled into the same executable. A typical session:
    problem (`main.py:12:5  P301  error: ...`). It doesn't build anything, so it is quick.
 2. **`pyrock explain main.py`** shows how each import was resolved (Python, Rust, C or
    CPython), the generic signature inferred for each function, every specialization that was
-   compiled (`add(a: int, b: int) -> int  native  add__int_int`), and the list of
+   compiled (`native  add(a: int, b: int) -> int  add__int_int`), and the list of
    **CPython boundaries**: each line of your program that will run through Python.
 3. **`pyrock run main.py`** builds and runs. Arguments after `--` go to your program. Output,
    exit status and the final `Kind: message` line of an uncaught exception match `python3`.
 4. **`pyrock run main.py --release`** turns on optimizations; use it to measure speed.
-   **`pyrock bench main.py`** times the program against CPython and checks that both print
-   the same output.
+   **`pyrock bench main.py`** times the program against CPython. It reports a speedup only
+   when both runs exit 0 and print the same output, and fails otherwise.
 
 Options:
 
@@ -108,14 +108,24 @@ Options:
 | `--python PATH` | The interpreter used to parse, to embed, and whose `sys.path` the program sees. Pass a virtualenv's `python` to use its packages |
 | `--out DIR` | Where `emit`/`build` write the Cargo project (default `.pyrock/<name>/` next to the source) |
 | `--format json` | `explain` as JSON, for tools |
+| `--runs N` | `bench`: runs of each program (default 5); the median is reported |
+| `--min-speedup X` | `bench`: exit 1 unless the native build is at least X times faster (for CI) |
+| `--hardware` | `bench`: also print the CPU model |
 
 **What you get.** `.pyrock/<name>/` holds the generated `Cargo.toml` and `src/main.rs`
 (readable Rust, one function per specialization, each with a comment pointing at its
 Python line), `pyrock-report.json`, `pyrock.sourcemap.json` and, after a build, the
 executable `.pyrock/<name>/<name>`. A native-only executable is self-contained: copy it to
-another machine with the same OS and architecture and run it. A hybrid executable loads
-`libpython` and uses the build interpreter's packages, so it runs where that Python is
-installed.
+another machine with the same OS and architecture and run it.
+
+**Hybrid executables need the build machine's Python.** A hybrid executable loads
+`libpython` of the same Python version it was built with, and starts CPython with the
+build interpreter's `sys.path` (its standard library, its virtualenv's site-packages, the
+source folder) compiled in. It runs as is where that Python and those packages are at the
+same paths. Elsewhere, set `PYROCK_SYS_PATH` (a `:`-separated list that replaces the
+compiled-in one) and, if the standard library lives elsewhere, `PYTHONHOME`. Compiled
+modules keep their source path as `__file__`, as in CPython. Other source paths compiled
+into a binary (in panic messages) show your home directory as `~`.
 
 **Diagnostics.** Codes are grouped by kind: `P0xx` the source couldn't be read, `P1xx` a
 construct pyrock doesn't support or a name problem, `P2xx` a CPython boundary (errors only
@@ -124,7 +134,8 @@ in native-only mode), `P3xx` types (`P301` is an operation CPython would reject 
 
 **Environment.** `PYROCK_TARGET_DIR` moves the shared Cargo build cache (default
 `~/.cache/pyrock/target`); `PYROCK_RUNTIME` points at a runtime crate to use instead of the
-embedded one.
+embedded one. At run time, `PYROCK_SYS_PATH` replaces a hybrid executable's compiled-in
+`sys.path`.
 
 ## Imports: Python, Rust and C
 
@@ -275,12 +286,24 @@ Progress towards compiling real backend, AI and GUI apps is tracked in
 
 ## Benchmarks
 
-`pyrock bench benchmarks/numeric_loop.py --runs 3` on an Intel Core 7 240H, with Python
-3.12.3 and rustc 1.96.0: CPython median 626 ms, native median 13 ms, stdout identical. More
-measurements (16–19x on game-style physics and state updates, 2.7x on string-heavy code) are
-in [docs/status.md](docs/status.md). These are wall-clock times including process startup,
-not a general speedup claim. Code that spends its time in bridged Python calls won't be
-faster, and each boundary crossing has its own cost.
+`bash scripts/bench_all.sh` measures each benchmark against CPython with `pyrock bench`
+and prints a table for the current commit. At commit `1c69939`, on an Intel Core 7 240H
+with Python 3.12.3:
+
+| Program | Speedup |
+|---|---|
+| `benchmarks/numeric_loop.py` (int and float loops, recursion) | 47.9x |
+| `benchmarks/game_state_dicts.py` (game state in dicts) | 17.7x |
+| `examples/apps/gui/headless.py` (300 balls, pairwise collisions) | 16.3x |
+| `benchmarks/game_state_classes.py` (the same state in classes) | 11.8x |
+| `examples/apps/ai/bench_bpe.py` (BPE tokenizer training, string-heavy) | 3.0x |
+| `benchmarks/collections_bench.py` (word counts, sorting, a prime sieve) | 3.0x |
+
+Times are in [docs/status.md](docs/status.md). They are wall-clock times including process
+start, not a general speedup claim. Code that spends its time in Python packages
+(LangChain, `huggingface_hub`, numpy) gives the same output but is no faster, since that
+work still runs in CPython, and its executable needs the build machine's virtualenv. CI
+fails when a speedup drops well below these figures.
 
 More documentation:
 

@@ -25,11 +25,12 @@ pyrock build main.py [--release] [--out DIR]   # prints the executable path
 pyrock check main.py [--mode native-only]      # diagnostics only, no build (fast)
 pyrock explain main.py [--format json]         # imports, inferred generics, specializations, boundaries
 pyrock emit main.py --out DIR                  # write the Cargo project, don't build
-pyrock bench main.py --baseline python --runs 5  # wall-time vs CPython + output check
+pyrock bench main.py --runs 5 [--min-speedup X]  # wall-time vs CPython; fails if either run fails or outputs differ
 ```
 
 Global option: `--python PATH` selects the interpreter used for parsing, for embedding and
-for `sys.path` (use a venv's python to get its packages).
+for `sys.path` (use a venv's python to get its packages). A hybrid executable embeds that
+`sys.path`; `PYROCK_SYS_PATH` (`:`-separated) replaces it at run time.
 
 Output layout: `.pyrock/<stem>/` next to the source holds `Cargo.toml`, `src/main.rs`,
 `pyrock-report.json`, `pyrock.sourcemap.json` and, after `build`/`run`, the executable

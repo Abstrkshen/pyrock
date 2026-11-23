@@ -427,15 +427,17 @@ pyrock --version</pre>
 <section id="speed">
   <div class="wrap">
     <h2>Speed</h2>
-    <p class="lede">Measured with <code>--release</code> on an Intel Core 7 240H against
-    CPython 3.12.3. Wall-clock time including process start, with identical output in every
-    run.</p>
+    <p class="lede">Measured at commit <code>1c69939</code> with <code>--release</code> on an
+    Intel Core 7 240H against CPython 3.12.3: wall-clock time including process start, both
+    runs exiting 0 with identical output. <code>bash scripts/bench_all.sh</code> repeats
+    these measurements; CI fails if a speedup drops well below them.</p>
     <div class="bars">
-      <div class="bar"><div class="what"><code>numeric_loop.py</code><small>int and float loops, recursion</small></div><div><div class="track"><div class="fill" style="--x:48">48x</div></div><div class="times">CPython 626 ms, pyrock 13 ms</div></div></div>
-      <div class="bar"><div class="what">Game state in dicts<small>200k frames of record dicts</small></div><div><div class="track"><div class="fill" style="--x:18.8">18.8x</div></div><div class="times">CPython 0.58 s, pyrock 31 ms</div></div></div>
-      <div class="bar"><div class="what"><code>apps/gui/headless.py</code><small>300 balls, pairwise collisions</small></div><div><div class="track"><div class="fill" style="--x:16.7">16.7x</div></div><div class="times">CPython 3.3 s, pyrock 0.2 s</div></div></div>
-      <div class="bar"><div class="what">The same game state in classes<small>200k frames</small></div><div><div class="track"><div class="fill" style="--x:10">10x</div></div><div class="times">CPython 0.47 s, pyrock 46 ms</div></div></div>
-      <div class="bar"><div class="what"><code>apps/ai/bench_bpe.py</code><small>training a BPE tokenizer, string-heavy</small></div><div><div class="track"><div class="fill" style="--x:2.7">2.7x</div></div><div class="times">CPython 0.40 s, pyrock 0.15 s</div></div></div>
+      <div class="bar"><div class="what"><code>numeric_loop.py</code><small>int and float loops, recursion</small></div><div><div class="track"><div class="fill" style="--x:47.9">47.9x</div></div><div class="times">CPython 998 ms, pyrock 20.8 ms</div></div></div>
+      <div class="bar"><div class="what"><code>game_state_dicts.py</code><small>game state in dicts, 200k frames</small></div><div><div class="track"><div class="fill" style="--x:17.7">17.7x</div></div><div class="times">CPython 568 ms, pyrock 32 ms</div></div></div>
+      <div class="bar"><div class="what"><code>apps/gui/headless.py</code><small>300 balls, pairwise collisions</small></div><div><div class="track"><div class="fill" style="--x:16.3">16.3x</div></div><div class="times">CPython 3.4 s, pyrock 206 ms</div></div></div>
+      <div class="bar"><div class="what"><code>game_state_classes.py</code><small>the same game state in classes</small></div><div><div class="track"><div class="fill" style="--x:11.8">11.8x</div></div><div class="times">CPython 426 ms, pyrock 36 ms</div></div></div>
+      <div class="bar"><div class="what"><code>apps/ai/bench_bpe.py</code><small>training a BPE tokenizer, string-heavy</small></div><div><div class="track"><div class="fill" style="--x:3">3.0x</div></div><div class="times">CPython 398 ms, pyrock 135 ms</div></div></div>
+      <div class="bar"><div class="what"><code>collections_bench.py</code><small>word counts, sorting, a prime sieve</small></div><div><div class="track"><div class="fill" style="--x:3">3.0x</div></div><div class="times">CPython 253 ms, pyrock 84 ms</div></div></div>
     </div>
     <div class="speed-notes">
       <div>
@@ -446,9 +448,11 @@ pyrock --version</pre>
       </div>
       <div>
         <h3>Where it doesn't</h3>
-        <p>Code that spends its time inside Python packages (numpy, OpenCV, an HTTP
-        framework) runs at the same speed, because that work still happens in CPython. Each
-        crossing into CPython costs about 15&nbsp;ns, so keep hot loops on native values.</p>
+        <p>Code that spends its time inside Python packages (numpy, OpenCV, LangChain, an
+        HTTP framework) gives the same output at the same speed, because that work still
+        happens in CPython. Each crossing into CPython costs about 15&nbsp;ns, so keep hot
+        loops on native values. Such a program's executable also needs the Python and
+        packages it was built with.</p>
       </div>
     </div>
   </div>
