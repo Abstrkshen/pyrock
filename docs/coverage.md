@@ -18,7 +18,7 @@ covered.
   (numpy arrays, sockets, `re` matches, ...) stay Python objects; in hybrid mode they work
   through CPython at reported boundaries, and native-only mode rejects them.
 * **Real code, as it is:** 62% of the functions and methods in the standard library pass,
-  and 68% / 73% / 41% of those in the `requests` / `huggingface_hub` / `langchain_core`
+  and 75% / 75% / 44% of those in the `requests` / `huggingface_hub` / `langchain_core`
   packages. Whole modules pass much less often (41 of 167 stdlib modules), because one
   blocker in a module stops that whole module.
 * **Code written for pyfast:** the 21 samples, 3 demos and 14 user samples all compile; the
@@ -79,9 +79,9 @@ Results (pyfast 0.1.0, CPython 3.12.3, 2026-11-23):
 | Corpus | Modules with no error | Functions + methods accepted |
 |---|---|---|
 | CPython standard library (top-level modules) | 41 / 167 (25%) | 4260 / 6823 (62.4%; 62.2% of lines) |
-| `requests` (all modules, in place) | 9 / 19 | 182 / 267 (68.2%; 79.7% of lines) |
-| `huggingface_hub` (all modules, in place) | 53 / 182 | 1538 / 2103 (73.1%) |
-| `langchain_core` (all modules, in place) | 45 / 188 | 969 / 2339 (41.4%) |
+| `requests` (all modules, in place) | 11 / 19 | 200 / 267 (74.9%; 82.0% of lines) |
+| `huggingface_hub` (all modules, in place) | 54 / 182 | 1578 / 2103 (75.0%) |
+| `langchain_core` (all modules, in place) | 45 / 188 | 1017 / 2339 (43.5%) |
 
 Before phase 8 started (same day): stdlib 14 modules and 54.3% of functions. The packages
 were then measured one top-level file at a time with relative imports rejected (`requests`
@@ -122,10 +122,11 @@ left out because most of them follow from another blocker):
 | 22 | Adding class attributes after the class statement | `Cls.x = ...` at module level |
 | 20 | `del` of a function or import name | module cleanup: `del _f`, `del re` |
 
-In third-party packages, method decorators lead (`langchain_core`: 542, mostly its own
-decorators such as `@deprecated` and `@override`), then CPython base classes
-(`pydantic.BaseModel`, `typing.Protocol`, `TypedDict`) and `f(*args)` calls into native
-functions with fixed parameters (121).
+In third-party packages, CPython base classes lead (`pydantic.BaseModel`, `typing.Protocol`,
+`TypedDict`), then class decorators, `f(*args)` calls into native functions with fixed
+parameters (123 in `langchain_core`) and library-specific method decorators. `typing`'s
+`@override` and `@overload` (497 uses in `langchain_core`) were the largest blocker until
+they were made no-ops.
 
 ## What this doesn't cover
 

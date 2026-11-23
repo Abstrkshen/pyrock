@@ -12,8 +12,78 @@
 use serde_json::{json, Value};
 
 pub fn rewrite(module: &mut Value) {
+    let typing = typing_names(module);
+    if !typing.is_empty() {
+        strip_typing_decorators(module, &typing);
+    }
     let mut n = 0;
     walk(module, &mut n);
+}
+
+/// Local names for `typing`'s `overload`, `override` and `final` (also from
+/// `typing_extensions`), and for the modules themselves (as `typing.X`).
+fn typing_names(module: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for st in module["body"].as_array().into_iter().flatten() {
+        let from_typing = |m: &Value| matches!(m.as_str(), Some("typing" | "typing_extensions"));
+        match ty(st) {
+            "ImportFrom" if from_typing(&st["module"]) => {
+                for a in st["names"].as_array().into_iter().flatten() {
+                    let name = a["name"].as_str().unwrap_or("");
+                    if matches!(name, "overload" | "override" | "final") {
+                        out.push((a["asname"].as_str().unwrap_or(name).to_string(), name.to_string()));
+                    }
+                }
+            }
+            "Import" => {
+                for a in st["names"].as_array().into_iter().flatten() {
+                    if from_typing(&a["name"]) {
+                        out.push((a["asname"].as_str().or(a["name"].as_str()).unwrap_or("").to_string(), String::new()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Which typing decorator `d` is (`overload`, `override`, `final`), if any.
+fn typing_decorator(d: &Value, names: &[(String, String)]) -> Option<String> {
+    match ty(d) {
+        "Name" => names.iter().find(|(l, r)| !r.is_empty() && d["id"] == l.as_str()).map(|x| x.1.clone()),
+        "Attribute" if ty(&d["value"]) == "Name" => {
+            let attr = d["attr"].as_str().unwrap_or("");
+            let is_mod = names.iter().any(|(l, r)| r.is_empty() && d["value"]["id"] == l.as_str());
+            (is_mod && matches!(attr, "overload" | "override" | "final")).then(|| attr.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// `@override` / `@final` only inform type checkers: dropped. `@overload`
+/// stubs are replaced by the real definition that follows: removed.
+fn strip_typing_decorators(v: &mut Value, names: &[(String, String)]) {
+    match v {
+        Value::Array(items) => items.iter_mut().for_each(|x| strip_typing_decorators(x, names)),
+        Value::Object(map) => {
+            for key in ["body", "orelse", "finalbody"] {
+                if let Some(Value::Array(stmts)) = map.get_mut(key) {
+                    stmts.retain(|st| {
+                        !(matches!(ty(st), "FunctionDef" | "AsyncFunctionDef")
+                            && st["decorator_list"].as_array().is_some_and(|ds| ds.iter().any(|d| typing_decorator(d, names).as_deref() == Some("overload"))))
+                    });
+                }
+            }
+            if let Some(Value::Array(ds)) = map.get_mut("decorator_list") {
+                ds.retain(|d| typing_decorator(d, names).is_none());
+            }
+            for (_, child) in map.iter_mut() {
+                strip_typing_decorators(child, names);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn walk(v: &mut Value, n: &mut usize) {

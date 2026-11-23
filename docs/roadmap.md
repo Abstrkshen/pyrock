@@ -943,3 +943,13 @@ runnable ones print the same as CPython.
 * `scripts/coverage.py`: stdlib 62.4% of functions and methods (41 modules); `requests`
   68.2%, `huggingface_hub` 73.1%, `langchain_core` 41.4%, each measured in place. Ranked
   blockers in [coverage.md](coverage.md).
+
+### Phase 8: typing decorators (2026-11-23)
+
+* `@override` and `@final` (from `typing` / `typing_extensions`, by name or as `typing.X`)
+  are dropped and `@overload` stubs removed before lowering (`desugar.rs`): they only inform
+  type checkers, and CPython keeps the last, real definition. `langchain_core` had 420
+  `@override` and 77 `@overload` uses.
+* Coverage: `requests` 68.2% → 74.9%, `huggingface_hub` 73.1% → 75.0%, `langchain_core`
+  41.4% → 43.5%; stdlib unchanged at 62.4%.
+* Test: `tests/differential/typing_decorators.py` (native-only).
