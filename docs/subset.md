@@ -215,8 +215,9 @@ whole module through CPython instead, P220):
 * classes with a CPython base class (other than `Enum`/`IntEnum`/`StrEnum`/`ABC`/`NamedTuple`), metaclasses other than `ABCMeta`,
   class decorators other than `@dataclass`, `@dataclass(unsafe_hash=...)`, adding class
   attributes after the class statement;
-* `f(*xs)` where `xs` is a list (not a tuple of known length) filling fixed parameters, and
-  `*`/`**` arguments to Rust/C functions;
+* `f(*xs)` where `xs` is a list (not a tuple of known length) filling fixed parameters,
+  `**mapping` that would fill named parameters (into the callee's own `**kwargs` is fine),
+  and `*`/`**` arguments to Rust/C functions;
 * `match`, `type X = ...`, `except*`, `...` as a value, complex numbers, `del` of a
   function or import name, `:=` inside generator expressions and lambdas;
 * `from x import *`;

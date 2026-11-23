@@ -129,7 +129,9 @@ Language coverage (ordered by how much code each one blocks in the standard libr
 - [x] Multiple inheritance (mixins, diamonds) with CPython's C3 MRO
 - [x] `Protocol` / `Generic[T]` bases, `TypeVar`, `NewType`, `TypedDict`
 - [ ] `collections.namedtuple`
-- [ ] Clearer diagnostic when a field holds several types in native-only mode (reported as P306 today)
+- [ ] Clearer native-only diagnostics for values of several types: a field (reported as P306) and `dict | dict` with different value types (reported as a CPython TypeError)
+- [x] `f(**kwargs)` forwarded into a native function's own `**kwargs`
+- [ ] `f(*xs)` with a list filling fixed parameters; `**mapping` filling named parameters
 - [x] Packages next to the program, relative imports, re-exported names
 - [ ] `match`
 - [ ] Arbitrary-precision integers (`Project.md` §6 and M4; today results beyond i64 raise `OverflowError`)
@@ -1007,3 +1009,12 @@ runnable ones print the same as CPython.
   keeps its field as a Python object (hybrid mode); native-only reports it (currently with
   a misleading P306 message, listed above).
 * Test: `tests/differential/typing_runtime.py`.
+
+### Phase 8: forwarding `**kwargs` (2026-11-23)
+
+* `f(..., **mapping)` into a native function with its own `**kwargs` parameter, when the
+  call binds every named parameter itself (so no key could fill one): the mapping is merged
+  into the callee's kwargs dict, as in callback plumbing such as `handle_event(handlers,
+  name, *args, **kwargs)`. A call that would leave a named parameter for the mapping is
+  still P100.
+* Test: `tests/differential/kwargs_forwarding.py`.

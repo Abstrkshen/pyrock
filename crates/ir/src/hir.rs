@@ -900,8 +900,24 @@ fn builtin_call(name: &str, args: Vec<Expr>, kwargs: Vec<(String, Expr)>, sp: Sp
 pub fn bind_call(sig: &CallSig, fname: &str, args: Vec<Expr>, kwargs: Vec<(String, Expr)>, sp: Span) -> Result<(Vec<Expr>, Vec<usize>), BindError> {
     let te = |m: String| BindError::TypeError(m);
     let mut slots: Vec<Option<(Expr, usize)>> = vec![None; sig.names.len()];
-    if kwargs.iter().any(|(k, _)| k == "**") {
+    // `**mapping` goes into the callee's own `**kwargs` (checked below that
+    // no named parameter is left for it to fill).
+    if kwargs.iter().any(|(k, _)| k == "**") && sig.kwarg.is_none() {
         return Err(BindError::Unsupported(format!("`**mapping` in a call of the native function `{fname}`")));
+    }
+    let mut mappings: Vec<(usize, Expr)> = Vec::new();
+    let mut kwargs = kwargs;
+    {
+        let npos = args.len();
+        let mut rest = Vec::new();
+        for (k, (name, v)) in kwargs.into_iter().enumerate() {
+            if name == "**" {
+                mappings.push((npos + k, v));
+            } else {
+                rest.push((name, v));
+            }
+        }
+        kwargs = rest;
     }
     let first_star = args.iter().position(|a| matches!(a.kind, ExprKind::Starred(_)));
     if let Some(fs) = first_star {
@@ -937,6 +953,14 @@ pub fn bind_call(sig: &CallSig, fname: &str, args: Vec<Expr>, kwargs: Vec<(Strin
         slots[idx] = Some((v, npos + k));
     }
     let mut out = Vec::new();
+    if !mappings.is_empty() {
+        if let Some(i) = (sig.n_posonly..sig.names.len()).find(|&i| slots[i].is_none()) {
+            return Err(BindError::Unsupported(format!(
+                "`**mapping` in a call of the native function `{fname}` that leaves the parameter `{}` to it",
+                sig.names[i]
+            )));
+        }
+    }
     let mut src = Vec::new();
     let mut missing = Vec::new();
     for (i, slot) in slots.into_iter().enumerate() {
@@ -986,8 +1010,17 @@ pub fn bind_call(sig: &CallSig, fname: &str, args: Vec<Expr>, kwargs: Vec<(Strin
         out.push(builtin_call("tuple", vec![list.unwrap()], vec![], sp));
     }
     if sig.kwarg.is_some() {
-        src.push((kw_extra_at.unwrap_or(usize::MAX), out.len()));
-        out.push(builtin_call("dict", vec![], kw_extra, sp));
+        let first_map = mappings.first().map(|m| m.0);
+        let at = match (kw_extra_at, first_map) {
+            (Some(a), Some(b)) => a.min(b),
+            (a, b) => a.or(b).unwrap_or(usize::MAX),
+        };
+        src.push((at, out.len()));
+        let mut d = builtin_call("dict", vec![], kw_extra, sp);
+        for (_, m) in mappings {
+            d = Expr { kind: ExprKind::BinOp { op: BinOp::BitOr, left: Box::new(builtin_call("dict", vec![m], vec![], sp)), right: Box::new(d) }, span: sp };
+        }
+        out.push(d);
     }
     src.sort();
     let order: Vec<usize> = src.iter().map(|&(_, i)| i).collect();
