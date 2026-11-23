@@ -8,6 +8,7 @@
 pub mod diag;
 pub mod hir;
 pub mod types;
+pub mod walk;
 
 pub use diag::{Diagnostic, Severity};
 pub use hir::*;

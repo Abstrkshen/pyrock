@@ -94,6 +94,10 @@ pub struct Spec {
     /// `None` (`if x is None: continue`, `if x is not None: ...`): typed `T`
     /// and unwrapped by codegen.
     pub narrowed: BTreeSet<Span>,
+    /// Reads of a local holding a union of native classes (by span) where every
+    /// path has narrowed it to one class or a smaller union (`if isinstance(v,
+    /// Num): v.n`): typed as that, and converted from the union by codegen.
+    pub class_narrowed: BTreeMap<Span, Ty>,
 }
 
 /// A module-level variable kept in a global cell: (unit, name).
@@ -257,15 +261,15 @@ impl<'m> Program<'m> {
     /// or cannot be `None`, combined with `not`, `and`, `or`. Only
     /// side-effect-free tests fold, so skipping their evaluation is exact.
     pub fn static_truth(&self, spec: &Spec, e: &Expr) -> Option<bool> {
-        static_truth(&spec.locals, e)
+        static_truth(self.module, &spec.locals, e)
     }
 
     pub fn short_circuit(&self, spec: &Spec, op: BoolOpKind, values: &[Expr]) -> Option<usize> {
-        short_circuit(&spec.locals, op, values)
+        short_circuit(self.module, &spec.locals, op, values)
     }
 }
 
-pub fn static_truth(locals: &BTreeMap<String, Slot>, e: &Expr) -> Option<bool> {
+pub fn static_truth(module: &Module, locals: &BTreeMap<String, Slot>, e: &Expr) -> Option<bool> {
     {
         let none_state = |x: &Expr| -> Option<bool> {
             match &x.kind {
@@ -290,15 +294,28 @@ pub fn static_truth(locals: &BTreeMap<String, Slot>, e: &Expr) -> Option<bool> {
                 let is = a && b;
                 Some(if rest[0].0 == CmpOp::Is { is } else { !is })
             }
-            ExprKind::Unary { op: UnaryOp::Not, operand } => static_truth(locals, operand).map(|v| !v),
-            // `isinstance(x, C)` on a local whose type decides it: an instance
-            // of exactly `C`, or a builtin value (never a native class).
+            ExprKind::Unary { op: UnaryOp::Not, operand } => static_truth(module, locals, operand).map(|v| !v),
+            // `isinstance(x, C)` on a local whose type decides it: a native
+            // instance (by the class hierarchy), a union whose members all
+            // agree, or a builtin value (never a native class).
             ExprKind::CallObj { func, args, kwargs }
                 if matches!(&func.kind, ExprKind::PyBuiltin(n) if n == "isinstance") && args.len() == 2 && kwargs.is_empty() =>
             {
-                let (ExprKind::Local(n), ExprKind::ClassRef(c)) = (&args[0].kind, &args[1].kind) else { return None };
+                let ExprKind::Local(n) = &args[0].kind else { return None };
+                let cs = class_refs(&args[1])?;
+                let is = |c: ClassId| cs.iter().any(|k| module.is_subclass(c, *k));
                 match locals.get(n)?.known()? {
-                    t if t.class_id() == Some(*c) => Some(true),
+                    t if t.class_id().is_some() => Some(is(t.class_id().unwrap())),
+                    t if is_class_union(t) => {
+                        let hits: Vec<bool> = t.union_members().unwrap().iter().map(|m| is(m.class_id().unwrap())).collect();
+                        if hits.iter().all(|h| *h) {
+                            Some(true)
+                        } else if hits.iter().all(|h| !*h) {
+                            Some(false)
+                        } else {
+                            None
+                        }
+                    }
                     Ty::Int | Ty::Float | Ty::Str | Ty::Bool | Ty::None => Some(false),
                     _ => None,
                 }
@@ -311,7 +328,7 @@ pub fn static_truth(locals: &BTreeMap<String, Slot>, e: &Expr) -> Option<bool> {
                 // f(x)` is false when `x` is always None, without calling `f`.
                 let and = *op == BoolOpKind::And;
                 for v in values {
-                    match static_truth(locals, v)? {
+                    match static_truth(module, locals, v)? {
                         false if and => return Some(false),
                         true if !and => return Some(true),
                         _ => {}
@@ -327,10 +344,10 @@ pub fn static_truth(locals: &BTreeMap<String, Slot>, e: &Expr) -> Option<bool> {
 
 /// For `a and b and c`: the number of leading operands evaluated when an
 /// operand's static truth short-circuits (`None` when not decided).
-pub fn short_circuit(locals: &BTreeMap<String, Slot>, op: BoolOpKind, values: &[Expr]) -> Option<usize> {
+pub fn short_circuit(module: &Module, locals: &BTreeMap<String, Slot>, op: BoolOpKind, values: &[Expr]) -> Option<usize> {
     {
         for (i, v) in values.iter().enumerate().take(values.len() - 1) {
-            match (static_truth(locals, v), op) {
+            match (static_truth(module, locals, v), op) {
                 (Some(false), BoolOpKind::And) | (Some(true), BoolOpKind::Or) => return Some(i + 1),
                 _ => {}
             }
@@ -375,10 +392,14 @@ pub fn specialize(module: &Module, mode: Mode) -> Program<'_> {
         let mut i = 0;
         while i < prog.specs.len() {
             let mut requests = Vec::new();
-            let (locals, ret, falls, gassigns, ret_widen, Extra { fassigns, news, gen_ret, send_widen, gen_falls, narrowed }) = analyze(&prog, i, &mut requests, None);
+            let (locals, ret, falls, gassigns, ret_widen, Extra { fassigns, news, gen_ret, send_widen, gen_falls, narrowed, class_narrowed }) = analyze(&prog, i, &mut requests, None);
             prog.specs[i].gen_falls = gen_falls;
             if prog.specs[i].narrowed != narrowed {
                 prog.specs[i].narrowed = narrowed;
+                changed = true;
+            }
+            if prog.specs[i].class_narrowed != class_narrowed {
+                prog.specs[i].class_narrowed = class_narrowed;
                 changed = true;
             }
             let calls: Vec<SpecKey> = requests.iter().map(|(k, _)| prog.resolve_key(k.clone())).collect();
@@ -633,7 +654,7 @@ fn add_spec(prog: &mut Program, key: SpecKey) {
     let maybe_unbound = definite::maybe_unbound(f);
     let id = prog.specs.len();
     prog.index.insert(key.clone(), id);
-    prog.specs.push(Spec { id, key, mangled, ret: Slot::Unknown, falls_through: true, analyzed: false, locals, maybe_unbound, ret_floor: Slot::Unknown, gen_send: Slot::Unknown, gen_ret: Slot::Unknown, gen_falls: true, calls: vec![], narrowed: BTreeSet::new() });
+    prog.specs.push(Spec { id, key, mangled, ret: Slot::Unknown, falls_through: true, analyzed: false, locals, maybe_unbound, ret_floor: Slot::Unknown, gen_send: Slot::Unknown, gen_ret: Slot::Unknown, gen_falls: true, calls: vec![], narrowed: BTreeSet::new(), class_narrowed: BTreeMap::new() });
 }
 
 type Requests = Vec<(SpecKey, Span)>;
@@ -666,11 +687,13 @@ fn analyze(
     let mut send_widen;
     let mut gen_falls = true;
     let mut narrowed;
+    let mut class_narrowed;
+    let receivers = receiver_reads(&f.body);
     loop {
         let before = locals.clone();
         ret = spec.ret_floor;
         gen_ret = Slot::Unknown;
-        let mut ctx = Ctx { prog, locals: &locals, requests: Some(requests), diags: None, gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![], generator: f.is_generator, yields: vec![], cur_send, gen_returns: vec![], send_widen: vec![], nn: Some(BTreeSet::new()), nn_reads: vec![], narrowed: None };
+        let mut ctx = Ctx { prog, locals: &locals, requests: Some(requests), diags: None, gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![], generator: f.is_generator, yields: vec![], cur_send, gen_returns: vec![], send_widen: vec![], nn: Some(Flow::default()), nn_reads: vec![], cn_reads: vec![], narrowed: None, class_narrowed: None, receivers: receivers.clone() };
         let mut assigns = Vec::new();
         falls = ctx.block(&f.body, &mut assigns, &mut ret);
         // A generator's "return type" is what it yields; what it returns is
@@ -690,6 +713,7 @@ fn analyze(
         }
         send_widen = std::mem::take(&mut ctx.send_widen);
         narrowed = narrowed_reads(std::mem::take(&mut ctx.nn_reads));
+        class_narrowed = class_narrowed_reads(std::mem::take(&mut ctx.cn_reads));
         gassigns = std::mem::take(&mut ctx.gassigns);
         ret_widen = std::mem::take(&mut ctx.ret_widen);
         fassigns = std::mem::take(&mut ctx.fassigns);
@@ -709,10 +733,107 @@ fn analyze(
     if let Some(d) = diags {
         let mut ret2 = Slot::Unknown;
         let mut sink = Vec::new();
-        let mut ctx = Ctx { prog, locals: &locals, requests: None, diags: Some(d), gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![], generator: f.is_generator, yields: vec![], cur_send, gen_returns: vec![], send_widen: vec![], nn: Some(BTreeSet::new()), nn_reads: vec![], narrowed: None };
+        let mut ctx = Ctx { prog, locals: &locals, requests: None, diags: Some(d), gassigns: vec![], widens: vec![], ret_widen: vec![], cur_ret, fassigns: vec![], news: vec![], generator: f.is_generator, yields: vec![], cur_send, gen_returns: vec![], send_widen: vec![], nn: Some(Flow::default()), nn_reads: vec![], cn_reads: vec![], narrowed: None, class_narrowed: None, receivers: receivers.clone() };
         ctx.block(&f.body, &mut sink, &mut ret2);
     }
-    (locals, ret, falls, gassigns, ret_widen, Extra { fassigns, news: news_acc, gen_ret, send_widen, gen_falls, narrowed })
+    (locals, ret, falls, gassigns, ret_widen, Extra { fassigns, news: news_acc, gen_ret, send_widen, gen_falls, narrowed, class_narrowed })
+}
+
+/// The reads of locals that are the object of an attribute access.
+fn receiver_reads(body: &[Stmt]) -> BTreeSet<Span> {
+    let mut out = BTreeSet::new();
+    pyrock_ir::walk::walk_block(body, &mut |e| {
+        if let ExprKind::GetAttr { obj, .. } = &e.kind {
+            if matches!(obj.kind, ExprKind::Local(_)) {
+                out.insert(obj.span);
+            }
+        }
+    });
+    out
+}
+
+/// Read sites narrowed to the same class on every visit.
+fn class_narrowed_reads(reads: Vec<(Span, Option<Ty>)>) -> BTreeMap<Span, Ty> {
+    let mut out: BTreeMap<Span, Option<Ty>> = BTreeMap::new();
+    for (sp, t) in reads {
+        match out.get(&sp) {
+            None => {
+                out.insert(sp, t);
+            }
+            Some(prev) if *prev != t => {
+                out.insert(sp, None);
+            }
+            _ => {}
+        }
+    }
+    out.into_iter().filter_map(|(sp, t)| t.map(|t| (sp, t))).collect()
+}
+
+/// What is known at a point of a function body (inference passes only).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Flow {
+    /// `T | None` locals known not to be `None`.
+    nn: BTreeSet<String>,
+    /// Locals holding a union of native classes: the members still possible
+    /// (narrowed by `isinstance` tests). A local without an entry may be any.
+    cls: BTreeMap<String, Vec<Ty>>,
+}
+
+impl Flow {
+    fn remove(&mut self, n: &str) {
+        self.nn.remove(n);
+        self.cls.remove(n);
+    }
+
+    fn kill(&mut self, names: &BTreeSet<String>) {
+        self.nn.retain(|n| !names.contains(n));
+        self.cls.retain(|n, _| !names.contains(n));
+    }
+
+    /// Where two paths join: what holds on both.
+    fn meet(&self, o: &Flow) -> Flow {
+        let cls = self
+            .cls
+            .iter()
+            .filter_map(|(n, a)| {
+                let b = o.cls.get(n)?;
+                let mut m = a.clone();
+                m.extend(b.iter().filter(|t| !a.contains(t)));
+                Some((n.clone(), m))
+            })
+            .collect();
+        Flow { nn: self.nn.intersection(&o.nn).cloned().collect(), cls }
+    }
+}
+
+/// `isinstance(local, C)` facts of a test: (local, classes, whether it is an
+/// instance), for when the test is true and for when it is false.
+type ClassFact = (String, Vec<ClassId>, bool);
+
+fn class_facts(e: &Expr) -> (Vec<ClassFact>, Vec<ClassFact>) {
+    match &e.kind {
+        ExprKind::CallObj { func, args, kwargs } if matches!(&func.kind, ExprKind::PyBuiltin(n) if n == "isinstance") && args.len() == 2 && kwargs.is_empty() => {
+            let ExprKind::Local(n) = &args[0].kind else { return (vec![], vec![]) };
+            let Some(cs) = class_refs(&args[1]) else { return (vec![], vec![]) };
+            (vec![(n.clone(), cs.clone(), true)], vec![(n.clone(), cs, false)])
+        }
+        ExprKind::Unary { op: UnaryOp::Not, operand } => {
+            let (t, f) = class_facts(operand);
+            (f, t)
+        }
+        ExprKind::BoolOp { op: BoolOpKind::And, values } => (values.iter().flat_map(|v| class_facts(v).0).collect(), vec![]),
+        ExprKind::BoolOp { op: BoolOpKind::Or, values } => (vec![], values.iter().flat_map(|v| class_facts(v).1).collect()),
+        _ => (vec![], vec![]),
+    }
+}
+
+/// `C` or `(C, D)` naming native classes.
+fn class_refs(e: &Expr) -> Option<Vec<ClassId>> {
+    match &e.kind {
+        ExprKind::ClassRef(c) => Some(vec![*c]),
+        ExprKind::Tuple(items) => items.iter().map(|i| if let ExprKind::ClassRef(c) = i.kind { Some(c) } else { None }).collect(),
+        _ => None,
+    }
 }
 
 /// Read sites narrowed on every visit.
@@ -801,6 +922,7 @@ struct Extra {
     send_widen: Vec<(SpecKey, Ty)>,
     gen_falls: bool,
     narrowed: BTreeSet<Span>,
+    class_narrowed: BTreeMap<Span, Ty>,
 }
 
 /// What a generator's `yield` expressions evaluate to: `None` (from `next`)
@@ -851,13 +973,22 @@ struct Ctx<'a, 'p> {
     gen_returns: Vec<Ty>,
     /// Send types callers need from generator functions (`g.send(v)`).
     send_widen: Vec<(SpecKey, Ty)>,
-    /// Flow-sensitive analysis (inference passes): the `T | None` locals
-    /// known not to be `None` at the current point.
-    nn: Option<BTreeSet<String>>,
+    /// Flow-sensitive analysis (inference passes): what is known at the
+    /// current point (locals not `None`, classes a union local can hold).
+    nn: Option<Flow>,
     /// Reads of optional locals seen in this pass, and whether each was narrowed.
     nn_reads: Vec<(Span, bool)>,
+    /// Reads of union locals seen in this pass, and the class (or smaller
+    /// union) each was narrowed to, if any.
+    cn_reads: Vec<(Span, Option<Ty>)>,
     /// Outside a flow pass (codegen's `type_of`): the narrowed read sites.
     narrowed: Option<&'a BTreeSet<Span>>,
+    class_narrowed: Option<&'a BTreeMap<Span, Ty>>,
+    /// Reads of locals that are the object of an attribute or method access
+    /// (`v.xs`, `v.call()`): the only reads narrowed by `isinstance`, so a
+    /// narrowed value never changes the type of a container or variable it
+    /// flows into (`[v]` stays a list of the union).
+    receivers: BTreeSet<Span>,
 }
 
 /// How a `CallObj` node executes.
@@ -889,6 +1020,11 @@ pub enum CallClass {
     RecordGet(&'static str),
     /// A function of the `math` module on native numbers (`math.sqrt(x)`).
     Math(&'static str),
+}
+
+/// A union whose members are all native classes.
+pub fn is_class_union(t: Ty) -> bool {
+    t.union_members().is_some_and(|ms| ms.iter().all(|m| m.class_id().is_some()))
 }
 
 /// A native instance or a union of them.
@@ -1046,10 +1182,27 @@ impl Ctx<'_, '_> {
     /// excluded on every path to this read.
     fn local_read(&mut self, n: &str, sp: Span) -> Option<Ty> {
         let t = self.local_ty(n)?;
+        if is_class_union(t) {
+            if self.nn.is_some() && !self.receivers.contains(&sp) {
+                return Some(t);
+            }
+            let one = match &self.nn {
+                Some(flow) => {
+                    // The members still possible, when fewer than the union's
+                    // (one class, or a smaller union).
+                    let all = t.union_members().map_or(0, |ms| ms.len());
+                    let one = flow.cls.get(n).filter(|ms| !ms.is_empty() && ms.len() < all).map(|ms| Ty::union(ms.clone()));
+                    self.cn_reads.push((sp, one));
+                    one
+                }
+                None => self.class_narrowed.and_then(|m| m.get(&sp).copied()),
+            };
+            return Some(one.unwrap_or(t));
+        }
         let Some(inner) = t.as_opt() else { return Some(t) };
         let narrowed = match &self.nn {
             Some(set) => {
-                let y = set.contains(n);
+                let y = set.nn.contains(n);
                 self.nn_reads.push((sp, y));
                 y
             }
@@ -1061,22 +1214,35 @@ impl Ctx<'_, '_> {
     /// After `target = <t>`: narrowed when `t` can't be `None`.
     fn nn_assign(&mut self, target: &str, t: Option<Ty>) {
         if let Some(set) = &mut self.nn {
+            set.cls.remove(target);
             match t {
-                Some(t) if t != Ty::None && t != Ty::Obj && t.as_opt().is_none() => set.insert(target.to_string()),
-                _ => set.remove(target),
+                Some(t) if t != Ty::None && t != Ty::Obj && t.as_opt().is_none() => set.nn.insert(target.to_string()),
+                _ => set.nn.remove(target),
             };
         }
     }
 
     fn nn_add(&mut self, names: &[String]) {
         if let Some(set) = &mut self.nn {
-            set.extend(names.iter().cloned());
+            set.nn.extend(names.iter().cloned());
         }
     }
 
     fn nn_kill(&mut self, names: &BTreeSet<String>) {
         if let Some(set) = &mut self.nn {
-            set.retain(|n| !names.contains(n));
+            set.kill(names);
+        }
+    }
+
+    /// Narrow union locals by `isinstance` facts (see `class_facts`).
+    fn cls_add(&mut self, facts: &[ClassFact]) {
+        for (n, cs, is) in facts {
+            let Some(t) = self.local_ty(n).filter(|t| is_class_union(*t)) else { continue };
+            let module = self.prog.module;
+            let Some(flow) = &mut self.nn else { return };
+            let base = flow.cls.get(n).cloned().unwrap_or_else(|| t.union_members().unwrap());
+            let keep = base.into_iter().filter(|m| cs.iter().any(|c| module.is_subclass(m.class_id().unwrap(), *c)) == *is).collect();
+            flow.cls.insert(n.clone(), keep);
         }
     }
 
@@ -1193,7 +1359,11 @@ impl Ctx<'_, '_> {
                 return;
             }
         }
-        if vt != dest && vt.has_mutable() && is_place(value) {
+        // A class instance stored where `T | None` or a union containing `T`
+        // is kept is only wrapped (`Some(x)`, a union variant): it keeps its
+        // identity, so its own place (`f.env`) doesn't need the wider type.
+        let wraps = vt.class_id().is_some() && (dest.as_opt() == Some(vt) || dest.union_members().is_some_and(|ms| ms.contains(&vt)));
+        if vt != dest && vt.has_mutable() && is_place(value) && !wraps {
             self.widen(value, dest);
         }
     }
@@ -1351,7 +1521,7 @@ impl Ctx<'_, '_> {
             }
             StmtKind::If { test, body, orelse } => {
                 self.expr(test);
-                match static_truth(self.locals, test) {
+                match static_truth(self.prog.module, self.locals, test) {
                     Some(true) => return self.block(body, assigns, ret),
                     Some(false) => return self.block(orelse, assigns, ret),
                     None => {}
@@ -1360,11 +1530,14 @@ impl Ctx<'_, '_> {
                 // proves; afterwards, what holds at the end of every branch
                 // that can reach the next statement.
                 let (tf, ff) = test_facts(test);
+                let (ctf, cff) = class_facts(test);
                 let start = self.nn.clone();
                 self.nn_add(&tf);
+                self.cls_add(&ctf);
                 let a = self.block(body, assigns, ret);
                 let end_a = std::mem::replace(&mut self.nn, start.clone());
                 self.nn_add(&ff);
+                self.cls_add(&cff);
                 let b = self.block(orelse, assigns, ret);
                 let end_b = self.nn.take();
                 let (exit_a, exit_b) = (!a || block_exits(body), !b || block_exits(orelse));
@@ -1373,7 +1546,7 @@ impl Ctx<'_, '_> {
                     (true, false) => end_b,
                     (false, true) => end_a,
                     (false, false) => match (end_a, end_b) {
-                        (Some(x), Some(y)) => Some(x.intersection(&y).cloned().collect()),
+                        (Some(x), Some(y)) => Some(x.meet(&y)),
                         _ => None,
                     },
                 };
@@ -1385,11 +1558,12 @@ impl Ctx<'_, '_> {
                 assigned_locals(body, &mut kill);
                 self.nn_kill(&kill);
                 self.expr(test);
-                if static_truth(self.locals, test) == Some(false) {
+                if static_truth(self.prog.module, self.locals, test) == Some(false) {
                     return true;
                 }
                 let start = self.nn.clone();
                 self.nn_add(&test_facts(test).0);
+                self.cls_add(&class_facts(test).0);
                 self.block(body, assigns, ret);
                 self.nn = start;
                 // `while True:` without break never falls through.
@@ -2550,7 +2724,7 @@ impl Ctx<'_, '_> {
                 Some(Ty::Bool)
             }
             ExprKind::BoolOp { op, values } => {
-                if let Some(n) = short_circuit(self.locals, *op, values) {
+                if let Some(n) = short_circuit(self.prog.module, self.locals, *op, values) {
                     // Statically decided: the result is operand n-1 itself.
                     let tys: Vec<Option<Ty>> = values[..n].iter().map(|v| self.expr(v)).collect();
                     return tys[n - 1];
@@ -2563,6 +2737,8 @@ impl Ctx<'_, '_> {
                     tys.push(self.expr(v));
                     let (tf, ff) = test_facts(v);
                     self.nn_add(if *op == BoolOpKind::And { &tf } else { &ff });
+                    let (ctf, cff) = class_facts(v);
+                    self.cls_add(if *op == BoolOpKind::And { &ctf } else { &cff });
                 }
                 self.nn = start;
                 let tys: Vec<Ty> = tys.into_iter().collect::<Option<_>>()?;
@@ -2570,17 +2746,20 @@ impl Ctx<'_, '_> {
             }
             ExprKind::IfExp { test, body, orelse } => {
                 self.expr(test);
-                match static_truth(self.locals, test) {
+                match static_truth(self.prog.module, self.locals, test) {
                     Some(true) => return self.expr(body),
                     Some(false) => return self.expr(orelse),
                     None => {}
                 }
                 let (tf, ff) = test_facts(test);
+                let (ctf, cff) = class_facts(test);
                 let start = self.nn.clone();
                 self.nn_add(&tf);
+                self.cls_add(&ctf);
                 let a = self.expr(body);
                 self.nn = start.clone();
                 self.nn_add(&ff);
+                self.cls_add(&cff);
                 let b = self.expr(orelse);
                 self.nn = start;
                 match (a, b) {
@@ -3240,7 +3419,10 @@ impl<'m> Program<'m> {
             send_widen: vec![],
             nn: None,
             nn_reads: vec![],
+            cn_reads: vec![],
             narrowed: Some(&spec.narrowed),
+            class_narrowed: Some(&spec.class_narrowed),
+            receivers: BTreeSet::new(),
         }
     }
 }
@@ -3248,21 +3430,21 @@ impl<'m> Program<'m> {
 /// Whether control can continue after `s` (the rule inference uses to stop
 /// analyzing a block; codegen stops emitting at the same point, so statements
 /// it never typed are never emitted).
-pub fn falls_through(locals: &BTreeMap<String, Slot>, s: &Stmt) -> bool {
+pub fn falls_through(module: &Module, locals: &BTreeMap<String, Slot>, s: &Stmt) -> bool {
     match &s.kind {
         StmtKind::Return(_) | StmtKind::Raise(_) => false,
-        StmtKind::If { test, body, orelse } => match static_truth(locals, test) {
-            Some(true) => block_falls_through(locals, body),
-            Some(false) => block_falls_through(locals, orelse),
-            None => block_falls_through(locals, body) || block_falls_through(locals, orelse),
+        StmtKind::If { test, body, orelse } => match static_truth(module, locals, test) {
+            Some(true) => block_falls_through(module, locals, body),
+            Some(false) => block_falls_through(module, locals, orelse),
+            None => block_falls_through(module, locals, body) || block_falls_through(module, locals, orelse),
         },
         StmtKind::While { test, body } => !(matches!(test.kind, ExprKind::Bool(true)) && !contains_break(body)),
         _ => true,
     }
 }
 
-pub fn block_falls_through(locals: &BTreeMap<String, Slot>, stmts: &[Stmt]) -> bool {
-    stmts.iter().all(|s| falls_through(locals, s))
+pub fn block_falls_through(module: &Module, locals: &BTreeMap<String, Slot>, stmts: &[Stmt]) -> bool {
+    stmts.iter().all(|s| falls_through(module, locals, s))
 }
 
 fn contains_break(stmts: &[Stmt]) -> bool {

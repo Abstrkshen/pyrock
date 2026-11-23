@@ -577,7 +577,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
         for s in stmts {
             self.stmt(s, depth, out);
             // What follows is dead (inference did not type it).
-            if !pyrock_infer::spec::falls_through(&self.spec.locals, s) {
+            if !pyrock_infer::spec::falls_through(self.prog.module, &self.spec.locals, s) {
                 break;
             }
         }
@@ -743,7 +743,14 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 let int = |me: &mut Self, e: &Expr| {
                     let (c, t) = me.expr(e);
                     let (c, t) = unopt(c, t, "'NoneType' object cannot be interpreted as an integer");
-                    as_int(&c, t)
+                    let c = as_int(&c, t);
+                    // In a `for` header, a bound containing a block (`{ ... }.len()`)
+                    // would be parsed as the loop body: parenthesize it.
+                    if c.contains('{') {
+                        format!("({c})")
+                    } else {
+                        c
+                    }
                 };
                 let iter = match (start, step) {
                     (None, None) => format!("0..{}", int(self, stop)),
@@ -1061,6 +1068,22 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
 
     /// Returns Rust code for the expression (already unwrapped from
     /// `PyResult`) together with its type.
+    /// A read of a union local that inference narrowed to one class or a smaller
+    /// union (`if isinstance(v, Num): v.n`): converted from the union.
+    fn class_narrow(&self, n: &str, e: &Expr, t: Ty, code: String) -> String {
+        let declared = self.spec.locals.get(n).and_then(|s| s.known()).unwrap_or(t);
+        if declared == t || !self.spec.class_narrowed.contains_key(&e.span) || declared.union_members().is_none() {
+            return code;
+        }
+        let ur = declared.rust();
+        let arms = match t.union_members() {
+            // A smaller union: each remaining variant re-wrapped.
+            Some(ms) => ms.iter().map(|m| format!("{ur}::{0}(__n) => {1}::{0}(__n)", m.variant_name(), t.rust())).collect::<Vec<_>>().join(", "),
+            None => format!("{ur}::{}(__n) => __n", t.variant_name()),
+        };
+        format!("(match {code} {{ {arms}, _ => unreachable!(\"narrowed by isinstance\") }})")
+    }
+
     fn expr(&mut self, e: &Expr) -> (String, Ty) {
         let t = self.ty(e);
         // A value of type Never cannot exist: evaluate operands, then diverge.
@@ -1207,7 +1230,16 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     format!("rt::aio::await_obj({c})?")
                 }
             }
-            ExprKind::Local(n) if self.is_cell(n) => format!("rt::cget(&{}, {n:?})?", rid(n)),
+            ExprKind::Local(n) if self.is_cell(n) => self.class_narrow(n, e, t, format!("rt::cget(&{}, {n:?})?", rid(n))),
+            ExprKind::Local(n) if self.spec.class_narrowed.contains_key(&e.span) => {
+                let code = if self.spec.maybe_unbound.contains(n) {
+                    let err = if self.func.is_module { "unbound_global" } else { "unbound_local" };
+                    format!("{}.clone().ok_or_else(|| rt::{err}({n:?}))?", rid(n))
+                } else {
+                    format!("{}.clone()", rid(n))
+                };
+                self.class_narrow(n, e, t, code)
+            }
             ExprKind::Local(n) => {
                 // A `T | None` local read where inference proved it isn't None
                 // (`if x is None: continue`): stored as an Option, read as T.

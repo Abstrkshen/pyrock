@@ -152,7 +152,7 @@ Language coverage (ordered by how much code each one blocks in the standard libr
 
 Known bugs:
 
-- [ ] `isinstance` doesn't narrow a union of classes: P308 false warnings, `range(len(v.xs))` rejected (P301), and in a larger program invalid Rust that rustc rejects (`tests/known_bugs/isinstance_union_*.py`)
+- [x] `isinstance` doesn't narrow a union of classes: P308 false warnings, `range(len(v.xs))` rejected (P301), and in a larger program invalid Rust that rustc rejects (fixed; `tests/differential/isinstance_narrowing.py`)
 - [ ] `zip` over a class's list attribute and a parameter collapses inference for the whole program to `object` (`tests/known_bugs/zip_collapses_inference.py`)
 - [ ] Overridden methods across a class hierarchy collapse inference to `object` (`tests/known_bugs/method_overrides_collapse.py`)
 - [ ] Generator expressions cost about 6 µs per creation natively (slower than CPython in `" ".join(... for ...)` hot loops)
@@ -1133,4 +1133,32 @@ runnable ones print the same as CPython.
   "Bigger programs".
 * Writing them found four compiler problems, now under "Known bugs" above with repros in
   `tests/known_bugs/`; the programs work around them.
+
+### Phase 8: `isinstance` narrows unions of classes (2026-11-23)
+
+* A function specialized for one class now decides `isinstance(v, C)` by the class
+  hierarchy either way (it only decided "exactly `C`" before), so the branch that can't
+  run in that copy isn't type-checked. This also covers unions whose members all agree
+  and tuples of classes (`isinstance(v, (A, B))`).
+* Flow-sensitive narrowing of unions of native classes, next to the existing `None`
+  narrowing: each branch of `if isinstance(v, C)` (also `elif`/`else`, `not`, `and`/`or`,
+  `while`, conditional expressions) knows which classes `v` can still be, and joins,
+  loops, `try` and assignments forget it as they do for `None`. Only reads that are the
+  object of an attribute or method access (`v.side`, `v.area()`) are narrowed, to one class
+  or a smaller union; codegen converts the union value at those reads. A narrowed value
+  flowing into a list or variable keeps the union type, so containers keep one element
+  type.
+* A class instance stored where `T | None` or a union containing `T` is expected no longer
+  widens the place it came from (`Env(f.env)` made the field `Fn.env` optional, which then
+  spread to everything using it). Lists and dicts still widen as before.
+* Codegen: a `range` bound containing a block (`len(v.xs)` on a narrowed `v`) is
+  parenthesized, so `for` doesn't parse it as the loop body.
+* The HIR walkers (`walk_stmts`, `walk_block`, `walk_expr`) moved from `analysis` to
+  `ir::walk` (re-exported from `analysis`), so inference can use them.
+* Verified: `tests/differential/isinstance_narrowing.py` (native-only; every form above,
+  including a reassignment in the loop) matches CPython; both repros from
+  `tests/known_bugs` now compile natively and match CPython (the Lisp interpreter:
+  21 native specializations, no warnings; it produced Rust that didn't compile before);
+  `cargo test --workspace`, the tour (23/23) and the apps (3/3) pass, golden snapshots are
+  unchanged, and `raylib-breakout` checks exactly as before (63 native, 230 boundaries).
 

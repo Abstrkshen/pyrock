@@ -79,7 +79,10 @@ These constructs become plain Rust with no Python objects involved:
   exception classes (`class NotFound(KeyError)`, `except NotFound as e: e.key`).
   Instances are `Rc<RefCell<..>>` newtypes, so identity and shared mutation match Python.
   Values of different classes in one place (a list of shapes) form a closed union (a Rust
-  enum) with per-variant method dispatch.
+  enum) with per-variant method dispatch. `isinstance` narrows such a value: inside
+  `if isinstance(v, Square):` (and the `elif`/`else` branches, `and`/`or`, `not`, `while`,
+  conditional expressions), `v.side` and `v.area()` use the classes still possible, so an
+  attribute that only some classes have can be read where the test guarantees it.
 * `async def` / `await`: native coroutines run by asyncio (`asyncio.run(main())`,
   `gather`, `create_task`, `wait_for`, queues, ...). Awaiting a native coroutine runs it
   inline; awaiting a Python awaitable suspends the coroutine's own stack until the event
