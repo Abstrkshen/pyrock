@@ -1088,3 +1088,14 @@ runnable ones print the same as CPython.
   numbers, comments, decorators and definition names. Checked in headless Chrome: the copy
   matches the textarea's text exactly, glyphs line up (drawn over each other), and
   scrolling and Tab stay in sync.
+* Pictures in the playground: the Output tab draws what a program prints. One SVG is shown
+  as an image; HTML renders in a sandboxed frame (`allow-scripts`, opaque origin); several
+  SVGs in a row, or `P3` PPM images, play as frames on an image or canvas with
+  play/pause, a frame slider and a speed setting. It is ordinary text output, so a compiled
+  program prints the same picture. Five examples (bar chart, bouncing balls, Mandelbrot,
+  Game of Life, HTML report) compile with `--mode native-only`; they are also differential
+  tests (`tests/differential/playground_*.py`), so their output stays identical to
+  CPython's. The worker sends output in 64 KB batches instead of one message per `print`.
+  Checked in headless Chrome: each example is detected and drawn (canvas pixels set,
+  animations advance), the Picture/Text toggle works, and a later plain-text run clears
+  the picture.

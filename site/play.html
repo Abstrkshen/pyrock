@@ -71,6 +71,23 @@
 .banner.bad { background: rgba(231, 190, 85, 0.14); color: #F0D58C; }
 .banner code { background: transparent; border: 0; color: inherit; padding: 0; }
 .stderr { color: #F4A99A; }
+/* Pictures drawn from the program's output */
+#preview { padding: 14px 18px 0; }
+.pv-bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 12px; margin-bottom: 12px; font-size: 0.9rem; color: var(--rs-muted); }
+.seg.dark { border-color: #3A464C; }
+.seg.dark button { color: var(--rs-muted); padding: 4px 12px; font-size: 0.86rem; }
+.seg.dark button[aria-pressed="true"] { background: var(--rs-ink); color: var(--rs-pane); }
+#pv-stage { display: flex; justify-content: center; background: #F3F4F0; border-radius: var(--radius-small); padding: 12px; overflow: auto; }
+#pv-stage[hidden] { display: none; }
+#pv-stage img { display: block; max-width: 100%; height: auto; }
+#pv-stage canvas.pixels { display: block; max-width: 100%; height: auto; image-rendering: pixelated; }
+#pv-stage iframe { display: block; width: 100%; height: 420px; border: 0; background: #FFFFFF; border-radius: 4px; resize: vertical; }
+#pv-player { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 12px 0 4px; font-size: 0.88rem; color: var(--rs-muted); }
+#pv-player[hidden] { display: none; }
+#pv-player input[type="range"] { flex: 1; min-width: 140px; accent-color: var(--pyrite); }
+#pv-player select { font: inherit; background: var(--rs-pane); color: var(--rs-ink); border: 1px solid #3A464C; border-radius: 4px; padding: 2px 4px; }
+.pv-btn { font: inherit; font-weight: 650; background: var(--rs-ink); color: var(--rs-pane); border: 0; border-radius: 4px; padding: 4px 14px; cursor: pointer; min-width: 5.2em; }
+#output[hidden] { display: none; }
 .results .t-k, .results .t-m { color: var(--rs-key); }
 .results .t-s { color: var(--rs-str); }
 .results .t-n { color: var(--rs-num); }
@@ -82,6 +99,8 @@
 .where div.native { border-top-color: var(--native); }
 .where div.bridge { border-top-color: var(--pyrite); }
 .where p { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.97rem; }
+.pictures { margin-top: 36px; max-width: var(--measure); }
+.pictures p { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.97rem; }
 .fine { margin-top: 28px; color: var(--muted); font-size: 0.95rem; max-width: var(--measure); }
 
 @media (max-width: 900px) {
@@ -123,11 +142,20 @@
   <div class="toolbar">
     <label>Example
       <select id="example" aria-label="Load an example">
+        <optgroup label="The compiler">
         <option value="generics">One function, three types</option>
         <option value="classes">Classes and lists</option>
         <option value="generators">Generators, dicts, lambdas</option>
         <option value="packages">A Python package (json)</option>
         <option value="typeerror">A bug pyrock catches</option>
+        </optgroup>
+        <optgroup label="Pictures from printed output">
+          <option value="chart">SVG: a bar chart</option>
+          <option value="balls">SVG frames: bouncing balls</option>
+          <option value="mandel">PPM image: the Mandelbrot set</option>
+          <option value="life">PPM frames: Game of Life</option>
+          <option value="report">HTML: an orders report</option>
+        </optgroup>
       </select>
     </label>
     <div class="seg" role="group" aria-label="Compilation mode">
@@ -156,7 +184,24 @@
         <button role="tab" id="t-explain" aria-controls="p-explain" aria-selected="false" tabindex="-1">Explain</button>
         <button role="tab" id="t-rust" aria-controls="p-rust" aria-selected="false" tabindex="-1">Rust</button>
       </div>
-      <div role="tabpanel" id="p-output" aria-labelledby="t-output"><div id="banner"></div><pre id="output"><span class="empty">Run the program to see its output. Compile shows what pyrock makes of it without running it.</span></pre></div>
+      <div role="tabpanel" id="p-output" aria-labelledby="t-output"><div id="banner"></div>
+        <div id="preview" hidden>
+          <div class="pv-bar">
+            <span id="pv-kind"></span>
+            <div class="seg dark" role="group" aria-label="Output view">
+              <button type="button" id="view-picture" aria-pressed="true">Picture</button>
+              <button type="button" id="view-text" aria-pressed="false">Text</button>
+            </div>
+          </div>
+          <div id="pv-stage"></div>
+          <div id="pv-player" hidden>
+            <button type="button" class="pv-btn" id="pv-play">Pause</button>
+            <input type="range" id="pv-frame" min="0" max="0" value="0" aria-label="Frame">
+            <span id="pv-count"></span>
+            <label>speed <select id="pv-fps"><option value="10">10 fps</option><option value="30" selected>30 fps</option><option value="60">60 fps</option></select></label>
+          </div>
+        </div>
+        <pre id="output"><span class="empty">Run the program to see its output. Compile shows what pyrock makes of it without running it.</span></pre></div>
       <div role="tabpanel" id="p-check" aria-labelledby="t-check" hidden><pre id="check"><span class="empty">pyrock check: diagnostics appear here after Compile or Run.</span></pre></div>
       <div role="tabpanel" id="p-explain" aria-labelledby="t-explain" hidden><pre id="explain"><span class="empty">pyrock explain: imports, inferred generic signatures, specializations and CPython boundaries.</span></pre></div>
       <div role="tabpanel" id="p-rust" aria-labelledby="t-rust" hidden><pre id="rust"><span class="empty">The generated src/main.rs, once the program compiles without errors.</span></pre></div>
@@ -182,6 +227,17 @@
       Run executes your code with CPython in Pyodide. A program compiled by pyrock prints the
       same output; its test suite checks that for every feature.</p>
     </div>
+  </div>
+  <div class="pictures">
+    <h3>Pictures from printed output</h3>
+    <p>Print SVG or HTML and the Output tab draws it. Print several <code>&lt;svg&gt;</code>
+    documents one after another and they play as an animation, one frame each. Print a
+    plain-text PPM image (<code>P3</code>, then width, height, maximum value and an
+    <code>r g b</code> triple per pixel) and it's painted on a canvas; several in a row
+    animate too. Because a picture is just text the program prints, the native executable
+    pyrock builds prints exactly the same one: open it in a browser, or save it as
+    <code>.svg</code>, <code>.html</code> or <code>.ppm</code>. The graphics examples all
+    compile with <code>--mode native-only</code>.</p>
   </div>
   <p class="fine">One file only: other imports go to CPython (the standard library works, and
   Pyodide's packages such as <code>numpy</code> load on first import). Where pyrock
@@ -311,6 +367,189 @@
         "",
         "print(label(\"three\"))",
         "print(label(3))   # CPython fails here when it runs; pyrock refuses to compile it",
+      ],
+    },
+    chart: {
+      mode: "native",
+      code: [
+        "# Print SVG and the playground draws it. It's only text output,",
+        "# so the compiled program prints exactly the same picture.",
+        "text = \"\"\"the quick brown fox jumps over the lazy dog the fox",
+        "barks and the dog runs while the quick fox hides from the dog\"\"\"",
+        "",
+        "counts = {}",
+        "for w in text.split():",
+        "    counts[w] = counts.get(w, 0) + 1",
+        "top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:8]",
+        "",
+        "W, H, bar = 520, 300, 46",
+        "most = top[0][1]",
+        "parts = [f'<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{W}\" height=\"{H}\" font-family=\"sans-serif\">',",
+        "         f'<rect width=\"{W}\" height=\"{H}\" fill=\"#f8f9f6\"/>',",
+        "         '<text x=\"20\" y=\"30\" font-size=\"18\" fill=\"#1c2326\">Most common words</text>']",
+        "for i, (word, n) in enumerate(top):",
+        "    h = round(200 * n / most)",
+        "    x = 30 + i * (bar + 16)",
+        "    parts.append(f'<rect x=\"{x}\" y=\"{260 - h}\" width=\"{bar}\" height=\"{h}\" rx=\"4\" fill=\"#0f6e57\"/>')",
+        "    parts.append(f'<text x=\"{x + bar // 2}\" y=\"{252 - h}\" font-size=\"13\" text-anchor=\"middle\">{n}</text>')",
+        "    parts.append(f'<text x=\"{x + bar // 2}\" y=\"280\" font-size=\"12\" text-anchor=\"middle\">{word}</text>')",
+        "parts.append(\"</svg>\")",
+        "print(\"\\n\".join(parts))",
+      ],
+    },
+    balls: {
+      mode: "native",
+      code: [
+        "# Several SVGs printed one after another play as an animation:",
+        "# each <svg> is one frame. The physics compiles to native Rust.",
+        "W, H, R = 480, 300, 12",
+        "",
+        "class Ball:",
+        "    def __init__(self, x, y, vx, vy, color):",
+        "        self.x = x",
+        "        self.y = y",
+        "        self.vx = vx",
+        "        self.vy = vy",
+        "        self.color = color",
+        "",
+        "    def step(self, dt):",
+        "        self.vy += 900.0 * dt",
+        "        self.x += self.vx * dt",
+        "        self.y += self.vy * dt",
+        "        if self.x < R or self.x > W - R:",
+        "            self.vx = -self.vx",
+        "            self.x = min(max(self.x, R), W - R)",
+        "        if self.y > H - R:",
+        "            self.vy = -self.vy * 0.88",
+        "            self.y = H - R",
+        "",
+        "colors = [\"#0f6e57\", \"#c99a1e\", \"#2c55a0\", \"#a0521a\", \"#56626a\"]",
+        "balls = [Ball(40.0 + i * 85, 40.0 + i * 20, 120.0 + i * 35, 0.0, colors[i % 5]) for i in range(5)]",
+        "",
+        "for frame in range(150):",
+        "    for _ in range(4):",
+        "        for b in balls:",
+        "            b.step(1 / 240)",
+        "    parts = [f'<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{W}\" height=\"{H}\">',",
+        "             f'<rect width=\"{W}\" height=\"{H}\" fill=\"#f3f4f0\"/>']",
+        "    for b in balls:",
+        "        parts.append(f'<circle cx=\"{b.x:.1f}\" cy=\"{b.y:.1f}\" r=\"{R}\" fill=\"{b.color}\"/>')",
+        "    parts.append(\"</svg>\")",
+        "    print(\"\".join(parts))",
+      ],
+    },
+    mandel: {
+      mode: "native",
+      code: [
+        "# Print a \"P3\" image (plain-text PPM: width, height, then r g b per pixel)",
+        "# and the playground paints it on a canvas.",
+        "W, H, LIMIT = 180, 120, 80",
+        "",
+        "def escape(cr, ci):",
+        "    zr = 0.0",
+        "    zi = 0.0",
+        "    for i in range(LIMIT):",
+        "        zr, zi = zr * zr - zi * zi + cr, 2 * zr * zi + ci",
+        "        if zr * zr + zi * zi > 4.0:",
+        "            return i",
+        "    return LIMIT",
+        "",
+        "def mix(a, b, t):",
+        "    return int(a + (b - a) * t)",
+        "",
+        "def color(n):",
+        "    if n == LIMIT:",
+        "        return \"28 35 38\"",
+        "    s = (n / LIMIT) ** 0.45",
+        "    if s < 0.6:  # pale stone to malachite",
+        "        u = s / 0.6",
+        "        return f\"{mix(236, 15, u)} {mix(238, 110, u)} {mix(233, 87, u)}\"",
+        "    u = (s - 0.6) / 0.4  # malachite to pyrite",
+        "    return f\"{mix(15, 201, u)} {mix(110, 154, u)} {mix(87, 30, u)}\"",
+        "",
+        "print(\"P3\")",
+        "print(W, H)",
+        "print(255)",
+        "for y in range(H):",
+        "    row = []",
+        "    for x in range(W):",
+        "        cr = -2.2 + 3.1 * x / W",
+        "        ci = -1.2 + 2.4 * y / H",
+        "        row.append(color(escape(cr, ci)))",
+        "    print(\" \".join(row))",
+      ],
+    },
+    life: {
+      mode: "native",
+      code: [
+        "# Several P3 images in a row play as an animation: Conway's Game of Life,",
+        "# one frame per generation.",
+        "W, H = 48, 32",
+        "",
+        "def step(grid):",
+        "    new = []",
+        "    for y in range(H):",
+        "        row = []",
+        "        for x in range(W):",
+        "            n = 0",
+        "            for dy in (-1, 0, 1):",
+        "                for dx in (-1, 0, 1):",
+        "                    if dx != 0 or dy != 0:",
+        "                        n += grid[(y + dy) % H][(x + dx) % W]",
+        "            alive = grid[y][x] == 1",
+        "            row.append(1 if n == 3 or (alive and n == 2) else 0)",
+        "        new.append(row)",
+        "    return new",
+        "",
+        "seed = 12345",
+        "def rand():",
+        "    global seed",
+        "    seed = (seed * 1103515245 + 12345) % 2147483648",
+        "    return seed",
+        "",
+        "grid = [[1 if (rand() >> 16) % 3 == 0 else 0 for _ in range(W)] for _ in range(H)]  # high bits: the low ones repeat",
+        "for gen in range(60):",
+        "    print(\"P3\", W, H, 9)  # colour values from 0 to 9",
+        "    for row in grid:",
+        "        print(\" \".join(\"9 7 1\" if c else \"1 2 2\" for c in row))",
+        "    grid = step(grid)",
+      ],
+    },
+    report: {
+      mode: "native",
+      code: [
+        "# Print HTML and the playground renders it.",
+        "from dataclasses import dataclass",
+        "",
+        "@dataclass",
+        "class Order:",
+        "    customer: str",
+        "    items: int",
+        "    price: float",
+        "",
+        "orders = [Order(\"Ada\", 3, 12.5), Order(\"Grace\", 1, 99.0), Order(\"Linus\", 7, 4.25), Order(\"Guido\", 2, 30.0)]",
+        "total = sum(o.items * o.price for o in orders)",
+        "",
+        "rows = []",
+        "for o in sorted(orders, key=lambda o: -o.items * o.price):",
+        "    amount = o.items * o.price",
+        "    width = round(100 * amount / total)",
+        "    rows.append(f\"<tr><td>{o.customer}</td><td>{o.items}</td><td>{amount:.2f}</td>\"",
+        "                f'<td><div style=\"background:#0f6e57;height:10px;width:{width}%\"></div></td></tr>')",
+        "",
+        "print(f\"\"\"<!doctype html>",
+        "<style>",
+        "  body {{ font-family: system-ui, sans-serif; margin: 24px; color: #1c2326; }}",
+        "  table {{ border-collapse: collapse; width: 100%; }}",
+        "  th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid #ccd; }}",
+        "  td:last-child {{ width: 40%; }}",
+        "</style>",
+        "<h2>Orders</h2>",
+        "<table>",
+        "<tr><th>Customer</th><th>Items</th><th>Amount</th><th>Share</th></tr>",
+        "{\"\".join(rows)}",
+        "</table>",
+        "<p>Total: <strong>{total:.2f}</strong> from {len(orders)} orders.</p>\"\"\")",
       ],
     },
   };
@@ -450,7 +689,138 @@
     }, function (err) { busy(false, "Compiler error: " + err.message); });
   });
 
+  // ---- pictures: what the program prints, drawn ----
+  // SVG or HTML is rendered in a sandboxed frame; several SVGs in a row, or
+  // "P3" (plain PPM) images, play as frames. It's all ordinary text output, so
+  // a program compiled by pyrock prints exactly the same pictures.
+  var preview = $("preview"), stage = $("pv-stage"), player = $("pv-player");
+  var anim = { frames: [], i: 0, playing: false, raf: 0, last: 0, urls: [] };
+
+  function clearPreview() {
+    cancelAnimationFrame(anim.raf);
+    anim.urls.forEach(function (u) { URL.revokeObjectURL(u); });
+    anim = { frames: [], i: 0, playing: false, raf: 0, last: 0, urls: [] };
+    stage.textContent = "";
+    $("pv-count").textContent = "";
+    preview.hidden = true;
+    player.hidden = true;
+    $("output").hidden = false;
+  }
+
+  function parsePPM(text) {
+    var t = text.replace(/#[^\n]*/g, "").split(/\s+/).filter(Boolean), i = 0, frames = [];
+    while (i + 3 < t.length && t[i] === "P3") {
+      var w = +t[i + 1], h = +t[i + 2], max = +t[i + 3];
+      if (!(w > 0 && h > 0 && max > 0 && w * h <= 4000000 && Number.isInteger(w) && Number.isInteger(h))) break;
+      i += 4;
+      if (i + w * h * 3 > t.length) break; // an incomplete image (stopped early)
+      var img = new ImageData(w, h), d = img.data, k = 255 / max;
+      for (var p = 0; p < w * h; p++) {
+        d[p * 4] = t[i++] * k; d[p * 4 + 1] = t[i++] * k; d[p * 4 + 2] = t[i++] * k; d[p * 4 + 3] = 255;
+      }
+      frames.push(img);
+    }
+    return frames;
+  }
+
+  function showFrame(n) {
+    anim.i = n;
+    anim.frames[n]();
+    $("pv-frame").value = n;
+    $("pv-count").textContent = (n + 1) + " / " + anim.frames.length;
+  }
+  function tick(now) {
+    if (!anim.playing) return;
+    if (now - anim.last >= 1000 / +$("pv-fps").value) {
+      anim.last = now;
+      showFrame((anim.i + 1) % anim.frames.length);
+    }
+    anim.raf = requestAnimationFrame(tick);
+  }
+  function setPlaying(on) {
+    anim.playing = on;
+    $("pv-play").textContent = on ? "Pause" : "Play";
+    cancelAnimationFrame(anim.raf);
+    if (on) anim.raf = requestAnimationFrame(tick);
+  }
+  $("pv-play").addEventListener("click", function () { setPlaying(!anim.playing); });
+  $("pv-frame").addEventListener("input", function (e) { setPlaying(false); showFrame(+e.target.value); });
+
+  function setView(picture) {
+    $("view-picture").setAttribute("aria-pressed", picture);
+    $("view-text").setAttribute("aria-pressed", !picture);
+    stage.hidden = !picture;
+    player.hidden = !picture || anim.frames.length < 2;
+    $("output").hidden = picture;
+  }
+  $("view-picture").addEventListener("click", function () { setView(true); });
+  $("view-text").addEventListener("click", function () { setView(false); });
+
+  function renderPreview(out) {
+    var t = out.trim(), kind = null;
+    if (/^P3\s/.test(t)) {
+      var imgs = parsePPM(t);
+      if (imgs.length) {
+        var w = imgs[0].width, h = imgs[0].height, scale = Math.max(1, Math.floor(480 / Math.max(w, h)));
+        var cv = document.createElement("canvas");
+        cv.width = w; cv.height = h; cv.className = "pixels";
+        cv.style.width = w * scale + "px";
+        cv.setAttribute("role", "img");
+        cv.setAttribute("aria-label", "Image printed by the program");
+        var ctx = cv.getContext("2d");
+        stage.appendChild(cv);
+        anim.frames = imgs.map(function (img) {
+          return function () {
+            if (cv.width !== img.width || cv.height !== img.height) { cv.width = img.width; cv.height = img.height; }
+            ctx.putImageData(img, 0, 0);
+          };
+        });
+        kind = imgs.length > 1 ? "Animation: " + imgs.length + " PPM frames, " + w + " × " + h : "Image: " + w + " × " + h + " PPM";
+      }
+    } else if (/^<svg[\s>]/i.test(t) && (t.match(/<svg[\s>]/gi) || []).length > 1) {
+      var svgs = t.match(/<svg[\s>][\s\S]*?<\/svg>/gi) || [];
+      var img = document.createElement("img");
+      img.alt = "Animation printed by the program";
+      stage.appendChild(img);
+      anim.frames = svgs.map(function (s) {
+        if (!/xmlns=/.test(s.slice(0, 200))) s = s.replace(/^<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+        var url = URL.createObjectURL(new Blob([s], { type: "image/svg+xml" }));
+        anim.urls.push(url);
+        return function () { img.src = url; };
+      });
+      kind = "Animation: " + svgs.length + " SVG frames";
+    } else if (/^<svg[\s>]/i.test(t) && /<\/svg>$/i.test(t)) {
+      var one = /xmlns=/.test(t.slice(0, 200)) ? t : t.replace(/^<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+      var u = URL.createObjectURL(new Blob([one], { type: "image/svg+xml" }));
+      anim.urls.push(u);
+      var pic = document.createElement("img");
+      pic.alt = "Picture printed by the program";
+      pic.src = u;
+      stage.appendChild(pic);
+      kind = "SVG";
+    } else if (/^</.test(t) && />$/.test(t)) {
+      // The program's HTML runs in an isolated frame: scripts may run, but the
+      // frame has its own opaque origin and can't touch this page.
+      var frame = document.createElement("iframe");
+      frame.setAttribute("sandbox", "allow-scripts");
+      frame.setAttribute("title", "HTML printed by the program");
+      frame.srcdoc = t;
+      stage.appendChild(frame);
+      kind = "HTML";
+    }
+    if (!kind) return;
+    $("pv-kind").textContent = kind;
+    preview.hidden = false;
+    if (anim.frames.length) {
+      $("pv-frame").max = anim.frames.length - 1;
+      showFrame(0);
+      if (anim.frames.length > 1) setPlaying(true);
+    }
+    setView(true);
+  }
+
   // ---- run ----
+  var TEXT_LIMIT = 200000; // characters of output kept on screen in the text view
   function run() {
     if (!ready) return;
     busy(true, "Compiling…");
@@ -458,12 +828,20 @@
     compile().then(function (r) {
       var s = summary(r);
       $("banner").innerHTML = '<div class="banner ' + (s.ok ? "ok" : "bad") + '">' + s.html + "</div>";
+      clearPreview();
       out.textContent = "";
       selectTab("output");
+      var stdout = "", shown = 0, clipped = false;
       streamTo = function (stream, text) {
+        if (stream === "stdout") stdout += text;
+        if (shown >= TEXT_LIMIT) {
+          if (!clipped) { clipped = true; out.appendChild(document.createTextNode("\n[… more output, not shown here]\n")); }
+          return;
+        }
         var span = document.createElement("span");
         if (stream === "stderr") span.className = "stderr";
-        span.textContent = text;
+        span.textContent = text.slice(0, TEXT_LIMIT - shown);
+        shown += text.length;
         out.appendChild(span);
       };
       busy(true, "Running in CPython (Pyodide)…");
@@ -473,6 +851,7 @@
         end.className = "exit";
         end.textContent = (out.textContent && !/\n$/.test(out.textContent) ? "\n" : "") + "\n[exit status " + res.status + ", " + Math.round(res.ms) + " ms in CPython]";
         out.appendChild(end);
+        renderPreview(stdout);
         busy(false, "Done.");
       });
     }).catch(function (err) {

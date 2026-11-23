@@ -80,11 +80,21 @@ function compileSource(src, nativeOnly) {
 }
 
 async function runSource(src, id) {
+  // Output goes to the page in batches: Python runs synchronously here, so
+  // nothing can flush on a timer; a batch is sent when it reaches 64 KB, when
+  // output switches between stdout and stderr, and when the program ends.
+  let pendingStream = null, pendingText = "";
+  const flush = () => {
+    if (pendingText) postMessage({ id, type: "stream", stream: pendingStream, text: pendingText });
+    pendingText = "";
+  };
   const writer = (stream) => {
     const dec = new TextDecoder();
     return {
       write(buf) {
-        postMessage({ id, type: "stream", stream, text: dec.decode(buf, { stream: true }) });
+        if (pendingStream !== stream) { flush(); pendingStream = stream; }
+        pendingText += dec.decode(buf, { stream: true });
+        if (pendingText.length > 65536) flush();
         return buf.length;
       },
     };
@@ -94,6 +104,7 @@ async function runSource(src, id) {
   await py.loadPackagesFromImports(src, { messageCallback: () => {}, errorCallback: () => {} });
   const t0 = performance.now();
   const status = py.globals.get("_pyrock_run")(src);
+  flush();
   return { status, ms: performance.now() - t0 };
 }
 
