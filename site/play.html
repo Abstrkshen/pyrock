@@ -425,8 +425,8 @@
     var rt = r.uses_python ? "It embeds CPython for the lines listed in Explain." : "It needs no CPython at all.";
     return { ok: true, html: "<strong>pyrock check (" + mode + "): ok.</strong> " + esc(line) + ". " + rt };
   }
-  function compile() {
-    return call("compile", { src: code.value, nativeOnly: nativeOnly }).then(function (r) { showCompile(r); return r; });
+  function compile(src) {
+    return call("compile", { src: src === undefined ? code.value : src, nativeOnly: nativeOnly }).then(function (r) { showCompile(r); return r; });
   }
 
   btnCompile.addEventListener("click", function () {
@@ -613,8 +613,10 @@
   function run() {
     if (!ready) return;
     busy(true, "Compiling…");
-    var out = $("output"), kind = runKind();
-    compile().then(function (r) {
+    // One snapshot of the source for every step, so an example that finishes
+    // loading meanwhile can't swap the code between them.
+    var out = $("output"), kind = runKind(), src = code.value;
+    compile(src).then(function (r) {
       var s = summary(r);
       var banner = $("banner");
       banner.innerHTML = '<div class="banner ' + (s.ok ? "ok" : "bad") + '">' + s.html + "</div>";
@@ -652,7 +654,7 @@
           renderPreview(stdout);
           strip.innerHTML = race(res.ms, null, null);
           busy(true, "Running the same source in CPython to compare…");
-          return call("run", { src: code.value, capture: true }).then(function (py) {
+          return call("run", { src: src, capture: true }).then(function (py) {
             var same = py.stdout === stdout && py.status === res.status;
             var ratio = py.ms / Math.max(res.ms, 0.05);
             var speed = ratio >= 1.05 ? "<strong>" + ratio.toFixed(1) + "x faster than CPython</strong>" : ratio > 0.95 ? "<strong>About as fast as CPython</strong>" : "<strong>" + (1 / ratio).toFixed(1) + "x slower than CPython</strong>";
@@ -669,7 +671,7 @@
         : esc(kind.why);
       banner.insertAdjacentHTML("beforeend", '<div class="banner bad">' + why + "</div>");
       busy(true, "Running in CPython (Pyodide)…");
-      return call("run", { src: code.value }).then(function (res) {
+      return call("run", { src: src }).then(function (res) {
         exitLine("[exit status " + res.status + ", " + fmtMs(res.ms) + " in CPython]");
         renderPreview(stdout);
         busy(false, "Done.");
@@ -776,9 +778,12 @@
     }
     return exampleCache[file];
   }
+  var loading = 0; // only the latest load may fill the editor
   function load(file) {
     $("example").value = file;
+    var mine = ++loading;
     return fetchExample(file).then(function (text) {
+      if (mine !== loading) return;
       var lines = text.split("\n"), native = false;
       while (lines.length && /^# (mode|expect):/.test(lines[0])) {
         if (/^# mode: native-only/.test(lines[0])) native = true;
