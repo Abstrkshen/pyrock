@@ -9,6 +9,9 @@ python = ["dep:pyo3"]
 
 [dependencies]
 pyo3 = { version = "0.30", optional = true }
+
 # Stackful coroutines: generators (`yield`) and `async def` bodies that
-# suspend at `await` of a Python awaitable.
+# suspend at `await` of a Python awaitable. Not available on WebAssembly
+# (no stack switching): there, creating a generator raises RuntimeError.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 corosensei = "0.3"

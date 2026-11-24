@@ -99,7 +99,7 @@ mod bridge {
     use crate::exc::{Exc, PyResult};
     use crate::py::{Obj, ToPy};
     use crate::stackful::Co as Stackful;
-    use corosensei::{CoroutineResult, Yielder};
+    use crate::stackful::{CoroutineResult, Yielder};
     use pyo3::prelude::*;
     use std::cell::RefCell;
 

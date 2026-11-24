@@ -1229,3 +1229,25 @@ From `.ignore/gaps/TO-PYROCK-DEV.md`, written while making the first video.
   since v0.1.1, plus the playground and examples work. `CHANGELOG.md` lists the changes;
   the release workflow puts the tag's section at the top of the GitHub release notes and
   fails if there is none.
+
+### The playground runs pyrock's builds (2026-11-24)
+
+* Until now the playground's Run used CPython (Pyodide): the compiler ran in the browser,
+  but no program it compiled did. Now each example is compiled when the site is built
+  (`pyrock build --release --mode native-only --target wasm32-wasip1`), run with Node and
+  the page's WASI shim (`site/wasi.js`, about a dozen WASI calls), and published only when
+  its output matches CPython's (`site/examples/compiled.json` records the result, or why a
+  program has no browser build). Run starts that build, then the same source in CPython,
+  and shows both times: the ray tracer is about 11x faster than CPython, both running as
+  WebAssembly in the tab.
+* `pyrock build --target T` passes a target triple to Cargo; for `wasm*` the program must
+  be native-only, and the result is `<name>.wasm`. `run --target` is refused.
+* The runtime builds for WebAssembly: `corosensei` (stack switching) is a non-wasm
+  dependency, and on wasm creating a generator raises `RuntimeError`. 13 of the 16
+  playground programs have a browser build; `generators.py` (generators),
+  `json_boundaries.py` (needs CPython) and `type_error.py` (rejected) run in CPython,
+  with the reason shown.
+* `svg_double_pendulum.py` built for WebAssembly differs from native CPython in a few late
+  frames (the system is chaotic, and WebAssembly's `sin`/`cos` round differently from
+  glibc's); in the browser it matches Pyodide, whose math library is the same musl code.
+

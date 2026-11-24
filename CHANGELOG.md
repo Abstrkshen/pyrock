@@ -2,6 +2,16 @@
 
 The release workflow puts a version's section at the top of its GitHub release notes.
 
+## Unreleased
+
+- `pyrock build --target wasm32-wasip1` compiles a native-only program to WebAssembly, for
+  any WASI runtime. Generators aren't supported there, because WebAssembly can't switch
+  stacks: creating one raises `RuntimeError`.
+- The playground's Run starts the WebAssembly build pyrock made of the example, then runs
+  the same source in CPython (Pyodide) and shows both times and whether the outputs match.
+  Before, Run only used CPython. Code you edit still runs in CPython, since building needs
+  Rust's compiler, and the page says so.
+
 ## v0.1.2 (2026-11-23)
 
 ### Speed

@@ -18,6 +18,8 @@
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin: 28px 0 14px; }
 .toolbar label { color: var(--muted); font-size: 0.95rem; display: flex; align-items: center; gap: 8px; }
 .toolbar select { font: inherit; font-size: 0.95rem; color: var(--ink); background: var(--surface); border: 1.5px solid var(--line); border-radius: var(--radius-small); padding: 6px 8px; }
+.toolbar label { max-width: 100%; }
+.toolbar select { min-width: 0; max-width: 100%; }
 .seg { display: inline-flex; border: 1.5px solid var(--line); border-radius: 999px; overflow: hidden; }
 .seg button { font: inherit; font-size: 0.92rem; background: transparent; color: var(--muted); border: 0; padding: 6px 14px; cursor: pointer; }
 .seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
@@ -71,6 +73,24 @@
 .banner.bad { background: rgba(231, 190, 85, 0.14); color: #F0D58C; }
 .banner code { background: transparent; border: 0; color: inherit; padding: 0; }
 .stderr { color: #F4A99A; }
+/* pyrock's build against CPython, timed in this tab */
+.race { margin: 12px 18px 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px 12px; align-items: center; font-size: 0.9rem; }
+.race .who { font-weight: 700; }
+.race .who small { display: block; font-weight: 400; font-size: 0.78rem; color: var(--rs-muted); }
+.race .track { height: 14px; background: #1C2427; border-radius: 3px; overflow: hidden; }
+.race .track i { display: block; height: 100%; min-width: 3px; border-radius: 3px; transition: width 0.4s ease-out; }
+.race .who.rock { color: #5CC9A2; }
+.race .who.py { color: #E2B93B; }
+.race .track.rock i { background: #5CC9A2; }
+.race .track.py i { background: #E2B93B; }
+.race .ms { font-variant-numeric: tabular-nums; text-align: right; color: var(--rs-ink); min-width: 4.5em; }
+.race .verdict { grid-column: 1 / -1; margin: 4px 0 0; color: var(--rs-ink); line-height: 1.45; }
+.race .verdict .diff { color: #F0D58C; }
+.race .working { color: var(--rs-muted); }
+@media (prefers-reduced-motion: reduce) { .race .track i { transition: none; } }
+.banner .restore { font: inherit; font-weight: 650; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; padding: 1px 8px; cursor: pointer; }
+.run-kind { color: var(--muted); }
+.run-kind.compiled { color: var(--native); font-weight: 650; }
 /* Pictures drawn from the program's output */
 #preview { padding: 14px 18px 0; }
 .pv-bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 12px; margin-bottom: 12px; font-size: 0.9rem; color: var(--rs-muted); }
@@ -99,6 +119,7 @@
 .where div.native { border-top-color: var(--native); }
 .where div.bridge { border-top-color: var(--pyrite); }
 .where p { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.97rem; }
+.where code { white-space: normal; overflow-wrap: anywhere; }
 .pictures { margin-top: 36px; max-width: var(--measure); }
 .pictures p { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.97rem; }
 .fine { margin-top: 28px; color: var(--muted); font-size: 0.95rem; max-width: var(--measure); }
@@ -133,10 +154,11 @@
 <main class="wrap">
   <div class="play-head">
     <h1>Playground</h1>
-    <p>Write Python and compile it with pyrock in your browser. This is the real compiler,
-    built to WebAssembly: you get the same diagnostics, inferred types, CPython boundaries
-    and Rust code as <code>pyrock check</code>, <code>explain</code> and <code>emit</code>
-    print on your machine.</p>
+    <p>Pick an example and press Run: the program pyrock compiled from it runs in your
+    browser as WebAssembly, then the same source runs in CPython, and you see both times.
+    Compile shows what pyrock makes of any code you write: the same diagnostics, inferred
+    types, CPython boundaries and Rust as <code>pyrock check</code>, <code>explain</code>
+    and <code>emit</code> print on your machine.</p>
   </div>
 
   <div class="toolbar">
@@ -156,7 +178,7 @@
 
   <div class="workbench">
     <div class="editor">
-      <div class="label"><label for="code">main.py</label><span>Ctrl+Enter runs</span></div>
+      <div class="label"><label for="code">main.py</label><span class="run-kind" id="run-kind">Ctrl+Enter runs</span></div>
       <div class="code-wrap">
         <pre class="hl" aria-hidden="true"><code id="hl"></code></pre>
         <textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Python source"></textarea>
@@ -186,7 +208,7 @@
             <label>speed <select id="pv-fps"><option value="10">10 fps</option><option value="30" selected>30 fps</option><option value="60">60 fps</option></select></label>
           </div>
         </div>
-        <pre id="output"><span class="empty">Run the program to see its output. Compile shows what pyrock makes of it without running it.</span></pre></div>
+        <pre id="output"><span class="empty">Run the example to see pyrock's compiled build of it run, timed against CPython. Compile shows what pyrock makes of the code without running it.</span></pre></div>
       <div role="tabpanel" id="p-check" aria-labelledby="t-check" hidden><pre id="check"><span class="empty">pyrock check: diagnostics appear here after Compile or Run.</span></pre></div>
       <div role="tabpanel" id="p-explain" aria-labelledby="t-explain" hidden><pre id="explain"><span class="empty">pyrock explain: imports, inferred generic signatures, specializations and CPython boundaries.</span></pre></div>
       <div role="tabpanel" id="p-rust" aria-labelledby="t-rust" hidden><pre id="rust"><span class="empty">The generated src/main.rs, once the program compiles without errors.</span></pre></div>
@@ -195,22 +217,25 @@
 
   <div class="where">
     <div class="native">
-      <h3>Compiling</h3>
-      <p>The pyrock compiler from this repository (<code>crates/playground</code>), built to
-      WebAssembly. Inference, specialization, the boundary list and Rust code generation all
-      run in your browser.</p>
-    </div>
-    <div>
-      <h3>Parsing</h3>
-      <p>As on your machine, pyrock parses with CPython's own <code>ast</code> module. Here
-      that CPython is <a href="https://pyodide.org">Pyodide</a> (Python 3.12 in WebAssembly),
-      loaded once, about 10&nbsp;MB.</p>
+      <h3>Running an example</h3>
+      <p>Each example was compiled by pyrock when this site was built, with <code>pyrock
+      build --release --mode native-only --target wasm32-wasip1</code>, and checked against
+      CPython's output. Run starts that program: Python turned into Rust, turned into
+      WebAssembly, with no Python interpreter in it.</p>
     </div>
     <div class="bridge">
-      <h3>Running</h3>
-      <p>The generated Rust needs Cargo to become a program, and a browser has no Cargo. So
-      Run executes your code with CPython in Pyodide. A program compiled by pyrock prints the
-      same output; its test suite checks that for every feature.</p>
+      <h3>The comparison</h3>
+      <p>Then the same source runs in CPython (<a href="https://pyodide.org">Pyodide</a>,
+      Python 3.12 built to WebAssembly). Both run in this tab, so the ratio compares
+      pyrock's code with CPython's interpreter fairly; on your machine both are faster, see
+      <a href="./#speed">the measurements</a>.</p>
+    </div>
+    <div>
+      <h3>Code you change</h3>
+      <p>Compiling it runs here: the pyrock compiler itself is WebAssembly, and Compile shows
+      its diagnostics, types and Rust. Building that Rust needs Rust's compiler, which
+      doesn't run in a browser, so edited code runs in CPython only. <a href="./#install">Install
+      pyrock</a> and <code>pyrock run main.py</code> runs it compiled.</p>
     </div>
   </div>
   <div class="pictures">
@@ -224,11 +249,13 @@
     <code>.svg</code>, <code>.html</code> or <code>.ppm</code>. The graphics examples all
     compile with <code>--mode native-only</code>.</p>
   </div>
-  <p class="fine">One file only: other imports go to CPython (the standard library works, and
-  Pyodide's packages such as <code>numpy</code> load on first import). Where pyrock
-  documents a difference from CPython, the output here is CPython's: for example, integers
-  beyond 64 bits raise <code>OverflowError</code> in a compiled program. For the native
-  executable, <a href="./#install">install pyrock</a> and run <code>pyrock run main.py</code>.</p>
+  <p class="fine">One file only. In CPython runs, other imports work (the standard library,
+  and Pyodide's packages such as <code>numpy</code>, loaded on first import). Where pyrock
+  documents a difference from CPython, a CPython run shows CPython's behaviour: for example,
+  integers beyond 64 bits raise <code>OverflowError</code> in a compiled program. Three
+  examples have no browser build, and say why when you run them: one uses a generator
+  (WebAssembly can't switch stacks), one uses CPython's <code>json</code>, and one is a
+  program pyrock rejects.</p>
 </main>
 
 <footer>
@@ -544,14 +571,53 @@
   }
 
   // ---- run ----
+  // An unchanged example runs as the program pyrock compiled from it (built
+  // with the site: site/examples/<name>.wasm, listed in compiled.json), then
+  // in CPython for comparison. Anything else runs in CPython only.
+  var compiled = {}, current = null; // current: { file, text } of the loaded example
+  fetch("examples/compiled.json").then(function (r) { return r.ok ? r.json() : {}; }).then(function (m) { compiled = m; showRunKind(); }, function () {});
+  function runKind() {
+    if (!current || code.value !== current.text) return { edited: true };
+    var c = compiled[current.file] || {};
+    return c.wasm ? { wasm: c.wasm, note: c.note } : { why: c.why || "This example has no browser build." };
+  }
+  function showRunKind() {
+    var k = runKind(), el = $("run-kind");
+    el.classList.toggle("compiled", !!k.wasm);
+    el.textContent = k.wasm ? "Run: pyrock's compiled build, then CPython" : k.edited ? "Run: CPython (edited code)" : "Run: CPython";
+  }
+  code.addEventListener("input", showRunKind);
+  $("banner").addEventListener("click", function (e) {
+    if (!e.target.closest("[data-restore]") || !current) return;
+    setCode(current.text);
+    showRunKind();
+    run();
+  });
+
+  function fmtMs(ms) { return ms >= 1000 ? (ms / 1000).toFixed(2) + " s" : ms >= 100 ? Math.round(ms) + " ms" : ms.toFixed(1) + " ms"; }
+  function race(rockMs, pyMs, verdict) {
+    var max = Math.max(rockMs, pyMs || rockMs);
+    var lane = function (cls, who, sub, ms) {
+      var w = ms == null ? 0 : Math.max(0.5, ms / max * 100);
+      return '<span class="who ' + cls + '">' + who + "<small>" + sub + "</small></span>" +
+        '<span class="track ' + cls + '"><i style="width:' + w + '%"></i></span>' +
+        '<span class="ms">' + (ms == null ? '<span class="working">running…</span>' : fmtMs(ms)) + "</span>";
+    };
+    return '<div class="race" aria-live="polite">' +
+      lane("rock", "pyrock", "compiled, as WebAssembly", rockMs) +
+      lane("py", "CPython", "Pyodide, as WebAssembly", pyMs) +
+      (verdict ? '<p class="verdict">' + verdict + "</p>" : "") + "</div>";
+  }
+
   var TEXT_LIMIT = 200000; // characters of output kept on screen in the text view
   function run() {
     if (!ready) return;
     busy(true, "Compiling…");
-    var out = $("output");
+    var out = $("output"), kind = runKind();
     compile().then(function (r) {
       var s = summary(r);
-      $("banner").innerHTML = '<div class="banner ' + (s.ok ? "ok" : "bad") + '">' + s.html + "</div>";
+      var banner = $("banner");
+      banner.innerHTML = '<div class="banner ' + (s.ok ? "ok" : "bad") + '">' + s.html + "</div>";
       clearPreview();
       out.textContent = "";
       selectTab("output");
@@ -568,13 +634,43 @@
         shown += text.length;
         out.appendChild(span);
       };
-      busy(true, "Running in CPython (Pyodide)…");
-      btnStop.hidden = false;
-      return call("run", { src: code.value }).then(function (res) {
+      var exitLine = function (text) {
         var end = document.createElement("span");
         end.className = "exit";
-        end.textContent = (out.textContent && !/\n$/.test(out.textContent) ? "\n" : "") + "\n[exit status " + res.status + ", " + Math.round(res.ms) + " ms in CPython]";
+        end.textContent = (out.textContent && !/\n$/.test(out.textContent) ? "\n" : "") + "\n" + text;
         out.appendChild(end);
+      };
+      btnStop.hidden = false;
+
+      if (kind.wasm) {
+        var strip = document.createElement("div");
+        banner.appendChild(strip);
+        busy(true, "Running the program pyrock compiled…");
+        return call("run-compiled", { file: kind.wasm }).then(function (res) {
+          streamTo = null;
+          exitLine("[exit status " + res.status + " after " + fmtMs(res.ms) + ": the program pyrock compiled from this source]");
+          renderPreview(stdout);
+          strip.innerHTML = race(res.ms, null, null);
+          busy(true, "Running the same source in CPython to compare…");
+          return call("run", { src: code.value, capture: true }).then(function (py) {
+            var same = py.stdout === stdout && py.status === res.status;
+            var ratio = py.ms / Math.max(res.ms, 0.05);
+            var speed = ratio >= 1.05 ? "<strong>" + ratio.toFixed(1) + "x faster than CPython</strong>" : ratio > 0.95 ? "<strong>About as fast as CPython</strong>" : "<strong>" + (1 / ratio).toFixed(1) + "x slower than CPython</strong>";
+            var outNote = same ? ", with the same output." : '. <span class="diff">The outputs differ' + (kind.note ? ": " + esc(kind.note) : ".") + "</span>";
+            strip.innerHTML = race(res.ms, py.ms, speed + outNote + (ratio >= 1.05 && res.ms < 5 ? " A run this short is mostly start-up; the bigger programs show the difference better." : ""));
+            busy(false, "Done.");
+          });
+        });
+      }
+
+      var why = kind.edited
+        ? "You changed the code, so Run uses CPython: building a program needs Rust's compiler, which doesn't run in a browser. Compile still shows what pyrock makes of it (see Rust)." +
+          (current ? ' <button type="button" class="restore" data-restore>Restore the example</button> to run pyrock\'s build of it.' : "")
+        : esc(kind.why);
+      banner.insertAdjacentHTML("beforeend", '<div class="banner bad">' + why + "</div>");
+      busy(true, "Running in CPython (Pyodide)…");
+      return call("run", { src: code.value }).then(function (res) {
+        exitLine("[exit status " + res.status + ", " + fmtMs(res.ms) + " in CPython]");
         renderPreview(stdout);
         busy(false, "Done.");
       });
@@ -688,8 +784,10 @@
         if (/^# mode: native-only/.test(lines[0])) native = true;
         lines.shift();
       }
-      setCode(lines.join("\n"));
+      current = { file: file, text: lines.join("\n") };
+      setCode(current.text);
       setMode(native);
+      showRunKind();
     }, function (err) { status.textContent = "Couldn't load the example: " + err.message; });
   }
   (function fillExamples() {
@@ -731,7 +829,7 @@
 
   var params = new URLSearchParams(location.hash.slice(1));
   if (params.get("code")) {
-    try { setCode(unb64(params.get("code"))); setMode(params.get("mode") === "native"); }
+    try { setCode(unb64(params.get("code"))); setMode(params.get("mode") === "native"); showRunKind(); }
     catch (e) { load(EXAMPLES[0].file); }
   } else {
     load(EXAMPLES[0].file);

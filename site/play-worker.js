@@ -1,10 +1,12 @@
-// The playground's worker: Pyodide (CPython in WebAssembly) parses and runs
-// Python; pyrock.wasm (the pyrock compiler, built from crates/playground)
-// does everything between parsing and Rust code. It runs off the page, so a
-// program that never ends can be stopped by terminating the worker.
+// The playground's worker. Pyodide (CPython in WebAssembly) parses Python and
+// runs it for comparison; pyrock.wasm (the pyrock compiler, built from
+// crates/playground) does everything between parsing and Rust code; and the
+// examples' own WebAssembly builds, made by `pyrock build --target
+// wasm32-wasip1` when the site is built, run through wasi.js. It runs off the
+// page, so a program that never ends can be stopped by terminating the worker.
 
 const PYODIDE = "https://cdn.jsdelivr.net/pyodide/v0.27.7/full/";
-importScripts(PYODIDE + "pyodide.js");
+importScripts(PYODIDE + "pyodide.js", "wasi.js");
 
 let py = null;      // Pyodide
 let rock = null;    // pyrock.wasm exports
@@ -79,33 +81,64 @@ function compileSource(src, nativeOnly) {
   return JSON.parse(readOut());
 }
 
-async function runSource(src, id) {
-  // Output goes to the page in batches: Python runs synchronously here, so
-  // nothing can flush on a timer; a batch is sent when it reaches 64 KB, when
-  // output switches between stdout and stderr, and when the program ends.
-  let pendingStream = null, pendingText = "";
+// Output goes to the page in batches: programs run synchronously here, so
+// nothing can flush on a timer; a batch is sent when it reaches 64 KB, when
+// output switches between stdout and stderr, and when the program ends. With
+// `capture`, nothing is sent and stdout comes back with the result instead.
+function output(id, capture) {
+  let pendingStream = null, pendingText = "", stdout = "";
   const flush = () => {
-    if (pendingText) postMessage({ id, type: "stream", stream: pendingStream, text: pendingText });
+    if (pendingText && !capture) postMessage({ id, type: "stream", stream: pendingStream, text: pendingText });
     pendingText = "";
   };
-  const writer = (stream) => {
-    const dec = new TextDecoder();
-    return {
-      write(buf) {
-        if (pendingStream !== stream) { flush(); pendingStream = stream; }
-        pendingText += dec.decode(buf, { stream: true });
-        if (pendingText.length > 65536) flush();
-        return buf.length;
-      },
-    };
+  const decoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
+  const write = (stream, buf) => {
+    const text = decoders[stream].decode(buf, { stream: true });
+    if (capture) {
+      if (stream === "stdout") stdout += text;
+      return;
+    }
+    if (pendingStream !== stream) { flush(); pendingStream = stream; }
+    pendingText += text;
+    if (pendingText.length > 65536) flush();
   };
-  py.setStdout(writer("stdout"));
-  py.setStderr(writer("stderr"));
+  return { write, flush, stdout: () => stdout };
+}
+
+async function runSource(src, id, capture) {
+  const out = output(id, capture);
+  py.setStdout({ write(buf) { out.write("stdout", buf); return buf.length; } });
+  py.setStderr({ write(buf) { out.write("stderr", buf); return buf.length; } });
   await py.loadPackagesFromImports(src, { messageCallback: () => {}, errorCallback: () => {} });
   const t0 = performance.now();
   const status = py.globals.get("_pyrock_run")(src);
-  flush();
-  return { status, ms: performance.now() - t0 };
+  const ms = performance.now() - t0;
+  out.flush();
+  return { status, ms, stdout: capture ? out.stdout() : undefined };
+}
+
+// A program compiled by pyrock to WebAssembly (site/examples/<name>.wasm).
+const modules = {};
+async function runCompiled(file, id) {
+  if (!modules[file]) {
+    modules[file] = fetch("examples/" + file).then((r) => {
+      if (!r.ok) throw new Error(file + ": HTTP " + r.status);
+      return r.arrayBuffer();
+    }).then((b) => WebAssembly.compile(b));
+  }
+  const mod = await modules[file];
+  const out = output(id, false);
+  const t0 = performance.now();
+  let status;
+  try {
+    status = runWasi(mod, { stdout: (b) => out.write("stdout", b), stderr: (b) => out.write("stderr", b), args: ["main"] });
+  } catch (e) {
+    out.flush();
+    throw new Error("the compiled program aborted: " + (e && e.message || e));
+  }
+  const ms = performance.now() - t0;
+  out.flush();
+  return { status, ms };
 }
 
 onmessage = async (e) => {
@@ -118,7 +151,9 @@ onmessage = async (e) => {
     } else if (cmd === "compile") {
       postMessage({ id, type: "done", result: compileSource(src, nativeOnly) });
     } else if (cmd === "run") {
-      postMessage({ id, type: "done", result: await runSource(src, id) });
+      postMessage({ id, type: "done", result: await runSource(src, id, e.data.capture) });
+    } else if (cmd === "run-compiled") {
+      postMessage({ id, type: "done", result: await runCompiled(e.data.file, id) });
     }
   } catch (err) {
     postMessage({ id, type: "error", message: String(err && err.message || err) });

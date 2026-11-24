@@ -15,7 +15,7 @@ USAGE:
   pyrock check   <file.py> [--mode hybrid|native-only]
   pyrock explain <file.py> [--format text|json] [--mode ...]
   pyrock emit    <file.py> [--out DIR] [--mode ...]
-  pyrock build   <file.py> [--out DIR] [--release] [--mode ...]
+  pyrock build   <file.py> [--out DIR] [--release] [--mode ...] [--target T]
   pyrock run     <file.py> [--release] [--mode ...] [-- ARGS...]
   pyrock bench   <file.py> [--runs N] [--min-speedup X] [--hardware]
 
@@ -24,6 +24,8 @@ OPTIONS:
                     native-only: report it as an error instead
   --release         build with optimizations (bench always does)
   --out DIR         where the generated Cargo project goes (default: .pyrock/<name>)
+  --target T        build: a Rust target triple, e.g. wasm32-wasip1 for WebAssembly
+                    (native-only programs; run the .wasm with a WASI runtime)
   --format F        explain output: text (default) or json
   --python PATH     interpreter used for parsing, embedding and the bench baseline
                     (default: python3)
@@ -47,6 +49,7 @@ struct Opts {
     runs: usize,
     min_speedup: Option<f64>,
     hardware: bool,
+    target: Option<String>,
     passthrough: Vec<String>,
 }
 
@@ -75,6 +78,7 @@ fn parse_args() -> Result<Opts, String> {
         runs: 5,
         min_speedup: None,
         hardware: false,
+        target: None,
         passthrough: vec![],
     };
     while let Some(a) = args.next() {
@@ -86,6 +90,7 @@ fn parse_args() -> Result<Opts, String> {
             "--runs" => o.runs = args.next().ok_or("--runs needs a value")?.parse().ok().filter(|&n| n > 0).ok_or("--runs needs a positive number")?,
             "--min-speedup" => o.min_speedup = Some(args.next().ok_or("--min-speedup needs a value")?.parse().map_err(|_| "--min-speedup needs a number")?),
             "--hardware" => o.hardware = true,
+            "--target" => o.target = Some(args.next().ok_or("--target needs a value")?),
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);
@@ -215,13 +220,22 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
                 return Ok(ExitCode::from(1));
             }
             let c = compiled.unwrap();
+            if let Some(t) = &o.target {
+                if o.cmd == "run" {
+                    return Err(format!("`run` can't start a program built for {t}: use `pyrock build --target {t}` and run the result with a matching runtime"));
+                }
+                if t.starts_with("wasm") && c.plan.uses_python {
+                    print_diags(&files, &diagnostics);
+                    return Err(format!("a {t} build can't embed CPython, and this program crosses into it ({} boundary site(s), see `pyrock explain`): make it pass `--mode native-only`", c.plan.boundaries.len()));
+                }
+            }
             let out_dir = o.out.clone().unwrap_or_else(|| default_out(&o.file));
             write_project(o, &parsed.python_version, &module, &c, &out_dir, &file_name)?;
             if o.cmd == "emit" {
                 println!("wrote {}", out_dir.display());
                 return Ok(ExitCode::SUCCESS);
             }
-            let exe = cargo_build(&out_dir, o.release, true, &o.python)?;
+            let exe = cargo_build(&out_dir, o.release, true, &o.python, o.target.as_deref())?;
             if o.cmd == "build" {
                 println!("{}", exe.display());
                 return Ok(ExitCode::SUCCESS);
@@ -419,7 +433,7 @@ fn cargo_bin() -> String {
 }
 
 /// Build the generated project; returns the executable path.
-fn cargo_build(out: &Path, release: bool, quiet: bool, python: &str) -> Result<PathBuf, String> {
+fn cargo_build(out: &Path, release: bool, quiet: bool, python: &str, triple: Option<&str>) -> Result<PathBuf, String> {
     let target = target_dir();
     let mut cmd = Command::new(cargo_bin());
     // PyO3 links against the same interpreter that parsed the program.
@@ -438,16 +452,29 @@ fn cargo_build(out: &Path, release: bool, quiet: bool, python: &str) -> Result<P
     if quiet {
         cmd.arg("-q");
     }
+    if let Some(t) = triple {
+        cmd.arg("--target").arg(t);
+    }
     let st = cmd.status().map_err(|e| format!("failed to run cargo: {e}"))?;
     if !st.success() {
         return Err("cargo build of the generated project failed (if the error is inside an imported .rs/.c file, fix it there; otherwise this is a pyrock bug)".into());
     }
     let cargo_toml = std::fs::read_to_string(out.join("Cargo.toml")).map_err(|e| e.to_string())?;
     let name = cargo_toml.lines().find_map(|l| l.strip_prefix("name = \"")).and_then(|l| l.strip_suffix('"')).unwrap_or("main");
-    let built = target.join(if release { "release" } else { "debug" }).join(name);
+    let profile = if release { "release" } else { "debug" };
+    let ext = match triple {
+        Some(t) if t.starts_with("wasm") => ".wasm",
+        Some(t) if t.contains("windows") => ".exe",
+        None if cfg!(windows) => ".exe",
+        _ => "",
+    };
+    let built = match triple {
+        Some(t) => target.join(t).join(profile).join(format!("{name}{ext}")),
+        None => target.join(profile).join(name),
+    };
     // Stable location next to the generated project: .pyrock/<stem>/<stem>
     let stem = name.strip_prefix("pyrock_").and_then(|n| n.rsplit_once('_')).map(|(s, _)| s).unwrap_or(name);
-    let exe = out.join(stem);
+    let exe = out.join(format!("{stem}{ext}"));
     // Copy next to it, then rename over it: replacing works even while the
     // previous build is still running ("Text file busy" when copying onto it).
     let tmp = exe.with_extension(format!("tmp{}", std::process::id()));

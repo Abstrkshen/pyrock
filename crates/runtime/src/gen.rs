@@ -8,8 +8,7 @@
 //! the `yield`, so the body's own `try`/`finally` handle it, as in CPython.
 
 use crate::exc::{Exc, PyResult};
-use crate::stackful::Co;
-use corosensei::{CoroutineResult, Yielder};
+use crate::stackful::{Co, CoroutineResult, Yielder};
 use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -172,7 +171,7 @@ impl<T: 'static, S: SendValue, R: 'static> Inner<T, S, R> {
                     CUR.with(|c| c.borrow_mut().pop());
                     r
                 })
-                .map_err(|e| Exc::new("MemoryError", e))?
+                .map_err(|e| Exc::new(if cfg!(target_family = "wasm") { "RuntimeError" } else { "MemoryError" }, e))?
             }
             State::Suspended(co) => co,
             State::Running => {

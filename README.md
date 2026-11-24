@@ -5,7 +5,8 @@ infers generic function signatures, specializes each function for the concrete t
 called with, and builds a native executable with Cargo. It explains every decision it makes.
 
 Website: **https://abstrkshen.github.io/pyrock/**, with a [playground](https://abstrkshen.github.io/pyrock/play.html)
-that runs the compiler in your browser. Releases: [github.com/Abstrkshen/pyrock/releases](https://github.com/Abstrkshen/pyrock/releases)
+that runs the compiler in your browser, and runs the examples as pyrock compiled them
+(to WebAssembly), timed against CPython. Releases: [github.com/Abstrkshen/pyrock/releases](https://github.com/Abstrkshen/pyrock/releases)
 
 Status: **prototype.** Classes, closures, exceptions, native collections, generators and
 async/await compile natively, as does Rust and C interop with structs, slices and callbacks.
@@ -79,6 +80,7 @@ pyrock check   main.py [--mode native-only]          # diagnostics only, no buil
 pyrock explain main.py [--format json]               # imports, inferred types, boundaries
 pyrock run     main.py [--release] [--mode native-only] [-- ARGS...]
 pyrock build   main.py [--release] [--out DIR]       # prints the executable's path
+pyrock build   main.py --mode native-only --target wasm32-wasip1   # WebAssembly (WASI)
 pyrock emit    main.py [--out DIR]                   # write the Cargo project, don't build
 pyrock bench   main.py [--runs N] [--min-speedup X]  # time against CPython
 ```
@@ -107,6 +109,7 @@ Options:
 | `--release` | Optimized build (Cargo's release profile) |
 | `--python PATH` | The interpreter used to parse, to embed, and whose `sys.path` the program sees. Pass a virtualenv's `python` to use its packages |
 | `--out DIR` | Where `emit`/`build` write the Cargo project (default `.pyrock/<name>/` next to the source) |
+| `--target T` | `build` for a Rust target triple. `wasm32-wasip1` makes a `.wasm` file for a WASI runtime (wasmtime, Node, a browser shim like the playground's); the program must pass `--mode native-only`, and generators aren't supported there. Needs `rustup target add T` |
 | `--format json` | `explain` as JSON, for tools |
 | `--runs N` | `bench`: runs of each program (default 5); the median is reported |
 | `--min-speedup X` | `bench`: exit 1 unless the native build is at least X times faster (for CI) |
@@ -261,7 +264,7 @@ Python source ─► CPython ast (JSON protocol v1) ─► scope-resolved HIR
 | `crates/codegen-rust` | One Rust function per specialization |
 | `crates/runtime` | Python semantics in Rust (checked ints, floor/mod, float repr, exceptions, `int \| float`), collections, generators and coroutines (stackful, `corosensei`), `math`, FFI conversions, and the PyO3 bridge (`python` feature). Embedded in the `pyrock` binary |
 | `crates/driver` | The `pyrock` CLI |
-| `crates/playground` | The compiler as a WebAssembly module for the website's playground: takes `dump_ast.py`'s JSON (parsed by Pyodide in the browser) and returns `check`, `explain` and the generated Rust |
+| `crates/playground` | The compiler as a WebAssembly module for the website's playground: takes `dump_ast.py`'s JSON (parsed by Pyodide in the browser) and returns `check`, `explain` and the generated Rust. The playground's Run uses the examples' own builds (`pyrock build --target wasm32-wasip1`) |
 
 ## Tests
 
@@ -271,7 +274,7 @@ UPDATE_SNAPSHOTS=1 cargo test -p pyrock --test suites   # re-bless snapshots
 bash examples/tour/run_all.sh          # every tour program vs CPython
 bash examples/apps/run_all.sh          # the apps vs their expected output
 bash scripts/readme_check.sh           # every example README's commands, verbatim
-bash scripts/build_site.sh             # the website's playground (compiler as wasm, programs)
+bash scripts/build_site.sh             # the playground: compiler as wasm, examples built to wasm and checked vs CPython
 ```
 
 Progress towards compiling real backend, AI and GUI apps is tracked in

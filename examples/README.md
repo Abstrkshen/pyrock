@@ -55,7 +55,8 @@ each one against CPython.
 The programs in the [playground](https://abstrkshen.github.io/pyrock/play.html): a ray
 tracer, a Lisp interpreter, maze search, flocking birds, chaotic pendulums, an L-system
 plant, and smaller ones. Most draw by printing SVG, HTML or PPM images, which the
-playground renders and animates. All compile with `--mode native-only`, and the test suite
+playground renders and animates. The playground runs the WebAssembly build pyrock makes of
+each one, timed against CPython. All compile with `--mode native-only`, and the test suite
 checks each against CPython.
 
 ## Setup
