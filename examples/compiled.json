@@ -1,0 +1,64 @@
+{
+    "classes.py": {
+        "wasm": "classes.wasm",
+        "bytes": 153734
+    },
+    "generators.py": {
+        "why": "It uses a generator. Generators need stack switching, which WebAssembly doesn't have, so pyrock's browser build can't run it (the native executable can)."
+    },
+    "generics.py": {
+        "wasm": "generics.wasm",
+        "bytes": 128963
+    },
+    "html_report.py": {
+        "wasm": "html_report.wasm",
+        "bytes": 204236
+    },
+    "json_boundaries.py": {
+        "why": "It uses a CPython module, and a WebAssembly build can't embed CPython. On your machine pyrock compiles it in hybrid mode, with CPython at the boundaries Explain lists."
+    },
+    "lisp_interpreter.py": {
+        "wasm": "lisp_interpreter.wasm",
+        "bytes": 233626
+    },
+    "ppm_game_of_life.py": {
+        "wasm": "ppm_game_of_life.wasm",
+        "bytes": 97285
+    },
+    "ppm_mandelbrot.py": {
+        "wasm": "ppm_mandelbrot.wasm",
+        "bytes": 102319
+    },
+    "ppm_maze_search.py": {
+        "wasm": "ppm_maze_search.wasm",
+        "bytes": 119756
+    },
+    "ppm_raytracer.py": {
+        "wasm": "ppm_raytracer.wasm",
+        "bytes": 131537
+    },
+    "svg_boids.py": {
+        "wasm": "svg_boids.wasm",
+        "bytes": 191266
+    },
+    "svg_bouncing_balls.py": {
+        "wasm": "svg_bouncing_balls.wasm",
+        "bytes": 188487
+    },
+    "svg_chart.py": {
+        "wasm": "svg_chart.wasm",
+        "bytes": 155721
+    },
+    "svg_double_pendulum.py": {
+        "wasm": "svg_double_pendulum.wasm",
+        "bytes": 239628,
+        "note": "The pendulums are chaotic: WebAssembly's sin and cos round the last digit differently from CPython's math library, and the difference grows until a few late frames print one coordinate differently. The native executable matches CPython exactly."
+    },
+    "svg_lsystem_plant.py": {
+        "wasm": "svg_lsystem_plant.wasm",
+        "bytes": 275874
+    },
+    "type_error.py": {
+        "why": "pyrock rejects it at compile time: see the Check tab."
+    }
+}

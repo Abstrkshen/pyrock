@@ -1,0 +1,847 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pyrock playground</title>
+<meta name="description" content="Compile Python with pyrock in your browser: diagnostics, inferred types, CPython boundaries and the generated Rust, from the real compiler built to WebAssembly.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3 28 10v12L16 29 4 22V10z' fill='%23C99A1E'/%3E%3Cpath d='M16 3 28 10 16 17 4 10z' fill='%23E9C25A'/%3E%3Cpath d='M16 17v12L4 22V10z' fill='%23A27A10'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<style>
+.play-head { padding-top: 40px; }
+.play-head h1 { font-size: clamp(2.2rem, 4.6vw, 3.4rem); font-weight: 800; font-variation-settings: "wdth" 80; letter-spacing: -0.025em; }
+.play-head p { color: var(--muted); font-size: 1.1rem; max-width: 66ch; margin: 0.8rem 0 0; }
+
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin: 28px 0 14px; }
+.toolbar label { color: var(--muted); font-size: 0.95rem; display: flex; align-items: center; gap: 8px; }
+.toolbar select { font: inherit; font-size: 0.95rem; color: var(--ink); background: var(--surface); border: 1.5px solid var(--line); border-radius: var(--radius-small); padding: 6px 8px; }
+.toolbar label { max-width: 100%; }
+.toolbar select { min-width: 0; max-width: 100%; }
+.seg { display: inline-flex; border: 1.5px solid var(--line); border-radius: 999px; overflow: hidden; }
+.seg button { font: inherit; font-size: 0.92rem; background: transparent; color: var(--muted); border: 0; padding: 6px 14px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.act { font: inherit; font-weight: 650; font-size: 0.97rem; border-radius: var(--radius-small); padding: 8px 18px; cursor: pointer; border: 1.5px solid var(--ink); background: transparent; color: var(--ink); }
+.act.primary { background: var(--native); border-color: var(--native); color: var(--bg); }
+.act:disabled { opacity: 0.5; cursor: progress; }
+.act[hidden] { display: none; }
+.toolbar .status { color: var(--muted); font-size: 0.93rem; margin: 0 0 0 auto; min-height: 1.4em; }
+.toolbar .status.busy::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--pyrite); margin-right: 8px; vertical-align: middle; }
+@media (prefers-reduced-motion: no-preference) { .toolbar .status.busy::before { animation: pulse 1s ease-in-out infinite alternate; } @keyframes pulse { from { opacity: 0.25; } } }
+
+.workbench { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); border: 1px solid var(--line); border-radius: var(--radius-pane); overflow: hidden; min-height: 560px; }
+.editor { display: flex; flex-direction: column; background: var(--py-pane); min-width: 0; }
+.editor .label, .results .label { display: flex; justify-content: space-between; padding: 12px 18px 0; font-size: 0.88rem; color: var(--muted); }
+/* The editor is a transparent textarea over a highlighted copy of its text:
+   both layers share every metric below, and the copy follows its scrolling. */
+.code-wrap { position: relative; flex: 1; min-height: 520px; }
+.code-wrap textarea, .code-wrap .hl {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; border: 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.86rem; font-weight: 400; font-style: normal;
+  line-height: 1.6; letter-spacing: 0; font-variant-ligatures: none;
+  padding: 10px 18px 18px; tab-size: 4; white-space: pre; overflow-wrap: normal; word-break: normal;
+}
+.code-wrap .hl { overflow: hidden; color: var(--ink); pointer-events: none; }
+.code-wrap .hl code { font: inherit; background: none; border: 0; padding: 0; white-space: inherit; }
+.code-wrap textarea {
+  resize: none; outline: none; overflow: auto; background: transparent;
+  color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--ink);
+}
+.code-wrap textarea::selection { background: rgba(201, 154, 30, 0.32); }
+.code-wrap textarea:focus-visible { box-shadow: inset 0 0 0 2px var(--pyrite); }
+/* Python tokens (no bold or italics: both layers must keep identical glyph widths). */
+.hl .p-k { color: var(--py-key); }
+.hl .p-s { color: var(--py-str); }
+.hl .p-n { color: var(--py-num); }
+.hl .p-c { color: var(--py-com); }
+.hl .p-d { color: var(--bridge); }
+.hl .p-b { color: var(--native); }
+.hl .p-f { color: var(--ink); text-decoration: underline; text-decoration-color: var(--pyrite); text-decoration-thickness: 2px; text-underline-offset: 3px; }
+.hl .p-self { color: var(--muted); }
+.results { background: var(--rs-pane); color: var(--rs-ink); display: flex; flex-direction: column; min-width: 0; }
+.results .tabs { padding: 12px 14px 0; margin: 0; }
+.results .tabs [role="tab"] { color: var(--rs-muted); border-color: #3A464C; font-size: 0.9rem; padding: 4px 14px; }
+.results .tabs [role="tab"][aria-selected="true"] { background: var(--rs-ink); color: var(--rs-pane); border-color: var(--rs-ink); }
+.results .tabs [role="tab"] .count { display: inline-block; min-width: 1.4em; margin-left: 6px; padding: 0 5px; border-radius: 999px; background: var(--pyrite); color: #1C2326; font-size: 0.78rem; font-weight: 700; }
+.results [role="tabpanel"] { flex: 1; min-height: 0; overflow: auto; }
+.results pre { margin: 0; padding: 14px 18px 18px; font-size: 0.8rem; line-height: 1.6; white-space: pre; }
+.results .empty { color: var(--rs-muted); font-family: "Bricolage Grotesque", system-ui, sans-serif; font-size: 0.97rem; white-space: normal; padding: 18px; max-width: 52ch; }
+.banner { margin: 14px 18px 0; padding: 10px 14px; border-radius: var(--radius-small); font-size: 0.9rem; line-height: 1.45; }
+.banner.ok { background: rgba(92, 201, 162, 0.14); color: #A9E8CF; }
+.banner.bad { background: rgba(231, 190, 85, 0.14); color: #F0D58C; }
+.banner code { background: transparent; border: 0; color: inherit; padding: 0; }
+.stderr { color: #F4A99A; }
+/* pyrock's build against CPython, timed in this tab */
+.race { margin: 12px 18px 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px 12px; align-items: center; font-size: 0.9rem; }
+.race .who { font-weight: 700; }
+.race .who small { display: block; font-weight: 400; font-size: 0.78rem; color: var(--rs-muted); }
+.race .track { height: 14px; background: #1C2427; border-radius: 3px; overflow: hidden; }
+.race .track i { display: block; height: 100%; min-width: 3px; border-radius: 3px; transition: width 0.4s ease-out; }
+.race .who.rock { color: #5CC9A2; }
+.race .who.py { color: #E2B93B; }
+.race .track.rock i { background: #5CC9A2; }
+.race .track.py i { background: #E2B93B; }
+.race .ms { font-variant-numeric: tabular-nums; text-align: right; color: var(--rs-ink); min-width: 4.5em; }
+.race .verdict { grid-column: 1 / -1; margin: 4px 0 0; color: var(--rs-ink); line-height: 1.45; }
+.race .verdict .diff { color: #F0D58C; }
+.race .working { color: var(--rs-muted); }
+@media (prefers-reduced-motion: reduce) { .race .track i { transition: none; } }
+.banner .restore { font: inherit; font-weight: 650; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; padding: 1px 8px; cursor: pointer; }
+.run-kind { color: var(--muted); }
+.run-kind.compiled { color: var(--native); font-weight: 650; }
+/* Pictures drawn from the program's output */
+#preview { padding: 14px 18px 0; }
+.pv-bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 12px; margin-bottom: 12px; font-size: 0.9rem; color: var(--rs-muted); }
+.seg.dark { border-color: #3A464C; }
+.seg.dark button { color: var(--rs-muted); padding: 4px 12px; font-size: 0.86rem; }
+.seg.dark button[aria-pressed="true"] { background: var(--rs-ink); color: var(--rs-pane); }
+#pv-stage { display: flex; justify-content: center; background: #F3F4F0; border-radius: var(--radius-small); padding: 12px; overflow: auto; }
+#pv-stage[hidden] { display: none; }
+#pv-stage img { display: block; max-width: 100%; height: auto; }
+#pv-stage canvas.pixels { display: block; max-width: 100%; height: auto; image-rendering: pixelated; }
+#pv-stage iframe { display: block; width: 100%; height: 420px; border: 0; background: #FFFFFF; border-radius: 4px; resize: vertical; }
+#pv-player { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 12px 0 4px; font-size: 0.88rem; color: var(--rs-muted); }
+#pv-player[hidden] { display: none; }
+#pv-player input[type="range"] { flex: 1; min-width: 140px; accent-color: var(--pyrite); }
+#pv-player select { font: inherit; background: var(--rs-pane); color: var(--rs-ink); border: 1px solid #3A464C; border-radius: 4px; padding: 2px 4px; }
+.pv-btn { font: inherit; font-weight: 650; background: var(--rs-ink); color: var(--rs-pane); border: 0; border-radius: 4px; padding: 4px 14px; cursor: pointer; min-width: 5.2em; }
+#output[hidden] { display: none; }
+.results .t-k, .results .t-m { color: var(--rs-key); }
+.results .t-s { color: var(--rs-str); }
+.results .t-n { color: var(--rs-num); }
+.results .t-c { color: var(--rs-muted); }
+.exit { color: var(--rs-muted); }
+
+.where { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; margin-top: 44px; }
+.where div { border-top: 3px solid var(--line); padding-top: 12px; }
+.where div.native { border-top-color: var(--native); }
+.where div.bridge { border-top-color: var(--pyrite); }
+.where p { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.97rem; }
+.where code { white-space: normal; overflow-wrap: anywhere; }
+.pictures { margin-top: 36px; max-width: var(--measure); }
+.pictures p { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.97rem; }
+.fine { margin-top: 28px; color: var(--muted); font-size: 0.95rem; max-width: var(--measure); }
+
+@media (max-width: 900px) {
+  .workbench { grid-template-columns: minmax(0, 1fr); }
+  .code-wrap { min-height: 340px; }
+  .results { min-height: 420px; }
+  .where { grid-template-columns: minmax(0, 1fr); }
+  .toolbar .status { margin-left: 0; width: 100%; }
+}
+</style>
+</head>
+<body>
+<header class="wrap top">
+  <a class="brand" href="./">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 28 10v12L16 29 4 22V10z" fill="#C99A1E"/><path d="M16 3 28 10 16 17 4 10z" fill="#E9C25A"/><path d="M16 17v12L4 22V10z" fill="#A27A10"/></svg>
+    pyrock
+  </a>
+  <nav aria-label="Sections">
+    <a href="play.html" aria-current="page">Playground</a>
+    <a href="./#how">How it works</a>
+    <a href="./#install">Install</a>
+    <a href="./#usage">Usage</a>
+    <a href="./#speed">Speed</a>
+    <a href="./#examples">Examples</a>
+    <a href="https://github.com/Abstrkshen/pyrock">GitHub</a>
+  </nav>
+  <button class="theme" type="button" id="theme" aria-label="Switch colour theme">Theme</button>
+</header>
+
+<main class="wrap">
+  <div class="play-head">
+    <h1>Playground</h1>
+    <p>Pick an example and press Run: the program pyrock compiled from it runs in your
+    browser as WebAssembly, then the same source runs in CPython, and you see both times.
+    Compile shows what pyrock makes of any code you write: the same diagnostics, inferred
+    types, CPython boundaries and Rust as <code>pyrock check</code>, <code>explain</code>
+    and <code>emit</code> print on your machine.</p>
+  </div>
+
+  <div class="toolbar">
+    <label>Example
+      <select id="example" aria-label="Load an example"></select>
+    </label>
+    <div class="seg" role="group" aria-label="Compilation mode">
+      <button type="button" id="mode-hybrid" aria-pressed="true">hybrid</button>
+      <button type="button" id="mode-native" aria-pressed="false">native-only</button>
+    </div>
+    <button type="button" class="act" id="compile">Compile</button>
+    <button type="button" class="act primary" id="run">Run</button>
+    <button type="button" class="act" id="stop" hidden>Stop</button>
+    <button type="button" class="act" id="share">Copy link</button>
+    <span class="status" id="status" role="status" aria-live="polite"></span>
+  </div>
+
+  <div class="workbench">
+    <div class="editor">
+      <div class="label"><label for="code">main.py</label><span class="run-kind" id="run-kind">Ctrl+Enter runs</span></div>
+      <div class="code-wrap">
+        <pre class="hl" aria-hidden="true"><code id="hl"></code></pre>
+        <textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Python source"></textarea>
+      </div>
+    </div>
+    <div class="results">
+      <div class="tabs" role="tablist" aria-label="Results">
+        <button role="tab" id="t-output" aria-controls="p-output" aria-selected="true">Output</button>
+        <button role="tab" id="t-check" aria-controls="p-check" aria-selected="false" tabindex="-1">Check</button>
+        <button role="tab" id="t-explain" aria-controls="p-explain" aria-selected="false" tabindex="-1">Explain</button>
+        <button role="tab" id="t-rust" aria-controls="p-rust" aria-selected="false" tabindex="-1">Rust</button>
+      </div>
+      <div role="tabpanel" id="p-output" aria-labelledby="t-output"><div id="banner"></div>
+        <div id="preview" hidden>
+          <div class="pv-bar">
+            <span id="pv-kind"></span>
+            <div class="seg dark" role="group" aria-label="Output view">
+              <button type="button" id="view-picture" aria-pressed="true">Picture</button>
+              <button type="button" id="view-text" aria-pressed="false">Text</button>
+            </div>
+          </div>
+          <div id="pv-stage"></div>
+          <div id="pv-player" hidden>
+            <button type="button" class="pv-btn" id="pv-play">Pause</button>
+            <input type="range" id="pv-frame" min="0" max="0" value="0" aria-label="Frame">
+            <span id="pv-count"></span>
+            <label>speed <select id="pv-fps"><option value="10">10 fps</option><option value="30" selected>30 fps</option><option value="60">60 fps</option></select></label>
+          </div>
+        </div>
+        <pre id="output"><span class="empty">Run the example to see pyrock's compiled build of it run, timed against CPython. Compile shows what pyrock makes of the code without running it.</span></pre></div>
+      <div role="tabpanel" id="p-check" aria-labelledby="t-check" hidden><pre id="check"><span class="empty">pyrock check: diagnostics appear here after Compile or Run.</span></pre></div>
+      <div role="tabpanel" id="p-explain" aria-labelledby="t-explain" hidden><pre id="explain"><span class="empty">pyrock explain: imports, inferred generic signatures, specializations and CPython boundaries.</span></pre></div>
+      <div role="tabpanel" id="p-rust" aria-labelledby="t-rust" hidden><pre id="rust"><span class="empty">The generated src/main.rs, once the program compiles without errors.</span></pre></div>
+    </div>
+  </div>
+
+  <div class="where">
+    <div class="native">
+      <h3>Running an example</h3>
+      <p>Each example was compiled by pyrock when this site was built, with <code>pyrock
+      build --release --mode native-only --target wasm32-wasip1</code>, and checked against
+      CPython's output. Run starts that program: Python turned into Rust, turned into
+      WebAssembly, with no Python interpreter in it.</p>
+    </div>
+    <div class="bridge">
+      <h3>The comparison</h3>
+      <p>Then the same source runs in CPython (<a href="https://pyodide.org">Pyodide</a>,
+      Python 3.12 built to WebAssembly). Both run in this tab, so the ratio compares
+      pyrock's code with CPython's interpreter fairly; on your machine both are faster, see
+      <a href="./#speed">the measurements</a>.</p>
+    </div>
+    <div>
+      <h3>Code you change</h3>
+      <p>Compiling it runs here: the pyrock compiler itself is WebAssembly, and Compile shows
+      its diagnostics, types and Rust. Building that Rust needs Rust's compiler, which
+      doesn't run in a browser, so edited code runs in CPython only. <a href="./#install">Install
+      pyrock</a> and <code>pyrock run main.py</code> runs it compiled.</p>
+    </div>
+  </div>
+  <div class="pictures">
+    <h3>Pictures from printed output</h3>
+    <p>Print SVG or HTML and the Output tab draws it. Print several <code>&lt;svg&gt;</code>
+    documents one after another and they play as an animation, one frame each. Print a
+    plain-text PPM image (<code>P3</code>, then width, height, maximum value and an
+    <code>r g b</code> triple per pixel) and it's painted on a canvas; several in a row
+    animate too. Because a picture is just text the program prints, the native executable
+    pyrock builds prints exactly the same one: open it in a browser, or save it as
+    <code>.svg</code>, <code>.html</code> or <code>.ppm</code>. The graphics examples all
+    compile with <code>--mode native-only</code>.</p>
+  </div>
+  <p class="fine">One file only. In CPython runs, other imports work (the standard library,
+  and Pyodide's packages such as <code>numpy</code>, loaded on first import). Where pyrock
+  documents a difference from CPython, a CPython run shows CPython's behaviour: for example,
+  integers beyond 64 bits raise <code>OverflowError</code> in a compiled program. Three
+  examples have no browser build, and say why when you run them: one uses a generator
+  (WebAssembly can't switch stacks), one uses CPython's <code>json</code>, and one is a
+  program pyrock rejects.</p>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>pyrock, MIT or Apache-2.0.</span>
+    <nav aria-label="Documentation">
+      <a href="./">Home</a>
+      <a href="https://github.com/Abstrkshen/pyrock#readme">README</a>
+      <a href="https://github.com/Abstrkshen/pyrock/blob/main/docs/subset.md">Supported subset</a>
+      <a href="https://github.com/Abstrkshen/pyrock/releases">Releases</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var root = document.documentElement;
+
+  // Theme, shared with the home page.
+  try { var saved = localStorage.getItem("pyrock-theme"); if (saved) root.dataset.theme = saved; } catch (e) {}
+  document.getElementById("theme").addEventListener("click", function () {
+    var dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem("pyrock-theme", root.dataset.theme); } catch (e) {}
+  });
+
+  // The programs live in examples/playground/ (scripts/build_site.sh copies them
+  // to site/examples/). A first line `# mode: native-only` selects the mode.
+  var EXAMPLES = [
+    { file: "generics.py", title: "One function, three types", group: "Start here" },
+    { file: "classes.py", title: "Classes and lists", group: "Start here" },
+    { file: "generators.py", title: "Generators, dicts, lambdas", group: "Start here" },
+    { file: "json_boundaries.py", title: "A Python package (json)", group: "Start here" },
+    { file: "type_error.py", title: "A bug pyrock catches", group: "Start here" },
+    { file: "ppm_raytracer.py", title: "Ray tracer (PPM image)", group: "Bigger programs" },
+    { file: "lisp_interpreter.py", title: "A Lisp interpreter", group: "Bigger programs" },
+    { file: "ppm_maze_search.py", title: "Maze generation and search (PPM frames)", group: "Bigger programs" },
+    { file: "svg_boids.py", title: "Flocking birds (SVG frames)", group: "Bigger programs" },
+    { file: "svg_double_pendulum.py", title: "Chaos: two double pendulums (SVG frames)", group: "Bigger programs" },
+    { file: "svg_lsystem_plant.py", title: "L-system plant (SVG)", group: "Bigger programs" },
+    { file: "svg_chart.py", title: "SVG: a bar chart", group: "Printing pictures" },
+    { file: "svg_bouncing_balls.py", title: "SVG frames: bouncing balls", group: "Printing pictures" },
+    { file: "ppm_mandelbrot.py", title: "PPM image: the Mandelbrot set", group: "Printing pictures" },
+    { file: "ppm_game_of_life.py", title: "PPM frames: Game of Life", group: "Printing pictures" },
+    { file: "html_report.py", title: "HTML: an orders report", group: "Printing pictures" },
+  ];
+
+  var $ = function (id) { return document.getElementById(id); };
+  var code = $("code"), status = $("status");
+  var btnCompile = $("compile"), btnRun = $("run"), btnStop = $("stop");
+  var nativeOnly = false;
+
+  // ---- tabs ----
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.results [role="tab"]'));
+  function selectTab(name, focus) {
+    tabs.forEach(function (t) {
+      var on = t.id === "t-" + name;
+      t.setAttribute("aria-selected", on);
+      t.tabIndex = on ? 0 : -1;
+      $(t.getAttribute("aria-controls")).hidden = !on;
+      if (on && focus) t.focus();
+    });
+  }
+  tabs.forEach(function (t, i) {
+    t.addEventListener("click", function () { selectTab(t.id.slice(2)); });
+    t.addEventListener("keydown", function (e) {
+      var j = e.key === "ArrowRight" ? i + 1 : e.key === "ArrowLeft" ? i - 1 : null;
+      if (j === null) return;
+      e.preventDefault();
+      selectTab(tabs[(j + tabs.length) % tabs.length].id.slice(2), true);
+    });
+  });
+  function setCount(name, n) {
+    var t = $("t-" + name), c = t.querySelector(".count");
+    if (c) c.remove();
+    if (n > 0) { c = document.createElement("span"); c.className = "count"; c.textContent = n; t.appendChild(c); }
+  }
+
+  // ---- mode ----
+  function setMode(native) {
+    nativeOnly = native;
+    $("mode-hybrid").setAttribute("aria-pressed", !native);
+    $("mode-native").setAttribute("aria-pressed", native);
+  }
+  $("mode-hybrid").addEventListener("click", function () { setMode(false); });
+  $("mode-native").addEventListener("click", function () { setMode(true); });
+
+  // ---- highlighting (escape first, then mark tokens) ----
+  function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+  var SPEC = "\\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*__[A-Za-z][A-Za-z0-9_]*\\b";
+  var RULES = {
+    rs: [["c", "//.*"], ["s", '"(?:[^"\\\\]|\\\\.)*"'], ["spec", SPEC], ["k", "\\b(?:fn|let|mut|return|if|else|for|in|while|pub|use|match|unsafe|as|impl|struct|loop|break|continue|const|static|enum|type|where|move|ref|dyn)\\b"], ["m", "\\b\\w+!"], ["n", "\\b\\d[\\d_]*(?:\\.\\d+)?(?:_?[iuf](?:64|32|size|8))?\\b"]],
+    out: [["spec", SPEC], ["ok", "\\bnative\\b|no CPython needed|\\bok\\b"], ["br", "\\bP[0-9]{3}\\b|\\berror\\b|\\bwarning\\b|embeds CPython"]],
+  };
+  function highlight(text, lang) {
+    var rules = RULES[lang];
+    var rx = new RegExp(rules.map(function (r) { return "(" + r[1] + ")"; }).join("|"), "g");
+    return text.split("\n").map(function (line) {
+      if (lang === "out" && /^[A-Z][A-Za-z ]+(\(.*\))?$/.test(line)) return '<span class="t-head">' + esc(line) + "</span>";
+      var out = "", pos = 0, m;
+      rx.lastIndex = 0;
+      while ((m = rx.exec(line)) !== null) {
+        if (m[0] === "") { rx.lastIndex++; continue; }
+        var g = 1; while (m[g] === undefined) g++;
+        out += esc(line.slice(pos, m.index)) + '<span class="t-' + rules[g - 1][0] + '">' + esc(m[0]) + "</span>";
+        pos = m.index + m[0].length;
+      }
+      return out + esc(line.slice(pos));
+    }).join("\n");
+  }
+
+  // ---- the worker ----
+  var worker = null, nextId = 1, pending = {}, streamTo = null;
+  function startWorker() {
+    worker = new Worker("play-worker.js");
+    worker.onmessage = function (e) {
+      var d = e.data, p = pending[d.id];
+      if (d.type === "stream") { if (streamTo) streamTo(d.stream, d.text); return; }
+      if (!p) return;
+      delete pending[d.id];
+      if (d.type === "error") p.reject(new Error(d.message)); else p.resolve(d.result);
+    };
+    worker.onerror = function (e) {
+      Object.keys(pending).forEach(function (k) { pending[k].reject(new Error(e.message || "worker error")); delete pending[k]; });
+    };
+  }
+  function call(cmd, extra) {
+    var id = nextId++;
+    var msg = Object.assign({ id: id, cmd: cmd }, extra || {});
+    return new Promise(function (resolve, reject) { pending[id] = { resolve: resolve, reject: reject }; worker.postMessage(msg); });
+  }
+
+  var ready = false;
+  function boot() {
+    startWorker();
+    busy(true, "Loading Python and the compiler (about 10 MB the first time)…");
+    return call("init").then(function (info) {
+      ready = true;
+      busy(false, "Ready: pyrock " + info.version + ", CPython " + info.python + " (Pyodide).");
+    }, function (err) {
+      busy(false, "Couldn't load: " + err.message);
+    });
+  }
+  function busy(on, text) {
+    btnCompile.disabled = on; btnRun.disabled = on;
+    status.classList.toggle("busy", on);
+    if (text !== undefined) status.textContent = text;
+  }
+
+  // ---- compile ----
+  function showCompile(r) {
+    var check = r.check.replace(/\n+$/, "");
+    $("check").innerHTML = check ? highlight(check, "out") : '<span class="empty">No diagnostics.</span>';
+    $("explain").innerHTML = r.explain ? highlight(r.explain.replace(/\n+$/, ""), "out") : '<span class="empty">Nothing to explain: the program has errors before inference (see Check).</span>';
+    $("rust").innerHTML = r.rust ? highlight(r.rust, "rs") : '<span class="empty">No Rust is generated while there are errors (see Check).</span>';
+    var errs = (r.check.match(/ error: /g) || []).length;
+    setCount("check", errs);
+  }
+  function summary(r) {
+    var mode = nativeOnly ? "native-only" : "hybrid";
+    if (!r.ok) {
+      var n = (r.check.match(/ error: /g) || []).length;
+      return { ok: false, html: "<strong>pyrock check (" + mode + "): " + (n || "an") + " error" + (n === 1 ? "" : "s") + ".</strong> The compiled program wouldn't build; see Check. The output below is CPython's." };
+    }
+    var line = (r.check.match(/main\.py: ok \(.*\) — (.*)/) || [])[1] || "";
+    var rt = r.uses_python ? "It embeds CPython for the lines listed in Explain." : "It needs no CPython at all.";
+    return { ok: true, html: "<strong>pyrock check (" + mode + "): ok.</strong> " + esc(line) + ". " + rt };
+  }
+  function compile(src) {
+    return call("compile", { src: src === undefined ? code.value : src, nativeOnly: nativeOnly }).then(function (r) { showCompile(r); return r; });
+  }
+
+  btnCompile.addEventListener("click", function () {
+    if (!ready) return;
+    busy(true, "Compiling…");
+    var t0 = performance.now();
+    compile().then(function (r) {
+      busy(false, (r.ok ? "Compiled" : "Compile errors") + " in " + Math.round(performance.now() - t0) + " ms.");
+      selectTab(r.ok ? "rust" : "check");
+    }, function (err) { busy(false, "Compiler error: " + err.message); });
+  });
+
+  // ---- pictures: what the program prints, drawn ----
+  // SVG or HTML is rendered in a sandboxed frame; several SVGs in a row, or
+  // "P3" (plain PPM) images, play as frames. It's all ordinary text output, so
+  // a program compiled by pyrock prints exactly the same pictures.
+  var preview = $("preview"), stage = $("pv-stage"), player = $("pv-player");
+  var anim = { frames: [], i: 0, playing: false, raf: 0, last: 0, urls: [] };
+
+  function clearPreview() {
+    cancelAnimationFrame(anim.raf);
+    anim.urls.forEach(function (u) { URL.revokeObjectURL(u); });
+    anim = { frames: [], i: 0, playing: false, raf: 0, last: 0, urls: [] };
+    stage.textContent = "";
+    $("pv-count").textContent = "";
+    $("pv-kind").textContent = "";
+    preview.hidden = true;
+    player.hidden = true;
+    $("output").hidden = false;
+  }
+
+  function parsePPM(text) {
+    var t = text.replace(/#[^\n]*/g, "").split(/\s+/).filter(Boolean), i = 0, frames = [];
+    while (i + 3 < t.length && t[i] === "P3") {
+      var w = +t[i + 1], h = +t[i + 2], max = +t[i + 3];
+      if (!(w > 0 && h > 0 && max > 0 && w * h <= 4000000 && Number.isInteger(w) && Number.isInteger(h))) break;
+      i += 4;
+      if (i + w * h * 3 > t.length) break; // an incomplete image (stopped early)
+      var img = new ImageData(w, h), d = img.data, k = 255 / max;
+      for (var p = 0; p < w * h; p++) {
+        d[p * 4] = t[i++] * k; d[p * 4 + 1] = t[i++] * k; d[p * 4 + 2] = t[i++] * k; d[p * 4 + 3] = 255;
+      }
+      frames.push(img);
+    }
+    return frames;
+  }
+
+  function showFrame(n) {
+    anim.i = n;
+    anim.frames[n]();
+    $("pv-frame").value = n;
+    $("pv-count").textContent = (n + 1) + " / " + anim.frames.length;
+  }
+  function tick(now) {
+    if (!anim.playing) return;
+    if (now - anim.last >= 1000 / +$("pv-fps").value) {
+      anim.last = now;
+      showFrame((anim.i + 1) % anim.frames.length);
+    }
+    anim.raf = requestAnimationFrame(tick);
+  }
+  function setPlaying(on) {
+    anim.playing = on;
+    $("pv-play").textContent = on ? "Pause" : "Play";
+    cancelAnimationFrame(anim.raf);
+    if (on) anim.raf = requestAnimationFrame(tick);
+  }
+  $("pv-play").addEventListener("click", function () { setPlaying(!anim.playing); });
+  $("pv-frame").addEventListener("input", function (e) { setPlaying(false); showFrame(+e.target.value); });
+
+  function setView(picture) {
+    $("view-picture").setAttribute("aria-pressed", picture);
+    $("view-text").setAttribute("aria-pressed", !picture);
+    stage.hidden = !picture;
+    player.hidden = !picture || anim.frames.length < 2;
+    $("output").hidden = picture;
+  }
+  $("view-picture").addEventListener("click", function () { setView(true); });
+  $("view-text").addEventListener("click", function () { setView(false); });
+
+  function renderPreview(out) {
+    var t = out.trim(), kind = null;
+    if (/^P3\s/.test(t)) {
+      var imgs = parsePPM(t);
+      if (imgs.length) {
+        var w = imgs[0].width, h = imgs[0].height, scale = Math.max(1, Math.floor(480 / Math.max(w, h)));
+        var cv = document.createElement("canvas");
+        cv.width = w; cv.height = h; cv.className = "pixels";
+        cv.style.width = w * scale + "px";
+        cv.setAttribute("role", "img");
+        cv.setAttribute("aria-label", "Image printed by the program");
+        var ctx = cv.getContext("2d");
+        stage.appendChild(cv);
+        anim.frames = imgs.map(function (img) {
+          return function () {
+            if (cv.width !== img.width || cv.height !== img.height) { cv.width = img.width; cv.height = img.height; }
+            ctx.putImageData(img, 0, 0);
+          };
+        });
+        kind = imgs.length > 1 ? "Animation: " + imgs.length + " PPM frames, " + w + " × " + h : "Image: " + w + " × " + h + " PPM";
+      }
+    } else if (/^<svg[\s>]/i.test(t) && (t.match(/<svg[\s>]/gi) || []).length > 1) {
+      var svgs = t.match(/<svg[\s>][\s\S]*?<\/svg>/gi) || [];
+      var img = document.createElement("img");
+      img.alt = "Animation printed by the program";
+      stage.appendChild(img);
+      anim.frames = svgs.map(function (s) {
+        if (!/xmlns=/.test(s.slice(0, 200))) s = s.replace(/^<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+        var url = URL.createObjectURL(new Blob([s], { type: "image/svg+xml" }));
+        anim.urls.push(url);
+        return function () { img.src = url; };
+      });
+      kind = "Animation: " + svgs.length + " SVG frames";
+    } else if (/^<svg[\s>]/i.test(t) && /<\/svg>$/i.test(t)) {
+      var one = /xmlns=/.test(t.slice(0, 200)) ? t : t.replace(/^<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+      var u = URL.createObjectURL(new Blob([one], { type: "image/svg+xml" }));
+      anim.urls.push(u);
+      var pic = document.createElement("img");
+      pic.alt = "Picture printed by the program";
+      pic.src = u;
+      stage.appendChild(pic);
+      kind = "SVG";
+    } else if (/^</.test(t) && />$/.test(t)) {
+      // The program's HTML runs in an isolated frame: scripts may run, but the
+      // frame has its own opaque origin and can't touch this page.
+      var frame = document.createElement("iframe");
+      frame.setAttribute("sandbox", "allow-scripts");
+      frame.setAttribute("title", "HTML printed by the program");
+      frame.srcdoc = t;
+      stage.appendChild(frame);
+      kind = "HTML";
+    }
+    if (!kind) return;
+    $("pv-kind").textContent = kind;
+    preview.hidden = false;
+    if (anim.frames.length) {
+      $("pv-frame").max = anim.frames.length - 1;
+      showFrame(0);
+      if (anim.frames.length > 1) setPlaying(true);
+    }
+    setView(true);
+  }
+
+  // ---- run ----
+  // An unchanged example runs as the program pyrock compiled from it (built
+  // with the site: site/examples/<name>.wasm, listed in compiled.json), then
+  // in CPython for comparison. Anything else runs in CPython only.
+  var compiled = {}, current = null; // current: { file, text } of the loaded example
+  fetch("examples/compiled.json").then(function (r) { return r.ok ? r.json() : {}; }).then(function (m) { compiled = m; showRunKind(); }, function () {});
+  function runKind() {
+    if (!current || code.value !== current.text) return { edited: true };
+    var c = compiled[current.file] || {};
+    return c.wasm ? { wasm: c.wasm, note: c.note } : { why: c.why || "This example has no browser build." };
+  }
+  function showRunKind() {
+    var k = runKind(), el = $("run-kind");
+    el.classList.toggle("compiled", !!k.wasm);
+    el.textContent = k.wasm ? "Run: pyrock's compiled build, then CPython" : k.edited ? "Run: CPython (edited code)" : "Run: CPython";
+  }
+  code.addEventListener("input", showRunKind);
+  $("banner").addEventListener("click", function (e) {
+    if (!e.target.closest("[data-restore]") || !current) return;
+    setCode(current.text);
+    showRunKind();
+    run();
+  });
+
+  function fmtMs(ms) { return ms >= 1000 ? (ms / 1000).toFixed(2) + " s" : ms >= 100 ? Math.round(ms) + " ms" : ms.toFixed(1) + " ms"; }
+  function race(rockMs, pyMs, verdict) {
+    var max = Math.max(rockMs, pyMs || rockMs);
+    var lane = function (cls, who, sub, ms) {
+      var w = ms == null ? 0 : Math.max(0.5, ms / max * 100);
+      return '<span class="who ' + cls + '">' + who + "<small>" + sub + "</small></span>" +
+        '<span class="track ' + cls + '"><i style="width:' + w + '%"></i></span>' +
+        '<span class="ms">' + (ms == null ? '<span class="working">running…</span>' : fmtMs(ms)) + "</span>";
+    };
+    return '<div class="race" aria-live="polite">' +
+      lane("rock", "pyrock", "compiled, as WebAssembly", rockMs) +
+      lane("py", "CPython", "Pyodide, as WebAssembly", pyMs) +
+      (verdict ? '<p class="verdict">' + verdict + "</p>" : "") + "</div>";
+  }
+
+  var TEXT_LIMIT = 200000; // characters of output kept on screen in the text view
+  function run() {
+    if (!ready) return;
+    busy(true, "Compiling…");
+    // One snapshot of the source for every step, so an example that finishes
+    // loading meanwhile can't swap the code between them.
+    var out = $("output"), kind = runKind(), src = code.value;
+    compile(src).then(function (r) {
+      var s = summary(r);
+      var banner = $("banner");
+      banner.innerHTML = '<div class="banner ' + (s.ok ? "ok" : "bad") + '">' + s.html + "</div>";
+      clearPreview();
+      out.textContent = "";
+      selectTab("output");
+      var stdout = "", shown = 0, clipped = false;
+      streamTo = function (stream, text) {
+        if (stream === "stdout") stdout += text;
+        if (shown >= TEXT_LIMIT) {
+          if (!clipped) { clipped = true; out.appendChild(document.createTextNode("\n[… more output, not shown here]\n")); }
+          return;
+        }
+        var span = document.createElement("span");
+        if (stream === "stderr") span.className = "stderr";
+        span.textContent = text.slice(0, TEXT_LIMIT - shown);
+        shown += text.length;
+        out.appendChild(span);
+      };
+      var exitLine = function (text) {
+        var end = document.createElement("span");
+        end.className = "exit";
+        end.textContent = (out.textContent && !/\n$/.test(out.textContent) ? "\n" : "") + "\n" + text;
+        out.appendChild(end);
+      };
+      btnStop.hidden = false;
+
+      if (kind.wasm) {
+        var strip = document.createElement("div");
+        banner.appendChild(strip);
+        busy(true, "Running the program pyrock compiled…");
+        return call("run-compiled", { file: kind.wasm }).then(function (res) {
+          streamTo = null;
+          exitLine("[exit status " + res.status + " after " + fmtMs(res.ms) + ": the program pyrock compiled from this source]");
+          renderPreview(stdout);
+          strip.innerHTML = race(res.ms, null, null);
+          busy(true, "Running the same source in CPython to compare…");
+          return call("run", { src: src, capture: true }).then(function (py) {
+            var same = py.stdout === stdout && py.status === res.status;
+            var ratio = py.ms / Math.max(res.ms, 0.05);
+            var speed = ratio >= 1.05 ? "<strong>" + ratio.toFixed(1) + "x faster than CPython</strong>" : ratio > 0.95 ? "<strong>About as fast as CPython</strong>" : "<strong>" + (1 / ratio).toFixed(1) + "x slower than CPython</strong>";
+            var outNote = same ? ", with the same output." : '. <span class="diff">The outputs differ' + (kind.note ? ": " + esc(kind.note) : ".") + "</span>";
+            strip.innerHTML = race(res.ms, py.ms, speed + outNote + (ratio >= 1.05 && res.ms < 5 ? " A run this short is mostly start-up; the bigger programs show the difference better." : ""));
+            busy(false, "Done.");
+          });
+        });
+      }
+
+      var why = kind.edited
+        ? "You changed the code, so Run uses CPython: building a program needs Rust's compiler, which doesn't run in a browser. Compile still shows what pyrock makes of it (see Rust)." +
+          (current ? ' <button type="button" class="restore" data-restore>Restore the example</button> to run pyrock\'s build of it.' : "")
+        : esc(kind.why);
+      banner.insertAdjacentHTML("beforeend", '<div class="banner bad">' + why + "</div>");
+      busy(true, "Running in CPython (Pyodide)…");
+      return call("run", { src: src }).then(function (res) {
+        exitLine("[exit status " + res.status + ", " + fmtMs(res.ms) + " in CPython]");
+        renderPreview(stdout);
+        busy(false, "Done.");
+      });
+    }).catch(function (err) {
+      busy(false, "Error: " + err.message);
+    }).then(function () { btnStop.hidden = true; streamTo = null; });
+  }
+  btnRun.addEventListener("click", run);
+  btnStop.addEventListener("click", function () {
+    worker.terminate();
+    Object.keys(pending).forEach(function (k) { pending[k].reject(new Error("stopped")); delete pending[k]; });
+    btnStop.hidden = true;
+    var end = document.createElement("span");
+    end.className = "exit";
+    end.textContent = "\n[stopped]";
+    $("output").appendChild(end);
+    ready = false;
+    boot();
+  });
+
+  // ---- editor: Python highlighting under a transparent textarea ----
+  var PY_KEYWORDS = new Set(("False None True and as assert async await break case class continue def del elif else " +
+    "except finally for from global if import in is lambda match nonlocal not or pass raise return try type while with yield").split(" "));
+  var PY_BUILTINS = new Set(("abs all any ascii bin bool breakpoint bytearray bytes callable chr classmethod compile complex " +
+    "delattr dict dir divmod enumerate eval exec filter float format frozenset getattr globals hasattr hash help hex id " +
+    "input int isinstance issubclass iter len list locals map max memoryview min next object oct open ord pow print " +
+    "property range repr reversed round set setattr slice sorted staticmethod str sum super tuple vars zip " +
+    "BaseException Exception ValueError TypeError KeyError IndexError RuntimeError StopIteration ZeroDivisionError " +
+    "AttributeError NotImplementedError OverflowError AssertionError ImportError OSError NotImplemented").split(" "));
+  // Order matters: comments and strings first, so their contents aren't tokenized.
+  // Names are consumed whole, so a string prefix or a number is only tried where
+  // a name could start (no lookbehind, which older Safari can't parse).
+  var PY_TOKEN = new RegExp([
+    "(#[^\\n]*)",                                                          // 1 comment
+    "((?:[rRbBuUfF]{1,2})?(?:\"\"\"[\\s\\S]*?(?:\"\"\"|$)|'''[\\s\\S]*?(?:'''|$)" +
+      "|\"(?:[^\"\\\\\\n]|\\\\.)*\"?|'(?:[^'\\\\\\n]|\\\\.)*'?))",         // 2 string (unterminated: to end of line/text)
+    "(@[A-Za-z_][\\w.]*)",                                                 // 3 decorator (checked below)
+    "((?:0[xX][0-9a-fA-F_]+|0[oO][0-7_]+|0[bB][01_]+|(?:\\d[\\d_]*\\.?[\\d_]*|\\.\\d[\\d_]*)(?:[eE][+-]?\\d+)?[jJ]?))", // 4 number
+    "([A-Za-z_]\\w*)",                                                     // 5 name
+  ].join("|"), "g");
+  function esc2(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+  function highlightPython(src) {
+    var out = "", pos = 0, m, prevWord = "";
+    PY_TOKEN.lastIndex = 0;
+    while ((m = PY_TOKEN.exec(src)) !== null) {
+      if (m[0] === "") { PY_TOKEN.lastIndex++; continue; }
+      var cls = null;
+      if (m[1]) cls = "p-c";
+      else if (m[2]) cls = "p-s";
+      else if (m[3]) cls = /(^|\n)[ \t]*$/.test(src.slice(Math.max(0, m.index - 200), m.index)) ? "p-d" : null; // `@` starting a line; otherwise matrix multiply
+      else if (m[4] && src[m.index - 1] === ".") cls = null; // `x.5` is not Python; keep attribute-like text plain
+      else if (m[4]) cls = "p-n";
+      else if (m[5]) {
+        var w = m[5];
+        if (prevWord === "def" || prevWord === "class") cls = "p-f";
+        else if (PY_KEYWORDS.has(w)) cls = "p-k";
+        else if (w === "self" || w === "cls") cls = "p-self";
+        else if (PY_BUILTINS.has(w) && src[m.index - 1] !== ".") cls = "p-b";
+        prevWord = w;
+      }
+      if (!m[5]) prevWord = "";
+      out += esc2(src.slice(pos, m.index)) + (cls ? '<span class="' + cls + '">' + esc2(m[0]) + "</span>" : esc2(m[0]));
+      pos = m.index + m[0].length;
+    }
+    out += esc2(src.slice(pos));
+    // A trailing newline needs a following character, or the last empty line has no height.
+    return out + (src.endsWith("\n") || src === "" ? " " : "");
+  }
+  var hl = $("hl"), hlPre = hl.parentNode;
+  function paint() {
+    hl.innerHTML = highlightPython(code.value);
+    syncScroll();
+  }
+  function syncScroll() {
+    hlPre.scrollTop = code.scrollTop;
+    hlPre.scrollLeft = code.scrollLeft;
+  }
+  code.addEventListener("input", paint);
+  code.addEventListener("scroll", syncScroll);
+
+  code.addEventListener("keydown", function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); run(); return; }
+    if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      var a = code.selectionStart, b = code.selectionEnd;
+      code.setRangeText("    ", a, b, "end");
+      paint();
+    }
+  });
+
+  function setCode(text) {
+    code.value = text;
+    code.scrollTop = 0;
+    paint();
+  }
+  var exampleCache = {};
+  function fetchExample(file) {
+    if (!exampleCache[file]) {
+      exampleCache[file] = fetch("examples/" + file).then(function (r) {
+        if (!r.ok) throw new Error(file + ": HTTP " + r.status);
+        return r.text();
+      });
+    }
+    return exampleCache[file];
+  }
+  var loading = 0; // only the latest load may fill the editor
+  function load(file) {
+    $("example").value = file;
+    var mine = ++loading;
+    return fetchExample(file).then(function (text) {
+      if (mine !== loading) return;
+      var lines = text.split("\n"), native = false;
+      while (lines.length && /^# (mode|expect):/.test(lines[0])) {
+        if (/^# mode: native-only/.test(lines[0])) native = true;
+        lines.shift();
+      }
+      current = { file: file, text: lines.join("\n") };
+      setCode(current.text);
+      setMode(native);
+      showRunKind();
+    }, function (err) { status.textContent = "Couldn't load the example: " + err.message; });
+  }
+  (function fillExamples() {
+    var sel = $("example"), groups = {};
+    EXAMPLES.forEach(function (ex) {
+      if (!groups[ex.group]) {
+        groups[ex.group] = document.createElement("optgroup");
+        groups[ex.group].label = ex.group;
+        sel.appendChild(groups[ex.group]);
+      }
+      var o = document.createElement("option");
+      o.value = ex.file;
+      o.textContent = ex.title;
+      groups[ex.group].appendChild(o);
+    });
+  })();
+  $("example").addEventListener("change", function (e) { load(e.target.value); });
+
+  // ---- links: #code=<base64url>&mode=native ----
+  function b64(s) {
+    var bytes = new TextEncoder().encode(s), bin = "";
+    bytes.forEach(function (x) { bin += String.fromCharCode(x); });
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function unb64(s) {
+    var bin = atob(s.replace(/-/g, "+").replace(/_/g, "/"));
+    return new TextDecoder().decode(Uint8Array.from(bin, function (c) { return c.charCodeAt(0); }));
+  }
+  $("share").addEventListener("click", function () {
+    var url = location.href.split("#")[0] + "#code=" + b64(code.value) + (nativeOnly ? "&mode=native" : "");
+    history.replaceState(null, "", url);
+    var btn = $("share");
+    navigator.clipboard.writeText(url).then(function () {
+      btn.textContent = "Link copied";
+    }, function () {
+      btn.textContent = "Link in address bar";
+    }).then(function () { setTimeout(function () { btn.textContent = "Copy link"; }, 1800); });
+  });
+
+  var params = new URLSearchParams(location.hash.slice(1));
+  if (params.get("code")) {
+    try { setCode(unb64(params.get("code"))); setMode(params.get("mode") === "native"); showRunKind(); }
+    catch (e) { load(EXAMPLES[0].file); }
+  } else {
+    load(EXAMPLES[0].file);
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>
